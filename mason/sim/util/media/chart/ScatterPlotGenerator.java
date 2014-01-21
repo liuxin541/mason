@@ -74,7 +74,7 @@ public class ScatterPlotGenerator extends XYChartGenerator
         for(int i=0; i < sa.length; i++)
             {
             ScatterPlotSeriesAttributes attributes = (ScatterPlotSeriesAttributes)(sa[i]);
-            dataset.addSeries(attributes.getSeriesName(), attributes.getValues());
+            dataset.addSeries(new UniqueString(attributes.getSeriesName()), attributes.getValues());
             }
 
         setSeriesDataset(dataset);
@@ -84,7 +84,7 @@ public class ScatterPlotGenerator extends XYChartGenerator
         {
         DefaultXYDataset dataset = (DefaultXYDataset)(getSeriesDataset());
         int i = dataset.getSeriesCount();
-        dataset.addSeries(name, values);
+        dataset.addSeries(new UniqueString(name), values);
                 
         // need to have added the dataset BEFORE calling this since it'll try to change the name of the series
         ScatterPlotSeriesAttributes csa = new ScatterPlotSeriesAttributes(this, name, i, values, stopper);
