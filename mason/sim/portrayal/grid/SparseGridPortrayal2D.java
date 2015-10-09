@@ -57,6 +57,12 @@ public class SparseGridPortrayal2D extends FieldPortrayal2D
         return defaultPortrayal;
         }
 
+    // lets ContinuousPortrayal3D set the field
+    void setFieldBypass(Object field)
+        {
+        super.setField(field);
+        }
+
     public void setField(Object field)
         {
         if (field instanceof SparseGrid2D ) super.setField(field);
