@@ -72,7 +72,7 @@ public class DenseGridPortrayal2D extends ObjectGridPortrayal2D
                 for(int y = 0; y < maxY; y++)
                     {
                     Bag objects = (Bag)(fieldx[y]);
-                    if (objects == null) continue;
+                    if (objects == null || objects.size()==0) continue;
                     for(int i=0;i<objects.numObjs;i++)
                         if (objects.objs[i] == object)  // found it!
                             return new Int2D(x,y);
@@ -128,7 +128,7 @@ public class DenseGridPortrayal2D extends ObjectGridPortrayal2D
                 {
                 Bag objects = field.field[x][y];
                                 
-                if (objects == null) continue;
+                if (objects == null || objects.size()==0) continue;
 
                 if (policy != null & graphics != null)
                     {
