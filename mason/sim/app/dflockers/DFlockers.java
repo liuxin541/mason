@@ -8,6 +8,7 @@ package sim.app.dflockers;
 import sim.engine.*;
 import sim.util.*;
 import sim.field.continuous.*;
+import sim.field.*;
 
 import mpi.*;
 import java.nio.*;
@@ -29,6 +30,8 @@ public class DFlockers extends SimState {
     public double deadFlockerProbability = 0.1;
     public double neighborhood = 10;
     public double jump = 0.7;  // how far do we move in a timestep?
+
+    DUniformPartition partition;
 
     public double getCohesion() { return cohesion; }
     public void setCohesion(double val) { if (val >= 0.0) cohesion = val; }
@@ -81,81 +84,41 @@ public class DFlockers extends SimState {
     public void start() {
         super.start();
 
+        partition = new DUniformPartition(new int[] {(int)width, (int)height});
         // set up the flockers field.  It looks like a discretization
         // of about neighborhood / 1.5 is close to optimal for us.  Hmph,
         // that's 16 hash lookups! I would have guessed that
         // neighborhood * 2 (which is about 4 lookups on average)
         // would be optimal.  Go figure.
-        flockers = new DContinuous2D(neighborhood / 1.5, width, height, pw, ph, neighborhood);
+        flockers = new DContinuous2D(neighborhood / 1.5, width, height, neighborhood, partition, this);
 
         // make a bunch of flockers and schedule 'em.  A few will be dead
         for (int x = 0; x < numFlockers / (pw * ph); x++) {
-            Double2D location = new Double2D((random.nextDouble() + flockers.px) * flockers.cell_width, (random.nextDouble() + flockers.py) * flockers.cell_height);
+            Double2D location = new Double2D((random.nextDouble() + partition.coords[0]) * flockers.f.lsize[0], (random.nextDouble() + partition.coords[1]) * flockers.f.lsize[1]);
             DFlocker flocker = new DFlocker(location);
             if (random.nextBoolean(deadFlockerProbability))
                 flocker.dead = true;
             flockers.setObjectLocation(flocker, location);
-            flocker.flockers = flockers;
-            flocker.theFlock = this;
-            schedule.scheduleOnce(flocker, 0);
+            schedule.scheduleOnce(flocker, 1);
         }
 
-        schedule.scheduleRepeating(Schedule.EPOCH, 1, new Synchronizer(), 1);
-
-        Receiver r = new Receiver(this);
-        r.start();
+        schedule.scheduleRepeating(Schedule.EPOCH, 2, new Synchronizer(), 1);
     }
 
     public static void main(String[] args) throws MPIException {
-        MPI.InitThread(args, MPI.THREAD_MULTIPLE);
-        int np = MPI.COMM_WORLD.getSize();
-        pw = (int)Math.sqrt((double)np);
-        ph = pw;
+        MPI.Init(args);
         doLoop(DFlockers.class, args);
         MPI.Finalize();
         System.exit(0);
-    }
-
-    private class Receiver extends Thread {
-
-        DFlockers theFlock;
-
-        public Receiver(DFlockers theFlock) {
-            this.theFlock = theFlock;
-        }
-
-        @Override
-        public void run() {
-            while (true) {
-                DoubleBuffer data = MPI.newDoubleBuffer(3);
-                try {
-                    MPI.COMM_WORLD.recv(data, 3, MPI.DOUBLE, MPI.ANY_SOURCE, MPI.ANY_TAG);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    System.exit(-1);
-                }
-                Double2D loc = new Double2D(data.get(0), data.get(1));
-                if (!theFlock.flockers.isPrivate(loc)) {
-                    System.out.printf("PID %d invalid incoming flocker (%g, %g) from %g should be %d\n", theFlock.flockers.pid, loc.x, loc.y, data.get(2), theFlock.flockers.toNeighborRank(loc));
-                    System.out.printf("cw %g ch %g pw %d ph %d px %d py %d\n", theFlock.flockers.cell_width, theFlock.flockers.cell_height, theFlock.flockers.pw, theFlock.flockers.ph, theFlock.flockers.px, theFlock.flockers.py);
-                }
-                DFlocker f = new DFlocker(loc);
-                f.flockers = theFlock.flockers;
-                f.theFlock = theFlock;
-                theFlock.flockers.setObjectLocation(f, loc);
-                theFlock.schedule.scheduleOnce(f, 0);
-            }
-        }
     }
 
     private class Synchronizer implements Steppable {
         private static final long serialVersionUID = 1;
 
         public void step(SimState state) {
-            flockers.sync();
-            //long steps = schedule.getSteps();
             try {
-                MPI.COMM_WORLD.barrier();
+                System.out.println("Here1");
+                flockers.sync();
             } catch(Exception e) {
                 e.printStackTrace();
                 System.exit(-1);
