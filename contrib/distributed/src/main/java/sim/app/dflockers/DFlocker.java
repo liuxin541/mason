@@ -6,6 +6,7 @@
 
 package sim.app.dflockers;
 
+import java.rmi.Remote;
 import java.util.List;
 
 import ec.util.MersenneTwisterFast;
@@ -14,7 +15,7 @@ import sim.engine.SimState;
 import sim.field.continuous.DContinuous2D;
 import sim.field.partitioning.DoublePoint;
 
-public class DFlocker extends AbstractStopping implements sim.portrayal.Orientable2D {
+public class DFlocker extends AbstractStopping implements sim.portrayal.Orientable2D, Remote {
 	private static final long serialVersionUID = 1;
 	public DoublePoint loc;
 	public DoublePoint lastd = new DoublePoint(0, 0);
