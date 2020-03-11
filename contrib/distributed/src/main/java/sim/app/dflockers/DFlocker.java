@@ -142,6 +142,8 @@ public class DFlocker extends AbstractStopping implements Remote {
 	public void step(final SimState state) {
 		final DFlockers dFlockers = (DFlockers) state;
 		
+		dFlockers.idLocal.add(this.id);
+		
 		final DoublePoint oldloc = loc;
 
 		if (dead)
@@ -181,27 +183,6 @@ public class DFlocker extends AbstractStopping implements Remote {
 			System.err.println("error on agent "+this+ " in step "+dFlockers.schedule.getSteps()+ "on pid "+dFlockers.getPartitioning().pid);
 			System.exit(1);
 		}
-		
-		
-		
-//		try {
-//			final int dst = dFlockers.partition.toPartitionId(new double[] { loc.c[0], loc.c[1] });
-//			if (dst != dFlockers.partition.getPid()) {
-//				// Need to migrate to other partition,
-//				// remove from current partition
-//				dFlockers.flockers.remove(this);
-//				// TODO: Abstract away the migration from the model
-//				dFlockers.transporter.migrateAgent(this, dst, loc, dFlockers.flockers.fieldIndex);
-//			} else {
-//				// Set to new location in current partition
-//				// TODO: to use moveAgent in the future
-//				dFlockers.flockers.move(old, loc, this);
-//				dFlockers.schedule.scheduleOnce(this, 1);
-//			}
-//		} catch (final Exception e) {
-//			e.printStackTrace(System.out);
-//			System.exit(-1);
-//		}
 	}
 	
 	@Override
@@ -227,7 +208,7 @@ public class DFlocker extends AbstractStopping implements Remote {
 	@Override
 	public String toString() {
 		// TODO Auto-generated method stub
-		return "{ "+this.getClass()+"@"+Integer.toHexString(hashCode())+" [ id: "+this.id+" loc: "+loc+"]}";
+		return "{ "+this.getClass()+"@"+Integer.toHexString(hashCode())+" id: "+this.id+"}";
 	}
 	
 }
