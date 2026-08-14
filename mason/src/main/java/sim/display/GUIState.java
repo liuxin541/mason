@@ -70,39 +70,42 @@ import java.util.*;
 
 public abstract class GUIState
     {
-    /** An additional random number generator available for GUI and drawing purposes,
-        separate from the one used in the model.  If you use this generator to do things
-        like specify the colors of agents on-screen, rather than use the model's generator,
-        you can guarantee identical simulation results with the model regardless of whether
-        it runs under the model or the GUI.   Also, unlike state.random, using guirandom
-        doesn't require synchronizing on state.schedule first. */
-    public MersenneTwisterFast guirandom = new MersenneTwisterFast();
+    /**提供一个额外的随机数生成器，专用于图形用户界面（GUI）和绘图场景，
+     与模型中使用的随机数生成器相互独立。若你使用该生成器完成
+     诸如指定屏幕上智能体颜色这类操作，而非使用模型自带的生成器，
+     即可保证无论程序是在模型模式还是图形界面模式下运行，
+     模型都能得到完全一致的仿真结果。
+     此外，与 state.random 不同，使用 guirandom
+     无需先基于 state.schedule 进行同步操作。 */
+    public MersenneTwisterFast guirandom = new MersenneTwisterFast();  //  新定义一个随机数生成器
         
-    /** The underlying SimState */
+    /**  基础 SimState 实例 */
     public SimState state;
     
-    /** The controller for the GUIState.  This field may be null if there is no controller
-        or no controller YET */
+    /** GUIState 的控制器。如果不存在控制器，或暂未创建控制器，该字段值可能为 null。 */
     public Controller controller;
 
+    /**storage 是 GUIState 给你预留的一个「通用临时数据盒子」，
+     专门用来存和仿真核心无关、但 GUI 界面需要用到的临时数据  ，
+     不污染 SimState，也不会被序列化保存。 */
     public HashMap storage = new HashMap();
 
-    /** Override this constructor in your subclass to call <code>super(state)</code> where state is a
-        properly constructed SimState appropriate to your problem -- do NOT call <code>super()</code>*/
+    /** 请在你的子类中重写此构造方法，调用 <code>super(state)</code>
+     （其中 state 是为你的问题场景正确构建好的 SimState 实例）
+     切勿调用 <code>super()</code>。*/
     private GUIState()
         {
         }
     
-    /** You may optionally override this constructor to call <code>super(state)</code> but you should
-        be sure to override the no-argument GUIState() constructor as stipulated. */
+    /** 你可以选择重写此构造方法来调用 <code>super(state)</code>，
+        但必须按照规定，重写无参的 GUIState () 构造方法。 */
     public GUIState(SimState state)
         {
         this.state = state;
-        resetQueues();
+        resetQueues();  //  初始化清理方法
         }
                 
-    /** Returns the short name of the class.  If the Class is foo.bar.baz.Quux, then Quux
-        is returned. */
+    /** 返回类的短名称。如果类的完整路径是 foo.bar.baz.Quux，则返回 Quux。 */
     public static String getTruncatedName(Class theClass)
         {
         // do the default
@@ -112,9 +115,10 @@ public abstract class GUIState
         return fullName.substring(lastPeriod + 1);  // nifty, works even if lastPeriod = -1
         }
     
-    /** Call this method to get the simulation name for any class.  If a class does not implement
-        getName(), then the fully qualified classname is used instead.  To provide a descriptive
-        name for your class, override getName(). */
+    /** 调用此方法可获取任意类的仿真名称。
+        如果某个类未实现 getName () 方法，
+        则会使用该类的全限定类名作为替代。
+        若要为你的类提供一个易懂的描述性名称，请重写 getName () 方法。 */
                 
     public final static String getName(Class theClass)
         {
@@ -138,10 +142,9 @@ public abstract class GUIState
             }
         }
         
-    /** Creates and returns a controller ready for the user to manipulate.
-        By default this method creates a Console, sets it visible, and
-        returns it.  You can override this to provide some other kind of
-        controller. */
+    /** 创建并返回一个可供用户操作的控制器（已就绪状态）。
+     默认情况下，该方法会创建一个控制台（Console），设置为可见状态并返回。
+     你可以重写此方法，以提供其他类型的控制器。 */
     public Controller createController()
         {
         Console console = new Console(this);
@@ -163,7 +166,7 @@ public abstract class GUIState
         {
         return "This is GUIState's getName() method.  It probably shouldn't have been called.";
         }
-                
+
     static Object doDefaultInfo(Class theClass)
         {
         java.net.URL url = theClass.getResource("index.html");
@@ -219,18 +222,19 @@ public abstract class GUIState
         return "This is GUIState's getInfo() method.  It probably shouldn't have been called.";
         }
         
-    /** Override this to provide a custom Properties object for your simuation.  This should be
-        very rare: by default returns null.*/
+    /** 重写此方法以向你的仿真提供自定义属性（Properties）对象。
+     该操作应当极为少见：默认情况下此方法返回 null。*/
     public sim.util.Properties getSimulationProperties()
         {
         return null;
         }
-        
+        /** 返回一个数值，限制 GUI 检查器最多能显示多少个属性，防止面板因属性过多而卡顿、溢出。*/
     public int getMaximumPropertiesForInspector() { return SimpleInspector.DEFAULT_MAX_PROPERTIES; }
 
-    /** By default returns a non-volatile Inspector which wraps around
-        getSimulationInspectedObject(); if getSimulationInspectedObject() returns null, then getInspector()
-        will return null also.  Override this to provide a custom inspector as you see fit.  */
+    /** 默认情况下，该方法返回一个非易失性检查器（Inspector），该检查器包装了 getSimulationInspectedObject () 方法的返回对象；
+     如果 getSimulationInspectedObject () 返回 null，那么 getInspector () 也会返回 null。
+     你可以根据需要重写此方法，以提供自定义的检查器。
+     需要个性化界面时才重写。*/
     public Inspector getInspector()
         {
         Object object = getSimulationInspectedObject();
@@ -272,70 +276,71 @@ public abstract class GUIState
         return getInspector().isVolatile();
         }
     
-    /** Called to initialize (display) windows etc. 
-        You can use this to set up the windows, then register them with the Controller so it can manage
-        hiding, showing, and moving them.  The default version of this method simply calls
-        this.controller=controller; */
+    /** 该方法用于初始化（显示）窗口等界面元素。
+     你可以使用此方法创建窗口，并将其注册到控制器（Controller）中，以便控制器管理窗口的隐藏、显示和移动。
+     此方法的默认实现仅执行一行代码：
+     this.controller=controller; */
     public void init(Controller controller)
         {
         this.controller = controller;
         }
     
-    /** Called immediately prior to starting the simulation, or in-between
-        simulation runs.  Ordinarily, you wouldn't need to override this hook. */
+    /** 在仿真即将启动前，或多次仿真运行的间隙，会立即调用此方法。
+        通常情况下，你无需重写这个钩子方法。 */
     boolean started = false;
     public void start()
         {
         started = true;
         state.start();
         
-        // schedule the global inspector if there is one
+        // 如果存在全局检查器（Inspector），则对其进行调度。
         
-        // run the start queue stuff
+        // 执行启动队列中的相关任务
         synchronized(state.schedule)
             {
-            // execute the start queue
+            //  执行启动队列
+            //  先备份，再执行。
             Steppable[] _start2 = start2;
-            System.arraycopy(start,0,start2,0,startSize);
+            System.arraycopy(start,0,start2,0,startSize);  //  把要执行的任务全部搬到安全数组里。
             int _startSize = startSize;
-            startSize = 0;
+            startSize = 0;  //  清空任务队列长度。
             
-            // do the start stuff
+            // 执行启动任务
             for(int x=0;x<_startSize;x++)
                 _start2[x].step(state);
             }
         }
         
         
-    /** Called either at the proper or a premature end to the simulation. 
-        If the user quits the program, this function may not be called.
-        Ordinarily, you wouldn't need to override this hook.  Does nothing
-        if the GUIState hasn't been started or loaded yet. */
+    /** 该方法会在仿真正常结束或提前终止时被调用。
+     如果用户直接退出程序，则该方法可能不会被执行。
+     通常情况下，你无需重写这个钩子方法。
+     若 GUIState 尚未启动或加载，该方法不执行任何操作。 */
     public void finish()
         {
-        if (!started) return;  // no reason to call
+        if (!started) return;  // 无需调用
+
         synchronized(state.schedule)
             {
-            // execute the finish queue
+            // 执行结束队列
             Steppable[] _finish2 = finish2;
             System.arraycopy(finish,0,finish2,0,finishSize);
             int _finishSize = finishSize;
             finishSize = 0;
             
-            // do the finish stuff
+            // 执行结束任务
             for(int x=0;x<_finishSize;x++)
                 _finish2[x].step(state);
             }
 
         state.finish();
-        resetQueues();
+        resetQueues();  //  清空数列
         started = false;
         }
 
-    /** Called by the Console when the user is quitting the SimState.  A good place
-        to stick stuff that you'd ordinarily put in a finalizer -- finalizers are
-        tenuous at best. So here you'd put things like the code that closes the relevant
-        display windows etc.*/
+    /** 当用户退出 ** 仿真状态（SimState）时，控制台会调用此方法。
+     你可以把通常需要放在终结器（finalizer）** 中的逻辑放在这里 —— 因为终结器的可靠性极差。
+     因此，你应该在此处编写关闭相关显示窗口等代码。*/
     public void quit()
         {
         }
@@ -348,29 +353,27 @@ public abstract class GUIState
         return (state != null && state.getClass().equals(this.state.getClass()));
         }
 
-    /** Called by the Console when the user is loading in a new state from a checkpoint.  The
-        new state is passed in as an argument.  You should override this, calling super.load(state) first, 
-        to reset your portrayals etc. to reflect the new state.
-        state.start() will NOT be called.  Thus anything you handled in start() that needs
-        to be reset to accommodate the new state should be handled here.  We recommend that you 
-        call repaint() on any Display2Ds. */
+    /** 当用户从检查点加载新状态时，控制台会调用此方法。新状态会以参数形式传入。
+     你应当重写该方法，且优先调用 super.load(state)，以此重置你的描绘对象等内容，使其适配新状态。
+     state.start() 不会被自动调用。因此，所有你在 start() 中处理、且需要为适配新状态而重置的逻辑，都应当在此方法中实现。
+     我们建议你对所有 Display2D 对象调用 repaint() 方法。 */
     public void load(SimState state)
         {
         this.state = state;
-        started = true;  // just in case
+        started = true;  // 标记仿真已经启动。以防万一
         
-        // schedule the global inspector if there is one
+        // 如果有全局参数面板（Inspector），就安排它显示。
         
-        // run the start queue stuff
+        // 运行启动队列里的任务
         synchronized(state.schedule)
             {
-            // execute the start queue
-            Steppable[] _start2 = start2;
-            System.arraycopy(start,0,start2,0,startSize);
-            int _startSize = startSize;
-            startSize = 0;
+            // 执行启动队列里的所有任务。
+            Steppable[] _start2 = start2;  // 拿一个临时数组 _start2
+            System.arraycopy(start,0,start2,0,startSize);  // 把启动任务列表复制进去
+            int _startSize = startSize;  // 记录任务数量
+            startSize = 0;  // 清空原队列
             
-            // do the start stuff
+            // 循环执行所有 “启动时要运行的任务”
             for(int x=0;x<_startSize;x++)
                 _start2[x].step(state);
             }
@@ -438,31 +441,31 @@ public abstract class GUIState
         resetQueues();
         }
         
-    /** Returns FALSE if nothing was stepped -- the schedule is exhausted or time has run out. */
+    /** 当调度器没有任务可执行，或设定时间用完时，该方法会返回 FALSE。 */
     public boolean step()
         {
-        boolean returnval = false;
+        boolean returnval = false;  //   返回值（函数执行完后返回的结果）
         synchronized(state.schedule)
             {
-            // grab the before and after queues so no one can add to them
-            // while we're using them.
-            Steppable[] _before2 = before2;
-            Steppable[] _after2 = after2;
-            System.arraycopy(before,0,before2,0,beforeSize);
-            System.arraycopy(after,0,after2,0,afterSize);
-            int _beforeSize = beforeSize;
-            int _afterSize = afterSize;
+                // 获取【操作前】和【操作后】的队列，
+                // 确保在我们使用这些队列期间，其他对象无法向其中添加元素。
+            Steppable[] _before2 = before2;  //  保存当前的操作前任务数组，防止后面被覆盖或修改。
+            Steppable[] _after2 = after2;  //  保存当前的操作后任务数组，和上面一样是临时备份。
+            System.arraycopy(before,0,before2,0,beforeSize);  // 将 before 数组的内容复制到 before2 数组
+            System.arraycopy(after,0,after2,0,afterSize);  // 将 after 数组的内容复制到 after2 数组
+            int _beforeSize = beforeSize;  //  记录有多少个前置任务需要执行
+            int _afterSize = afterSize;  //  记录有多少个后置任务需要执行
             afterSize = 0;
-            beforeSize = 0;
+            beforeSize = 0;  //  清空原队列，让新添加的任务从 0 开始计数，不会影响正在执行的任务。
             
-            // do the before stuff first
+            // 先执行【操作前】的相关逻辑
             for(int x=0;x<_beforeSize;x++)
                 _before2[x].step(state);
-            
-            // step the schedule
+
+            // 推进调度器（执行队列中的任务）
             returnval = state.schedule.step(state);
-            
-            // do the after stuff
+
+            // 执行【操作后】的任务
             for(int x=0;x<_afterSize;x++)
                 _after2[x].step(state);
             }

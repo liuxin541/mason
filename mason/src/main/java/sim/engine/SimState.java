@@ -29,59 +29,56 @@ public class SimState implements java.io.Serializable
     {
     private static final long serialVersionUID = 1;
 
-    /** The SimState's random number generator */
+    /** SimState 的随机数生成器 */
     public MersenneTwisterFast random;
     
-    /** SimState's schedule */
+    /** SimState 的调度器 */
     public Schedule schedule;
     
-    // All registered AsynchronousSteppables
+    // 所有已注册的异步步进模块
     HashSet asynchronous = new HashSet();
-    // Lock for accessing the HashSet
+    // 用于访问 HashSet 的锁
     Object asynchronousLock = new boolean[1];  // an array is a unique, serializable object
-    // Are we cleaning house and replacing the HashSet?
+    // 我们正在清理并替换这个 HashSet 吗？
     boolean cleaningAsynchronous = false;
-        
+
+    //内部构造方法
     SimState(long seed, MersenneTwisterFast random, Schedule schedule)
         {
         this.random = random;
         this.schedule = schedule;
-        this.seed = (int) seed;   // force to 32 bits since that's what MTF will be using anyway
+        this.seed = (int) seed;   // 随机种子，强制转换为 32 位，因为无论如何 MTF 都会使用 32 位
         }
 
-    /** Creates a SimState with a new random number generator initialized to the given seed,
-        plus a new, empty schedule. */
+    /** 创建一个 SimState 实例：使用初始化到指定种子的新随机数生成器，外加一个全新的空调度器。 */
+    //传入随机种子
     public SimState(long seed)
         {
         this(seed, new MersenneTwisterFast(seed), new Schedule());
         }
     
-    /** Creates a SimState with the given random number generator and schedule, and
-        sets the seed to a bogus value (0).  This should only be used by SimState 
-        subclasses which need to use an existing random number generator and schedule.
-    */
+    /** 使用指定的随机数生成器和调度器创建一个 SimState 实例，并将种子设置为无效值（0）。此方法仅应被需要使用现有随机数生成器和调度器的 SimState 子类调用。*/
+    //传入随机数生成器和调度器，随机种子无效
     protected SimState(MersenneTwisterFast random, Schedule schedule)
         {
         this(0, random, schedule);  // 0 is a bogus value.  In fact, MT can't have 0 as its seed value.
         }
                 
-    /** Creates a SimState with the schedule, creating a new random number generator.
-        This should only be used by SimState subclasses which need
-        to use an existing schedule.
-    */
+    /** 使用指定调度器创建 SimState，并新建一个随机数生成器。此方法仅应被需要使用现有调度器的 SimState 子类调用。*/
+    //传入随机种子和调度器
     protected SimState(long seed, Schedule schedule)
         {
         this(seed, new MersenneTwisterFast(seed), schedule);
         }
 
-    /** Creates a SimState with a new schedule, the provided random number generator,
-        and a bogus seed (0).  This should only be used by SimState subclasses which need
-        to use an existing random number generator.
-    */
+    /** 使用新建的调度器、传入的随机数生成器创建 SimState，并设置无效种子（0）。此方法仅应被需要使用现有随机数生成器的 SimState 子类调用。*/
+    //传入随机数生成器
     protected SimState(MersenneTwisterFast random)
         {
         this(0, random, new Schedule());  // 0 is a bogus value.  In fact, MT can't have 0 as its seed value.
         }
+
+
 
     public void setSeed(long seed)
         {
@@ -89,51 +86,49 @@ public class SimState implements java.io.Serializable
         random = new MersenneTwisterFast(seed);
         this.seed = seed;
         }
-                
-    /** Primes the generator.  Mersenne Twister seeds its first 624 numbers using a basic
-        linear congruential generator; thereafter it uses the MersenneTwister algorithm to
-        build new seeds.  Those first 624 numbers are generally just fine, but to be extra
-        safe, you can prime the generator by calling nextInt() on it some (N>1) * 624 times.
-        This method does exactly that, presently with N=2 ( + 1 ). */
+
+
+    //随机数生成器的安全预热机制
+    /** 初始化生成器。梅森旋转算法会使用一个基础的线性同余生成器来生成初始的 624 个种子；
+     在此之后，它会通过梅森旋转算法生成新的种子。
+     最初的这 624 个种子通常是没问题的，但为了额外确保安全性，
+     你可以通过调用其 nextInt () 方法若干次（次数为 (N>1) * 624）来初始化生成器。
+     本方法正是执行此操作，当前设置 N=2（再加 1 次）。 */
     public static MersenneTwisterFast primeGenerator(MersenneTwisterFast generator)
         {
-        // 624 = MersenneTwisterFast.N  which is private duh
+        // 624 这个魔法数字，对应源码里私有的 N 常量
         for(int i = 0; i < 624 * 2 + 1; i++)
             generator.nextInt();
         return generator;
         }
 
-    /** Called immediately prior to starting the simulation, or in-between
-        simulation runs.  This gives you a chance to set up initially,
-        or reset from the last simulation run. The default version simply
-        replaces the Schedule with a completely new one.  */
+    /** 在启动仿真前，或多次仿真运行之间立即调用。
+     这让你有机会进行初始化设置，或从上一次仿真运行中重置状态。
+     默认实现仅会用一个全新的调度器替换当前调度器。  */
     public void start()
         {
-        // prime the generator so it's got better statistial properties
+        // 多生成几次随机数把开头不太 “随机” 的阶段跳过去，让后面的结果更均匀、更随机、质量更高。
         random = primeGenerator(random);
-        // just in case
+        // 保险操作（清理所有已注册的异步步进任务）
         cleanupAsynchronous();
-        // reset schedule
+        // 重置调度器
         schedule.reset();
         schedule.clearBeforeAndAfter();
         }
         
-    /** Called either at the proper or a premature end to the simulation. 
-        If the user quits the program, this function may not be called.  It is
-        possible for this method to be called multiple times.  If you need to
-        check for this possibility, the easiest way is to set a flag in start()
-        and clear it in the first finish(). */
+    /** 在仿真正常结束或提前终止时被调用。
+     若用户直接退出程序，该函数可能不会被执行。
+     该方法可能被多次调用。
+     若你需要检测这种情况，最简单的方法是：在 start () 方法中设置一个标记位，并在第一次执行 finish () 时清除该标记。 */
     public void finish()
         {
-        kill();  // cleans up asynchronous and resets the schedule, a good ending
+        kill();  // 清理异步任务并重置调度器，完成一次妥善的结束
         }
 
-    /** A Steppable on the schedule can call this method to cancel the simulation.
-        All existing AsynchronousSteppables are stopped, and then the schedule is
-        reset.  AsynchronousSteppables, ParallelSequences, 
-        and non-main threads should not call this method directly -- it will deadlock.
-        Instead, they may kill the simulation by scheduling a Steppable
-        for the next timestep which calls state.kill(). */
+    /** 调度器上的步进任务（Steppable）可调用此方法来终止仿真。
+     所有已存在的异步步进任务（AsynchronousSteppable）都会被停止，随后调度器将被重置。
+     异步步进任务、并行序列（ParallelSequence）以及非主线程不应直接调用此方法—— 否则会造成死锁。
+     它们可以通过在下一个时间步安排一个调用 state.kill () 的步进任务，来间接终止仿真。. */
     public void kill()
         {
         cleanupAsynchronous();
@@ -328,7 +323,7 @@ public class SimState implements java.io.Serializable
         }
     
     long job = 0;
-    long seed = 0;  // considered bad value
+    long seed = 0;  // 被视为无效值
         
     /** Returns the seed set by the doLoop(...) facility and by the constructor.
         Only to be used for GUIs to display possible seed values.  */
@@ -349,27 +344,34 @@ public class SimState implements java.io.Serializable
         return job;
         }
 
-	/** 
-		Same as doLoop(c, args, true)
+	/**
+     与 doLoop(c, args, true) 功能完全相同
 	*/
     public static void doLoop(final Class c, String[] args) 
     	{
     	doLoop(c, args, true);
     	}
 
-    /** 
-    	Calls doLoop(MakesSimState,args), passing in a MakesSimState which creates
-        SimStates of the provided Class c, using the constructor new <simState>(<random seed>). 
-        If exit is true, then doLoop() quits Java when it is finished. 
-        */
+    /**
+     调用 doLoop(MakesSimState, args) 方法，并传入一个 MakesSimState 对象。
+     该对象通过构造方法 new <simState>(<随机种子>) 创建指定类 c 的 SimState 实例。
+     如果 exit 参数为 true，则 doLoop() 执行完毕后会直接退出 Java 程序。*/
     public static void doLoop(final Class c, String[] args, boolean exit) 
         {
         doLoop(new MakesSimState() 
             {
+                /**给一个 仿真类（如 HelloWorld）
+                 会自动找到它的构造方法：new HelloWorld(long seed)
+                 然后自动创建一个对象：new HelloWorld(seed)
+                 最后返回这个对象给 doLoop 使用*/
             public SimState newInstance(long seed, String[] args) 
                 {
                 try {
-                    return (SimState)(c.getConstructor(new Class[] { Long.TYPE }).newInstance(new Object[] { Long.valueOf(seed) } ));
+                    return (SimState)(c.getConstructor(
+                            new Class[] { Long.TYPE }  //找参数是 long 型的构造方法
+                    ).newInstance(
+                            new Object[] { Long.valueOf(seed) }  //传入 seed
+                    ));
                     }
                 catch (Exception e) 
                     {
@@ -378,32 +380,34 @@ public class SimState implements java.io.Serializable
                     throw new RuntimeException("Exception occurred while trying to construct the simulation " + c, e);
                     }
                 }
+            /**返回传入的仿真类，给外部查看用的。*/
                                 
             public Class simulationClass() { return c; }
+            /**返回构造方法，给 GUI、启动器用的。*/
 
             public Constructor[] getConstructors() { return c.getConstructors(); }
             }, args, exit);
         }
-    
-    /** 
-    	Same as doLoop(generator, args, true);
-    */
+
+
+
+    /**作用等同于 doLoop (generator, args, true);    */
     public static void doLoop(final MakesSimState generator, final String[] args)
 		{
 		doLoop(generator, args, true);
 		}
 		
-    /** A convenient top-level loop for the simulation command-line.  Takes a MakesSimState which is
-        responsible for providing a SimState to run the simulation on, plus the application's argument
-        list in args.  This loop is capable of:
+    /** 为模拟命令行提供的便捷顶层循环。
+     接收一个 MakesSimState 对象（该对象负责提供用于运行模拟的 SimState），以及应用程序的参数列表 args。
+     此循环可实现：
         <ul>
-        <li> Repeating a job multiple times
+        <li> 多次重复执行任务
         </ul>
-        If exit is true, then doLoop() quits Java when it is finished. 
+     若 exit 为 true，则 doLoop() 执行完成后会退出 Java 程序。
     */
     public static void doLoop(final MakesSimState generator, final String[] args, final boolean exit)
         {
-        // print help?
+        // 是否输出帮助信息
         if (keyExists("-help", args))
             {
             System.err.println(
@@ -474,7 +478,7 @@ public class SimState implements java.io.Serializable
         n.setMinimumFractionDigits(0);
         if (!quiet) System.err.println("MASON Version " + n.format(version()) + ".  For further options, try adding ' -help' at end.");
 
-        // figure the checkpoint modulo
+        // 计算检查点取模值
         double _until = Double.POSITIVE_INFINITY;
         String until_s = argumentForKey("-until", args);
         if (until_s != null)
@@ -575,7 +579,7 @@ public class SimState implements java.io.Serializable
                 }
         final int parallel = _parallel;
                 
-        // check for parallelism with checkpoints
+        //  在启用检查点的前提下，检查程序是否处于并行运行状态
         final String checkpointFile = argumentForKey("-checkpoint", args);
         if (parallel > 1 && checkpointFile != null)
             {
@@ -584,20 +588,23 @@ public class SimState implements java.io.Serializable
             }
        
        
-        // okay, now we actually get down to brass tacks
+        // 好了，现在我们正式进入正题 / 开始干正事。
         
-        // Note that this is kind of a mess -- we create a new thread even if we have
-        // a single thread to run.  Furthermore, note that we load from checkpoint the
-        // initial job within a thread.  This will likely change the job number, which
-        // could conflict with other job numbers in other threads, so this is only permitted
-        // if there is a SINGLE thread.  We already checked for that situation above.
-        
+        // 注意，这段逻辑有点混乱——即便只需要运行一个线程，我们也会新建一个线程。
+        // 此外请注意，我们是在线程内部从检查点加载初始任务的。
+        // 这很可能会改变任务编号，进而可能与其他线程中的任务编号产生冲突，
+        // 因此**仅当只有单个线程时**才允许执行该操作。
+        // 我们在上面已经对这种情况进行了检查。
+
+
+        //创建并行线程
         Thread[] threads = new Thread[parallel];
         for(int _thread = 0; _thread < parallel; _thread++)
             {
             final int thread = _thread;  // stupid Java
             threads[thread] = new Thread(new Runnable()
                 {
+                    //单个线程跑的仿真
                 public void run()
                     {
                     long time = time_init - 1;
@@ -607,21 +614,21 @@ public class SimState implements java.io.Serializable
                         {
                         SimState state = null;
                 
-                        // start from checkpoint?  Note this will only happen if there is only ONE thread, so it's okay to change the job number here
-                        if (rep == 0 && checkpointFile!=null)  // only job 0 loads from checkpoint
+                        // 从检查点恢复启动？注意：仅当只有单个线程时才会执行此操作，因此在这里修改任务编号是安全的。
+                        if (rep == 0 && checkpointFile!=null)  // 只有任务 0 可以从检查点加载状态
                             {
                             if (!quiet) printlnSynchronized("Loading from checkpoint " + checkpointFile);
                             state = SimState.readFromCheckpoint(new File(checkpointFile));
-                            if (state == null)   // there was an error -- it got printed out to the screen, so just quit
+                            if (state == null)   // 检测到错误且已输出提示，程序直接退出。
                                 System.exit(1);
-                            else if (state.getClass() != generator.simulationClass())  // uh oh, wrong simulation stored in the file!
+                            else if (state.getClass() != generator.simulationClass())  // 啊哦，文件中存储的模拟程序不匹配！
                                 {
                                 printlnSynchronized("Checkpoint contains some other simulation: " + state + ", should have been of class " + generator.simulationClass());
                                 System.exit(1);
                                 }
                                                                                 
                             job = state.job();
-                            if (state.seed() != 0) // likely good seed from the command line earlier
+                            if (state.seed() != 0) // 当前使用的随机种子，是之前通过命令行传入的、可用的有效值。
                                 {
                                 seed = state.seed();
                                 if (!quiet) printlnSynchronized("Recovered job: " + state.job() + " Seed: " + state.seed());
@@ -629,8 +636,8 @@ public class SimState implements java.io.Serializable
                             else if (!quiet) printlnSynchronized("Renamed job: " + state.job() + " (unknown seed)");
                             }
 
-                        // ...or should we start fresh?
-                        if (state==null)  // no checkpoint file requested
+                        // ... 还是我们应该重新从头开始运行？
+                        if (state==null)  // 未请求使用检查点文件
                             {
                             state = generator.newInstance(seed,args);
                             state.setJob(job);
@@ -638,51 +645,58 @@ public class SimState implements java.io.Serializable
                             if (!quiet) printlnSynchronized("Job: " + state.job() + " Seed: " + state.seed());
                             state.start();
                             }
-                        
-                        NumberFormat rateFormat = NumberFormat.getInstance();
-                        rateFormat.setMaximumFractionDigits(5);
-                        rateFormat.setMinimumIntegerDigits(1);
 
-                        // do the loop
-                        boolean retval = false;
-                        long steps = 0;
-                        long clock;
-                        long oldClock = System.currentTimeMillis();
-                        Schedule schedule = state.schedule;
-                        long firstSteps = schedule.getSteps();
+                        //格式化 “仿真运行速度” 的数字，让打印出来的数字好看、整齐、不乱。
+                        NumberFormat rateFormat = NumberFormat.getInstance();//创建一个数字格式化工具，专门用来把数字变得好看。
+                        rateFormat.setMaximumFractionDigits(5);// 小数最多保留5位
+                        rateFormat.setMinimumIntegerDigits(1);// 整数部分至少显示1位
+
+                        // 开始循环
+                        boolean retval = false;//标记仿真是不是正常结束
+                        long steps = 0;//记录当前跑了多少步，后面会用 schedule.getSteps() 更新
+                        long clock;//存当前系统时间戳（毫秒）
+                        long oldClock = System.currentTimeMillis();//记录循环开始时的时间
+                        Schedule schedule = state.schedule;//取出仿真的调度器
+                        long firstSteps = schedule.getSteps();//记录本次任务开始时的步数
                         
                         while((_for == -1 || steps < _for) && schedule.getTime() <= until)
                             {
-                            state.preSchedule();
-                            if (!schedule.step(state)) 
+                            state.preSchedule();//前
+
+                            if (!schedule.step(state))// schedule.step(state)   核心
                                 {
-                                retval=true; 
+                                retval=true; //正常结束
                                 break;
                                 }
-                            state.postSchedule();
-                            steps = schedule.getSteps();
-                            if (time < 0)  // don't know how long to make the time yet
+
+                            state.postSchedule();//后
+
+                            steps = schedule.getSteps();//步数++
+                            if (time < 0)  // 没有用 -time 指定打印间隔
                                 {
-                                if (System.currentTimeMillis() - oldClock > 1000L)  // time to set the time
+                                if (System.currentTimeMillis() - oldClock > 1000L)  // 已经跑了超过1秒
                                     {
-                                    time = figureTime(steps - firstSteps);
+                                    time = figureTime(steps - firstSteps);  // 自动算出一个合适的打印频率
                                     }
                                 }
-                            if (time > 0 && steps % time == 0)
+                            if (time > 0 && steps % time == 0)  // 到了该打印的步数
                                 {
                                 clock = System.currentTimeMillis();
+                                // 打印：任务号、当前步数、仿真时间、运行速度
                                 if (!quiet) printlnSynchronized("Job " + job + ": " + "Steps: " + steps + " Time: " + state.schedule.getTimestamp("At Start", "Done") + " Rate: " + rateFormat.format((1000.0 *(steps - firstSteps)) / (clock - oldClock)));
                                 firstSteps = steps;
                                 oldClock = clock;
                                 }
-                            if (cmod > 0 && steps % cmod == 0)
+                            if (cmod > 0 && steps % cmod == 0)  // 到了该保存检查点的步数
                                 {
                                 String id = checkpointName;
                                 if (id == null)
                                     id = state.getClass().getName().substring(state.getClass().getName().lastIndexOf(".") + 1);
+                                //生成文件名：步数.任务号.模型名.checkpoint
                                 String s = "" + steps + "." + state.job() +  "." + id  + ".checkpoint";
                                 if (!quiet) printlnSynchronized("Job " + job + ": " + "Checkpointing to file: " + s);
-                                state.writeToCheckpoint(new File(s));
+
+                                state.writeToCheckpoint(new File(s));  // 把整个仿真状态存进文件
                                 }
                             }
                                 
@@ -702,18 +716,21 @@ public class SimState implements java.io.Serializable
                         }
                     }
                 });
-                
-            // we'd like the thread to name itself when it's running so it can load the model
-            // and determine the model class etc.  However we can't do that because once Eclipse/NetBeans
-            // notice a class in their profilers, they don't change its name any more.  So it's too late.
-            // As a result we set it here first before starting it up, oh well.
-            threads[thread].setName("MASON " + thread);                            
-            threads[thread].start();
+
+            // 我们本希望线程在运行时自行设置名称，这样它就能加载模型、确定模型类等信息。
+            // 但我们无法这么做，因为一旦 Eclipse/NetBeans 的性能分析器检测到某个类，
+            // 就不会再允许修改该类的名称了。此时再去改名已经为时已晚。
+            // 因此我们只能在线程启动之前，先在这里把名称设置好，没办法啊。
+
+            threads[thread].setName("MASON " + thread);  //给线程起名字
+            threads[thread].start();  //启动线程
             }
+        //让主线程等着所有仿真线程全部跑完，再继续往下走
         for(int thread = 0; thread < parallel; thread++)
             {
-            try { threads[thread].join(); } catch (InterruptedException ex) {  }  // do nothing
+            try { threads[thread].join(); } catch (InterruptedException ex) {  }  // 什么都不做
             }
+        //仿真全部结束后，关闭 Java 虚拟机，程序彻底退出。
         if (exit) System.exit(0);
         }
         

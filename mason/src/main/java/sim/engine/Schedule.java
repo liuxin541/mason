@@ -95,49 +95,45 @@ public class Schedule implements java.io.Serializable
     {
     private static final long serialVersionUID = 1;
 
-    /** The first possible schedulable time. */
+    /** 首个可合法调度事件的时间（0.0），仿真的 “时间起点” */
     public static final double EPOCH = 0.0;
-    /** The time which indicates that the Schedule hasn't started yet. Less than EPOCH. */
+    /** 表示仿真尚未开始（值为 EPOCH - 1 = -1.0） */
     public static final double BEFORE_SIMULATION = EPOCH - 1.0;
-    /** The time which indicates that the Schedule is finished.  Equal positive infinity, and thus greater than any schedulable time. */
+    /** 表示仿真已结束（值为正无穷 Double.POSITIVE_INFINITY）*/
     public static final double AFTER_SIMULATION = Double.POSITIVE_INFINITY;
-    /** The second possible schedulable time. */
+    /** 比 EPOCH 大的最小时间单位（解决 “同一时间调度” 的精度问题） */
     public static final double EPOCH_PLUS_EPSILON = Double.longBitsToDouble(Double.doubleToRawLongBits(EPOCH)+1L);
-    /** The last time beyond which the schedule is no longer able to precisely maintain integer values due to loss of precision.  That is, MAXIMUM_INTEGER + 1.0 == MAXIMUM_INTEGER. */
+    /** 因浮点数精度丢失，无法再精确区分整数步长的临界值（≈9e15）。  也就是说, MAXIMUM_INTEGER + 1.0 == MAXIMUM_INTEGER. */
     public static final double MAXIMUM_INTEGER = 9.007199254740992E15;
 
-    // should we shuffle individuals with the same timestep and ordering?
-    boolean shuffling = true;  // by default, we WANT to shuffle
+    // 是否应当对具有相同时间步长和排序序号的个体进行打乱处理？
+    boolean shuffling = true;  // 默认情况下，我们希望进行打乱（洗牌）操作。
 
-    /** The Schedule's queue. */
+    /** 调度程序队列。 */
     protected Heap queue = createHeap();
     
-    /** Returns a Heap to be used by the Schedule.  By default, returns a
-        binary heap.  Override this to provide your own
-        subclass of Heap tuned for your particular problem. */
+    /** 返回供调度器（Schedule）使用的堆结构。默认情况下，返回一个二叉堆。你可以重写此方法，以提供针对特定问题优化的、自定义的堆子类。 */
     protected Heap createHeap() { return new Heap(); }
     
-    /** The current time, as returned by getTime().  
-        If you modify this in a subclass, be sure to synchronize on Schedule.lock first. */
+    /**通过 getTime() 方法返回的当前时间。
+     若在子类中修改该值，请务必先基于 Schedule.lock 进行同步处理。*/
     protected double time;
     
-    /** The current steps, as returned by getSteps().  
-        If you modify this in a subclass, be sure to synchronize on Schedule.lock first. */
+    /** 通过 getSteps() 方法返回的当前步数。
+     若在子类中修改该值，请务必先基于 Schedule.lock 进行同步处理。*/
     protected long steps;
         
-    /** Whether the schedule is sealed, as returned by isSealed().  
-        If you modify this in a subclass, be sure to synchronize on Schedule.lock first. */
+    /** 通过 isSealed() 方法返回的调度器是否已被锁定。
+     若在子类中修改该值，请务必先基于 Schedule.lock 进行同步处理。 */
     protected boolean sealed = false;
                 
-    /** The schedule lock.  Many methods synchronize on this lock before modifying internal variables. */
-    protected Object lock = new boolean[1];  // an array is a unique, serializable object
+    /** 调度器锁。许多方法在修改内部变量前，都会基于该锁进行同步操作。 */
+    protected Object lock = new boolean[1];  // 数组是一种唯一的、可序列化的对象。
     
-    /** Sets the schedule to randomly shuffle the order of Steppables (the default), or to not do so, when they
-        have identical orderings and are scheduled for the same time.  If the Steppables are not randomly shuffled,
-        they will be executed in the order in which they were inserted into the schedule, if they have identical
-        orderings.  You should set this to
-        FALSE only under unusual circumstances when you know what you're doing -- in the vast majority of cases you
-        will want it to be TRUE (the default).  */
+    /** 设置调度器在满足以下条件时，是否随机打乱可执行单元（Steppables）的执行顺序（默认开启打乱）：
+     当这些可执行单元拥有相同的排序序号，且被调度在同一时间点执行时触发该规则。
+     如果关闭随机打乱，那么排序序号相同、调度时间相同的可执行单元，将按照它们被添加到调度器中的原始顺序依次执行。
+     仅在你明确知晓操作目的的特殊场景下，才需要将该值设为 FALSE；绝大多数场景下，建议保持默认值 TRUE（开启随机打乱）。 */
     private void setShuffling(boolean val)
         {
         synchronized(lock)
@@ -146,9 +142,9 @@ public class Schedule implements java.io.Serializable
             }
         }
         
-    /** Returns true (the default) if the Steppables' order is randomly shuffled when they have identical orderings
-        and are scheduled for the same time; else returns false, indicating that Steppables with identical orderings
-        will be executed in the order in which they were inserted into the schedule. */
+    /** 如果多个可执行单元（Steppables）拥有相同的排序序号且被调度在同一时间执行时，
+        其执行顺序会被随机打乱，则返回 true（默认值）；否则返回 false，
+        表示拥有相同排序序号的可执行单元将按照它们被添加到调度器中的顺序执行。 */
     private boolean isShuffling()
         {
         synchronized(lock)
@@ -157,38 +153,39 @@ public class Schedule implements java.io.Serializable
             }
         }
         
-    /** Creates a Schedule. */
+    /** Schedule 构造函数*/
     public Schedule()
         {
         time = BEFORE_SIMULATION;
         steps = 0;
         }
     
-    /** Returns the current timestep 
+    /** 返回当前时间步，不安全、快、内部用
         @Deprecated use getTime()
     */
     public double time() { return getTime(); }
 
-    /** Returns the current timestep */
+    /** 返回当前时间步。安全、规范、你用 */
     public double getTime() { synchronized(lock) { return time; } }
     
-    /** Returns whether or not the schedule is sealed (nothing more can be scheduled, even 
-        if the schedule isn't at AFTER_SIMULATION yet).   Calling reset() will unseal
-        a Schedule, and calling seal() will seal it.  */
+    /** 返回调度器是否已被锁定（即使调度尚未到达 AFTER_SIMULATION 状态，也无法再添加任何调度任务）。
+     调用 reset() 方法可解锁调度器，调用 seal() 方法可锁定调度器。  */
     public boolean isSealed() { synchronized(lock) { return sealed; } }
         
-    /** Returns the current time in string format. If the time is BEFORE_SIMULATION, then beforeSimulationString is
-        returned.  If the time is AFTER_SIMULATION, then afterSimulationString is returned.  Otherwise a numerical
-        representation of the time is returned. */
+    /** 以字符串格式返回当前时间。
+     如果时间为 BEFORE_SIMULATION（仿真开始前），则返回 beforeSimulationString；
+     如果时间为 AFTER_SIMULATION（仿真结束后），则返回 afterSimulationString；
+     其他情况下，返回时间的数值形式字符串。 */
     public String getTimestamp(final String beforeSimulationString, final String afterSimulationString)
         {
         return getTimestamp(getTime(), beforeSimulationString, afterSimulationString);
         }
     
-    /** Returns a given time in string format. If the time is earlier than EPOCH (such as BEFORE_SIMULATION), then beforeSimulationString is
-        returned.  If the time is AFTER_SIMULATION, then afterSimulationString is returned.  Otherwise a numerical
-        representation of the time is returned. */
-    // could be static, but why not let it be overridden?
+    /** 以字符串格式返回指定时间。
+     如果该时间早于EPOCH（例如仿真开始前 BEFORE_SIMULATION），则返回 beforeSimulationString；
+     如果该时间为仿真结束后 AFTER_SIMULATION，则返回 afterSimulationString；
+     其他情况下，返回时间的数值形式字符串。 */
+    // 可以设为静态（static），但为何不允许它被重写（override）呢？
     public String getTimestamp(double time, final String beforeSimulationString, final String afterSimulationString)
         {
         if (time < EPOCH) return beforeSimulationString;
@@ -197,12 +194,11 @@ public class Schedule implements java.io.Serializable
         return Double.toString(time);
         }
 
-    /** Returns the number of steps the Schedule has pulsed so far. */
+    /** 返回调度器截至目前已触发的步数。 */
     public long getSteps() { synchronized(lock) { return steps; } }
 
-    // pushes the time to AFTER_SIMULATION and attempts to kill all
-    // remaining scheduled items
-    // @deprecated don't use this
+        // 将时间切换至仿真结束状态（AFTER_SIMULATION），并尝试终止所有剩余的调度项
+        // @deprecated 已废弃，请勿使用
     private void pushToAfterSimulation()
         {
         synchronized(lock)
@@ -212,10 +208,9 @@ public class Schedule implements java.io.Serializable
             }
         }
 
-    /** Empties out the schedule but does not reset the time or steps.  If you're
-        looking for a way to kill your simulation from a Steppable, use SimState.kill() instead.  Note that
-        any agents presently at THIS TIME STEP will STILL be stepped -- including possibly reinserting themselves
-        in the schedule.  */
+    /** 清空调度器，但不重置时间或步数。
+     如果你想在可执行单元（Steppable）中终止仿真，请改用 SimState.kill() 方法。
+     注意：当前时间步中已处于待执行状态的所有代理（agents）仍会被执行—— 包括它们可能会再次将自身重新加入调度器。  */
     public void clear()
         {
         synchronized(lock)
@@ -224,9 +219,9 @@ public class Schedule implements java.io.Serializable
             }
         }
 
-    /** Seals the schedule: after a schedule is sealed, no further Steppables may be scheduled on it. 
-        To unseal a schedule, you must reset() it.  If you're looking for a way to kill your simulation
-        from a Steppable, use SimState.kill() instead.  */
+    /** 锁定调度器：调度器一旦被锁定后，无法再向其添加任何可执行单元（Steppables）。
+     必须调用 reset() 方法才能解锁调度器。
+     如果你想在可执行单元中终止仿真，请改用 SimState.kill() 方法。  */
     public void seal()
         {
         synchronized(lock)
@@ -235,8 +230,8 @@ public class Schedule implements java.io.Serializable
             }
         }
 
-    /** Empties out the schedule and resets it to a pristine state BEFORE_SIMULATION, with steps = 0.  If you're
-        looking for a way to kill your simulation from a Steppable, use SimState.kill() instead.  */
+    /** 清空调度器，并将其重置为初始状态（仿真开始前 BEFORE_SIMULATION），步数归零（steps = 0）。
+     如果你希望在可执行单元中终止仿真，请改用 SimState.kill() 方法。 */
     public void reset()
         {
         synchronized(lock)
@@ -248,7 +243,7 @@ public class Schedule implements java.io.Serializable
             }
         }
     
-    /** Returns true if the schedule has nothing left to do. */
+    /** 如果调度器中没有任何待执行任务，则返回 true。*/
     public boolean scheduleComplete()
         {
         synchronized(lock)
@@ -258,9 +253,9 @@ public class Schedule implements java.io.Serializable
         }
     
     /**
-       Merge a given schedule into this one.  The other schedule is not modified, but the queue of the
-       original schedule is changed.  NOTE: this method is not threadsafe and should be only performed 
-       when there are NO other threads which might want to manipulate the schedule.
+     将指定调度器合并到当前调度器中。
+     源调度器不会被修改，但当前调度器的队列会被更改。
+     注意：该方法非线程安全，仅应在没有其他线程可能操作该调度器时执行
     */
     public void merge(Schedule other) 
         {
@@ -278,8 +273,7 @@ public class Schedule implements java.io.Serializable
         queue = queue.merge(other.queue);
         }
         
-    /** Called in SimState.finish() to clear the beforeSteps and afterSteps Bags.  
-        You shouldn't all this manually.  */
+    /** 在 SimState.finish() 中被调用，用于清空 beforeSteps 和 afterSteps 集合。  */
     void clearBeforeAndAfter()
         {
         beforeSteps = new Bag();
@@ -306,75 +300,83 @@ public class Schedule implements java.io.Serializable
         
     Bag beforeSteps = new Bag();
     Bag afterSteps = new Bag();
-    
+
+    //当前这一步要执行的所有智能体、事件
     Bag currentSteps = new Bag();
+    //创建一个临时容器，用于批量提取同一时间、同一优先级的仿真事件
     Bag substeps = new Bag();
-    boolean inStep = false;  // prevents reentrancy
-    /** Steps the schedule, gathering and ordering all the items to step on the next time step (skipping
-        blank time steps), and then stepping all of them in the decided order.  
-        Returns FALSE if nothing was stepped -- the schedule is exhausted or time has run out. */
+    boolean inStep = false;  // 防止重入
+    /** 执行调度器步进：收集并排序下一个时间步需要执行的所有任务（自动跳过空白时间步），然后按照确定的顺序执行所有任务。
+     如果未执行任何任务（调度器已无剩余任务或时间已耗尽），则返回 FALSE。 */
     public synchronized boolean step(final SimState state)
         {
-        if (inStep)  // check for reentrant calls and deny
+
+        if (inStep)  // 检测并拒绝重入调用
             {
             throw new RuntimeException("Schedule.step() is not reentrant, yet is being called recursively.");
             }
-            
         inStep = true;
-        Bag currentSteps = this.currentSteps;  // locals are faster
-        final MersenneTwisterFast random = state.random; // locals are faster
-        
-        int topSubstep = 0;  // we set this as a hack to avoid having to clear all the substeps each time until the very end
 
-        // grab the events as quickly as possible
+
+            //当前这一步要执行的所有智能体、事件
+        Bag currentSteps = this.currentSteps;  // 使用局部变量速度更快
+            //state 中传入的随机数生成器
+        final MersenneTwisterFast random = state.random; // 使用局部变量速度更快
+        
+        int topSubstep = 0;  // 我们把这个设置作为一种临时变通方案（hack），避免每次都清空所有子步骤，直到最后才统一清空。
+
+        // 尽快获取所有事件
         synchronized(lock)
             {
-            if (time == AFTER_SIMULATION || queue.isEmpty())
-                { time = AFTER_SIMULATION; inStep = false; return false; }  // bump the time for the queue.isEmpty() bit
+            if (time == AFTER_SIMULATION || queue.isEmpty())  //queue.isEmpty()检查queue是否为空
+                { time = AFTER_SIMULATION; inStep = false; return false; }  // 推进时间，专门处理队列判空（queue.isEmpty ()）的逻辑
             
-            // now change the time
-            time = ((Key)(queue.getMinKey())).time;  // key shouldn't be able to be null; time should always be one bigger
+            // 现在修改时间
+            time = ((Key)(queue.getMinKey())).time;  // 键值不应为空；时间值应始终比原数值大 1。
 
-            final boolean shuffling = this.shuffling; // locals are faster.  This one needs to be synchronized inside lock
+            final boolean shuffling = this.shuffling; // 局部变量速度更快。此变量需要在锁内部进行同步操作。
 
-            // grab all of the steppables in the right order.  To do this, we employ two Bags:
-            // 1. Each iteration of the while-loop, we grab all the steppables of the next ordering, put into the substeps Bag
-            // 2. Next we either shuffle or reverse the substeps.
-            // 3. Next we add them all to the end of the currentSteps Bag
-            // 4. Then we clear the substeps bag, but we don't let them GC yet
-            // 5. Last, out of the while-loop, we clear the substeps bag "for real", allowing them to GC
+            //将substeps Bag 中数据转到 currentSteps Bag 中（读取进度操作）
+            // 按正确顺序获取所有可步进执行对象。为此，我们使用两个集合（Bag）：
+            // 1. while 循环的每次迭代中，获取下一个排序层级的所有可步进执行对象，放入子步骤集合（substeps Bag）
+            // 2. 接着对子步骤集合进行乱序或倒序处理
+            // 3. 然后将这些对象全部添加到当前步骤集合（currentSteps Bag）的末尾
+            // 4. 清空子步骤集合，但暂不允许它们被垃圾回收（GC）
+            // 5. 最后，退出 while 循环后，"真正"清空子步骤集合，允许它们被垃圾回收
             while(true)
                 {
-                // Suck out the contents of the next ordering
-                queue.extractMin(substeps);  // come out in reverse order
+                // 提取同时间、同优先级的所有事件 → 放进 substeps
+                queue.extractMin(substeps);  // 以相反的顺序输出， queue.extractMin()是提取堆中的最小元素的方法
 
-                // shuffle
-                if (substeps.numObjs > 1) 
+                // 洗牌
+                if (substeps.numObjs > 1)  //substeps.numObjs 当前 substeps 集合里实际存储的元素数量（也就是待执行的事件个数）
                     {
-                    if (shuffling) substeps.shuffle(random);  // no need to flip -- we're randomizing
-                    else substeps.reverse();  // they came out in reverse order; we need to flip 'em
+                    if (shuffling) substeps.shuffle(random);  // 无需反转顺序——我们正在进行随机打乱
+                    else substeps.reverse();  // 它们是以逆序取出的；我们需要将其反转
                     }
                                                                 
-                // dump
-                if (topSubstep < substeps.numObjs) topSubstep = substeps.numObjs;  // remember index of largest substep since we're violating clear()
-                currentSteps.addAll(substeps);
-                substeps.numObjs = 0;  // temporarily clear
+                // 全部输出
+                if (topSubstep < substeps.numObjs) topSubstep = substeps.numObjs;  // 记住最大子步骤的索引，因为我们没有执行常规的清空操作
+                currentSteps.addAll(substeps);  //  将当前时间、当前优先级的一批待执行事件，合并到总执行列表中，为后续统一执行做准备。
+                substeps.numObjs = 0;  // 临时清空
                 
-                // check next key and break if we don't need to go on
-                Key currentKey = (Key)(queue.getMinKey());
-                if (currentKey == null || currentKey.time != time) break;  // looks like no more substeps at this timestamp
+                // 检查下一个键值，如果无需继续则跳出循环
+                Key currentKey = (Key)(queue.getMinKey()); //  currentKey.time = 下一个事件的执行时间
+                if (currentKey == null || currentKey.time != time) break;  // 看起来在当前时间戳下，已经没有更多子步骤了
                 }
             }
-            
-        // now finally clear out the substeps for real
-        substeps.numObjs = topSubstep;
-        substeps.clear();  // clear for real so everything can GC
-                        
-        // execute
-        int len = currentSteps.numObjs;
-        Object[] objs = currentSteps.objs;
 
-        int sz = beforeSteps.size();
+        // 现在终于真正清空子步骤集合了
+        substeps.numObjs = topSubstep;  //  结束时 topSubstep = 0
+        substeps.clear();  // 彻底清空，以便所有对象都能被垃圾回收
+
+
+        // 执行
+        int len = currentSteps.numObjs;  //  需要运行的步骤数
+        Object[] objs = currentSteps.objs;  //  直接获取 currentSteps 这个集合内部真正存数据的数组
+
+        int sz = beforeSteps.size();  //  前置任务的个数
+        //  执行前置任务
         for(int x = 0; x < sz; x++)
             {
             ((Steppable)(beforeSteps.get(x))).step(state);
@@ -382,24 +384,27 @@ public class Schedule implements java.io.Serializable
                 
         try
             {
-            for(int x=0;x<len;x++)  // if we're not being killed...
+            for(int x=0;x<len;x++)  // 执行完前置任务仍未终止
                 {
-                assert sim.util.LocationLog.set(((Steppable)(objs[x])));
-                ((Steppable)(objs[x])).step(state);
-                assert sim.util.LocationLog.clear();
-                objs[x] = null;  // let gc even if being killed
+                assert sim.util.LocationLog.set(((Steppable)(objs[x])));  //  记录日志，标记当前正在执行的仿真对象
+
+                ((Steppable)(objs[x])).step(state);  //  真正执行仿真对象的逻辑（调用继承 Steppable 的类的 step 方法）
+
+                assert sim.util.LocationLog.clear();  //  清空日志
+                objs[x] = null;  // 即便正在被终止，也要允许垃圾回收
                 }
 
             }
         finally
             {
-            // reuse currentSteps -- all objects should have been released to gc already, no need to call clear()
+            // 复用 currentSteps 集合 —— 所有对象应当已经被释放并交由垃圾回收（GC）处理，无需调用 clear () 方法。
             currentSteps.numObjs = 0;
                 
             synchronized(lock) { steps++; }
             inStep = false;
             }
 
+        //后置任务
         sz = afterSteps.size();
         for(int x = 0; x < sz; x++)
             {
@@ -408,15 +413,19 @@ public class Schedule implements java.io.Serializable
                 
         return true;
         }
-        
-    /** Schedules the event to occur at getTime() + 1.0, 0 ordering. If this is a valid time
-        and event, schedules the event and returns TRUE.
-        This method at present returns FALSE if the schedule cannot
-        schedule any more events (it's sealed or the time is AFTER_SIMULATION), or if the
-        event is being scheduled for AFTER_SIMULATION.  The method 
-        throws an IllegalArgumentException if the event is being scheduled for an invalid time, or is null. */
+
+        /**
+          将事件调度至 getTime() + 1.0 时刻执行，排序等级为 0。
+          若时间与事件均合法，则调度该事件并返回 true。
+
+          当下述情况发生时，该方法返回 false：
+          调度器无法再调度更多事件（已被锁定 或 时间为仿真结束后），
+          或事件被指定在仿真结束后执行。
+
+          若事件调度时间不合法 或 事件为 null，
+          该方法将抛出 IllegalArgumentException 异常。*/
     
-    // synchronized so getting the time can be atomic with the subsidiary scheduleOnce function call
+    // // 加同步锁，保证 “取当前时间” 和 “调度事件” 这两步绑定在一起执行，不会被其他线程打断，避免时间错乱。
     public boolean scheduleOnce(final Steppable event)
         {
         synchronized(lock)

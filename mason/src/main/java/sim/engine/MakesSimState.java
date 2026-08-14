@@ -8,19 +8,18 @@ package sim.engine;
 
 import java.lang.reflect.Constructor;
 
-/** An interface for classes capable of creating SimState subclasses.
-    Typically you wouldn't use this interface; but rather it is used
-    internaly in the SimState.doLoop methods. */
+/** 这是一个工厂接口，专门用来生成 SimState 对象，仅供框架内部调用，不对外开放给用户使用。
+ 一个用于可创建 SimState 子类的类所实现的接口。
+ 通常你不会直接使用这个接口；它主要供 SimState.doLoop 方法内部使用。 */
         
 public interface MakesSimState
     {
-    /** Creates a SimState subclass with the given random number seed
-        and command-line arguments passed into main(...). */
+    /** 使用指定的随机数种子以及传入 main (...) 方法的命令行参数，创建一个 SimState 子类实例。*/
     public SimState newInstance(long seed, String[] args);
         
-    /** Returns the class of the SimState subclass that will be generated. */
+    /** 返回将要生成的 SimState 子类 的类型（Class 对象）。*/
     public Class simulationClass();
 
-    /** Returns the constructors of the SimState subclass that will be generated.*/
+    /** 返回将要生成的 SimState 子类 的构造方法。*/
     public Constructor[] getConstructors();
     }
