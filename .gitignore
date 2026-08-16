@@ -49,3 +49,15 @@ contrib/geomason/repository/jars/socialnets-1.0.jar
 __pycache__/
 *.pyc
 *.pyo
+
+# Large binary dependencies (kept out of git; fetch separately to build)
+*.jar
+*.jar.gz
+*.jar.pack
+*.ear
+*.war
+*.bak
+
+# SVN pristine / backup dirs
+.svn/
+.backup_*/
