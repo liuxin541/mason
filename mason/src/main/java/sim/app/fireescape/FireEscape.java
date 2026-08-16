@@ -79,6 +79,7 @@ public class FireEscape extends SimState {
     public double smokeDriftCoeff = 0.08;
     public double smokeDriftMaxSpeed = 0.3;
     public double exhaustRate = 0.15;
+    public double smokeAbsorptionCoeff = 0.5;
     public static final double MAX_SMOKE = 1.0;
     public double moveProbability = 0.4;
     public double safeRange = 15.0;
@@ -376,9 +377,21 @@ public class FireEscape extends SimState {
         initMultipleFireSources();
         initExits();
 
-        // 4. 根据最终网格尺寸生成全 3D 随机人员
+        // 4. 根据最终网格尺寸生成全 3D 随机人员（按楼层均匀分布，不再全部下落到底层）
         persons = new Person[personCount];
         Steppable[] agents = new Steppable[personCount];
+        // ★ 收集所有楼层的楼板 z（obstacle 覆盖率 > 40% 的切片），用于"落到当前楼层楼板上方"
+        java.util.List<Integer> floorSlabZs = new java.util.ArrayList<>();
+        for (int z = 0; z < gridDepth; z++) {
+            int wallCount = 0;
+            for (int xi = 0; xi < gridWidth; xi++)
+                for (int yi = 0; yi < gridHeight; yi++)
+                    if (obstacleGrid.get(xi, yi, z) == TYPE_WALL) wallCount++;
+            if (wallCount > gridWidth * gridHeight * 0.4) floorSlabZs.add(z);
+        }
+        // 兜底：如果没有检测到楼板，用 groundFloorMinZ
+        if (floorSlabZs.isEmpty() && groundFloorMinZ >= 0) floorSlabZs.add(groundFloorMinZ);
+
         for (int i = 0; i < personCount; i++) {
             int x, y, z;
             int attempts = 0;
@@ -390,12 +403,40 @@ public class FireEscape extends SimState {
                 if (attempts > 500) break;
             } while (!(insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) == 0) || fireGrid.get(x, y, z) > T_AMBIENT + 50);
 
-            // ★ 重力下落：从随机高度降到脚下有支撑，且不离开建筑内部
-            while (z > 0) {
-                int below = obstacleGrid.get(x, y, z - 1);
-                if (below == TYPE_WALL || below == TYPE_STAIR) break;
-                if (insideGrid.get(x, y, z - 1) != 1) break;
-                z--;
+            // ★ 楼层感知下落：只落到当前 z 所在楼层的楼板上方，不穿越楼板下落到更低的楼层。
+            //   找到 <= 当前 z 的最大楼板 z（slabZ），然后从当前 z 向下落到 slabZ+1 即停。
+            //   这样人员会分布在多个楼层，而不是全部堆在底层。
+            int slabBelow = -1;
+            for (int sz : floorSlabZs) {
+                if (sz <= z && sz > slabBelow) slabBelow = sz;
+            }
+            if (slabBelow >= 0) {
+                // 目标落脚点 = slabBelow + 1（楼板上方一格），但需确认该位置在建筑内部且非障碍
+                int targetZ = Math.min(gridDepth - 1, slabBelow + 1);
+                if (insideGrid.get(x, y, targetZ) == 1 && obstacleGrid.get(x, y, targetZ) == 0) {
+                    z = targetZ;
+                } else {
+                    // 楼板上方不可站立，则在该楼层范围内找最近的可站立 z
+                    int nextSlab = gridDepth;
+                    for (int sz : floorSlabZs) {
+                        if (sz > slabBelow) { nextSlab = sz; break; }
+                    }
+                    boolean placed = false;
+                    for (int zz = slabBelow + 1; zz < nextSlab && zz < gridDepth; zz++) {
+                        if (insideGrid.get(x, y, zz) == 1 && obstacleGrid.get(x, y, zz) == 0) {
+                            z = zz; placed = true; break;
+                        }
+                    }
+                    if (!placed) z = targetZ; // 实在找不到就放楼板上方
+                }
+            } else {
+                // 没有楼板信息，退回原重力下落逻辑
+                while (z > 0) {
+                    int below = obstacleGrid.get(x, y, z - 1);
+                    if (below == TYPE_WALL || below == TYPE_STAIR) break;
+                    if (insideGrid.get(x, y, z - 1) != 1) break;
+                    z--;
+                }
             }
 
             persons[i] = new Person(this, x, y, z);

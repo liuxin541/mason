@@ -48,7 +48,7 @@ def main():
     parser = argparse.ArgumentParser(description='BIM 体素化预处理工具')
     parser.add_argument('--input', help='输入 IFC 文件路径')
     parser.add_argument('--output', required=True, help='输出目录')
-    parser.add_argument('--voxel-size', type=float, default=0.5, help='体素分辨率（米）')
+    parser.add_argument('--voxel-size', type=float, default=0.25, help='体素分辨率（米）')
     parser.add_argument('--test', action='store_true', help='生成测试用的 3D 迷宫体素（无需输入 IFC）')
     
     args = parser.parse_args()
@@ -96,14 +96,15 @@ def main():
 
         logger.log("[INFO] IFC 加载成功，正在提取建筑元素...")
         elements = extract_elements(ifc_file)
-        walls = elements.get('walls', [])
-        logger.log(f"[INFO] 提取到 {len(walls)} 面墙体。")
+        total_elements = sum(len(v) for v in elements.values())
+        logger.log(f"[INFO] 提取到 {total_elements} 个建筑构件。")
 
-        # ★★★ 计算建筑包围盒 ★★★
+        # ★★★ 计算建筑包围盒（基于所有构件，非仅 walls）★★★
         all_bboxes = []
-        for wall in walls:
-            if 'bbox' in wall:
-                all_bboxes.append(wall['bbox'])
+        for category_elems in elements.values():
+            for elem in category_elems:
+                if 'bbox' in elem:
+                    all_bboxes.append(elem['bbox'])
         
         if all_bboxes:
             # ★ 精确包围盒（不取整），作为坐标系统统一的权威基准

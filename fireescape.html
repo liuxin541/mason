@@ -15,8 +15,12 @@
         #simCanvas { background-color: #111; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.5); cursor: grab; max-width: 100%; max-height: 100%; width: auto; height: auto; border: 1px solid #333; }
         #simCanvas:active { cursor: grabbing; }
         .right-panel { flex: 1; display: flex; flex-direction: column; gap: 20px; height: 100%; overflow: hidden; }
-        .info-box, .log-box { background: #16213e; border-radius: 16px; padding: 16px; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-        .info-content, .log-content { background: #0a0c15; border-radius: 12px; padding: 12px; flex: 1; overflow-y: auto; }
+        .info-box { background: #16213e; border-radius: 16px; padding: 12px 16px; flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+        .info-content { background: #0a0c15; border-radius: 12px; padding: 12px; overflow-y: auto; }
+        /* ★ 平面图容器（替换原事件日志区块） */
+        .plan-box { background: #16213e; border-radius: 16px; padding: 12px; flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 0; }
+        .plan-box > h3 { margin: 0 0 8px 0; font-size: 15px; color: #88aaff; flex: 0 0 auto; }
+        .plan-body { position: relative; flex: 1; display: flex; gap: 8px; overflow: hidden; min-height: 0; }
         .control-bar { background: #16213e; border-radius: 16px; padding: 12px 20px; display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
         .control-bar button { padding: 6px 14px; font-weight: bold; border: none; border-radius: 40px; cursor: pointer; background: #0f3460; color: white; font-size: 13px; }
         .start-btn { background: #2e7d32; }
@@ -50,27 +54,31 @@
         .fire-source-mode { background: #ff1744; color: white; }
         .speed-label { font-size: 13px; color: #aaa; margin-right: 4px; }
 
-        /* ★ 小地图样式 */
-        #minimap-container, #floor-thumb-strip, #minimap-tooltip {
-            display: none !important;
-        }
+        /* ★ 小地图样式（放在右侧平面图容器内，按层显示） */
         #minimap-container {
-            position: absolute;
-            top: 12px;
-            right: 12px;
-            width: 200px;
-            background: rgba(0, 0, 0, 0.75);
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            background: #05060a;
             border: 2px solid #4488ff;
             border-radius: 8px;
-            padding: 4px;
-            z-index: 10;
+            padding: 6px;
+            display: flex;
+            flex-direction: column;
             box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            overflow: hidden;  /* 内部溢出隐藏，确保子元素用 flex 正确分配空间 */
         }
         #minimap {
             width: 100%;
-            height: 180px;
             display: block;
             border-radius: 4px;
+            background: #000;
+            flex: 1 1 auto;
+            max-width: 100%;
+            min-height: 40px;
+            aspect-ratio: 1 / 1;  /* 默认正方形，JS 物理像素会按实际容器覆盖 */
+            object-fit: contain;
         }
         #minimap-title {
             color: #88aaff;
@@ -80,6 +88,10 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 4px;
+            /* 禁止被压缩，保证标题和楼层控件永远可见 */
+            flex: 0 0 auto;
         }
         /* ★ 楼层选择控件 */
         #floor-controls {
@@ -125,6 +137,8 @@
             gap: 3px;
             margin-top: 4px;
             flex-wrap: wrap;
+            flex: 0 0 auto;  /* 禁止被压缩 */
+            min-height: 0;
         }
         #minimap-toolbar button {
             background: #0f3460;
@@ -175,21 +189,22 @@
             box-shadow: 0 2px 6px rgba(0,0,0,0.6);
         }
 
-        /* ★ 楼层缩略条（侧边竖向） */
+        /* ★ 楼层缩略条（平面图容器左侧竖向） */
         #floor-thumb-strip {
-            position: absolute;
-            top: 12px;
-            right: 220px;
+            position: relative;
+            top: auto;
+            right: auto;
             display: flex;
             flex-direction: column-reverse;
-            gap: 4px;
-            z-index: 9;
-            max-height: 280px;
+            gap: 6px;
+            z-index: 1;
+            max-height: 100%;
             overflow-y: auto;
+            padding: 2px;
         }
         #floor-thumb-strip canvas {
-            width: 60px;
-            height: 60px;
+            width: 64px;
+            height: 64px;
             border: 2px solid #334;
             border-radius: 4px;
             background: #000;
@@ -200,18 +215,18 @@
         #floor-thumb-strip canvas:hover { border-color: #4488ff; }
         #floor-thumb-strip .thumb-label {
             color: #88aaff;
-            font-size: 9px;
+            font-size: 10px;
             text-align: center;
-            margin-bottom: 1px;
+            margin-bottom: 2px;
         }
 
-        /* ★ 小地图容器（放大并支持交互） */
+        /* ★ 小地图容器（放大并支持交互，右侧主图） */
         #minimap-container {
-            width: 240px;
+            /* flex:1 已在前面声明 */
         }
         #minimap {
-            height: 220px;
             cursor: crosshair;
+            image-rendering: pixelated;
         }
         #minimap.dragging { cursor: grabbing; }
 
@@ -269,39 +284,6 @@
         <div class="canvas-container">
             <canvas id="simCanvas"></canvas>
             <div id="loadingTip" style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:#888; pointer-events:none;">加载3D引擎中...</div>
-            <!-- ★ 楼层缩略条（侧边竖向，点击直跳楼层） -->
-            <div id="floor-thumb-strip"></div>
-            <!-- ★ 小地图 -->
-            <div id="minimap-container">
-                <div id="minimap-title">
-                    <span>🗺️ 2D 俯视图</span>
-                    <div id="floor-controls">
-                        <button id="floor-down" title="下一层">▼</button>
-                        <span id="floor-label">F1</span>
-                        <button id="floor-up" title="上一层">▲</button>
-                    </div>
-                </div>
-                <canvas id="minimap" width="480" height="440"></canvas>
-                <!-- ★ 工具栏：图层切换 -->
-                <div id="minimap-toolbar">
-                    <button id="btn-legend" title="图例">图例</button>
-                    <button id="btn-grid" class="active" title="网格线">网格</button>
-                    <button id="btn-overlay" title="全部楼层叠加">叠加</button>
-                    <button id="btn-scale" class="active" title="比例尺/指北针">比例</button>
-                    <button id="btn-focus" title="点击地图定位主视图">定位</button>
-                </div>
-                <!-- ★ 图例 -->
-                <div id="minimap-legend">
-                    <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
-                    <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
-                    <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
-                    <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
-                    <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
-                    <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
-                </div>
-            </div>
-            <!-- ★ 悬停信息 -->
-            <div id="minimap-tooltip"></div>
             <!-- ★ 漫游模式提示 -->
             <div id="walk-hint">按 <span class="key">V</span> 进入飞行模式</div>
             <!-- ★ 十字准星（漫游时显示） -->
@@ -309,7 +291,45 @@
         </div>
         <div class="right-panel">
             <div class="info-box"><h3>📊 实时统计</h3><div class="info-content" id="infoContent">加载中...</div></div>
-            <div class="log-box"><h3>📋 事件日志</h3><div class="log-content" id="logContent">等待数据...</div></div>
+            <div class="plan-box">
+                <h3>🗺️ 楼层平面图</h3>
+                <div class="plan-body">
+                    <!-- ★ 楼层缩略条（点击直跳楼层） -->
+                    <div id="floor-thumb-strip"></div>
+                    <!-- ★ 小地图（主图） -->
+                    <div id="minimap-container">
+                        <div id="minimap-title">
+                            <span>2D 俯视图</span>
+                            <div id="floor-controls">
+                                <button id="floor-down" title="下一层">▼</button>
+                                <span id="floor-label">F1</span>
+                                <button id="floor-up" title="上一层">▲</button>
+                            </div>
+                        </div>
+                        <canvas id="minimap" width="720" height="720"></canvas>
+                        <!-- ★ 工具栏：图层切换 -->
+                        <div id="minimap-toolbar">
+                            <button id="btn-legend" title="图例">图例</button>
+                            <button id="btn-grid" class="active" title="网格线">网格</button>
+                            <button id="btn-overlay" title="全部楼层叠加">叠加</button>
+                            <button id="btn-scale" class="active" title="比例尺/指北针">比例</button>
+                            <button id="btn-fit" title="自动适配视图">适配</button>
+                            <button id="btn-focus" title="点击地图定位主视图">定位</button>
+                        </div>
+                        <!-- ★ 图例 -->
+                        <div id="minimap-legend">
+                            <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
+                            <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
+                            <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
+                            <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
+                            <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
+                            <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
+                        </div>
+                    </div>
+                    <!-- ★ 悬停信息 -->
+                    <div id="minimap-tooltip"></div>
+                </div>
+            </div>
         </div>
     </div>
     <div class="control-bar">
@@ -418,10 +438,14 @@
     // 3. 辅助函数
     // ================================================================
     function addLog(msg, type) {
-        let d = document.getElementById('logContent');
-        let t = new Date().toLocaleTimeString();
-        let c = type === 'error' ? 'error' : 'log-time';
-        let e = document.createElement('div');
+        const t = new Date().toLocaleTimeString();
+        // 用户要求移除事件日志区块：全部落到控制台，避免 DOM 操作抛错
+        if (type === 'error') console.error(`[${t}] ${msg}`);
+        else console.log(`[${t}] ${msg}`);
+        const d = document.getElementById('logContent');
+        if (!d) return;
+        const c = type === 'error' ? 'error' : 'log-time';
+        const e = document.createElement('div');
         e.innerHTML = `<span class="${c}">[${t}]</span> ${msg}`;
         d.appendChild(e);
         e.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -450,6 +474,10 @@
         }).catch(e => addLog(`指令失败: ${e}`, 'error'));
     }
 
+    // ★ 小地图首次就绪标记（防止反复 auto-fit）
+    let minimapReady = false;
+    let lastMinimapSize = { w: 0, h: 0, gridW: 0, gridH: 0 };
+
     function fetchState() {
         fetch('/state')
             .then(r => r.json())
@@ -457,9 +485,67 @@
                 currentData = d;
                 updateStats(d);
                 update3DWorld(d);
+                // ★ 平面图：首次有数据时自适应画布 + 自动 fit 居中
+                ensurePlanViewReady(d);
                 if (lastStep !== d.step) lastStep = d.step;
             })
             .catch(e => addLog('获取状态失败: ' + e, 'error'));
+    }
+
+    // ★ 让平面图画布物理像素与容器 CSS 尺寸一致，并在首次/换图/容器尺寸变化时 auto-fit
+    function ensurePlanViewReady(d) {
+        if (!minimapCanvas || !d || !d.width) return;
+        // 若 voxelSize/dx 来自后端，覆盖默认值
+        if (d.voxelSize && d.voxelSize > 0) {
+            voxelSize = d.voxelSize;
+            dx = voxelSize; dz = voxelSize;
+        }
+        const sizeChanged = resizePlanViewCanvas(false);
+        const dimsChanged = lastMinimapSize.gridW !== d.width || lastMinimapSize.gridH !== d.height;
+        if (!minimapReady || dimsChanged || sizeChanged) {
+            fitMinimapToContent();
+            minimapReady = true;
+            lastMinimapSize.gridW = d.width;
+            lastMinimapSize.gridH = d.height;
+        }
+    }
+
+    // ★ 将 minimapCanvas 物理像素调整为等于容器 CSS 尺寸，避免浏览器二次缩放导致"糊"
+    //   返回 true 表示尺寸发生了变化（调用方应据此重新 fit）
+    function resizePlanViewCanvas(doFit) {
+        if (!minimapCanvas) return false;
+        const container = minimapCanvas.parentElement;  // #minimap-container
+        // canvas 上方有 title/toolbar/legend 等占据 offsetTop，只给剩余高度
+        const availH = container.clientHeight - minimapCanvas.offsetTop;
+        const cssW = Math.max(120, Math.floor(container.clientWidth - 12));
+        const cssH = Math.max(120, Math.floor(availH - 6));  // 底部留 6px
+        if (cssW === lastMinimapSize.w && cssH === lastMinimapSize.h) return false;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        minimapCanvas.width = Math.max(200, Math.floor(cssW * dpr));
+        minimapCanvas.height = Math.max(200, Math.floor(cssH * dpr));
+        lastMinimapSize.w = cssW;
+        lastMinimapSize.h = cssH;
+        if (doFit) fitMinimapToContent();
+        return true;
+    }
+
+    // ★ 自动适配：建筑用正方形 cell（cell=min(W/w,H/h)），保持真实比例；
+    //   scale 用于留 margin，offset 让建筑居中
+    function fitMinimapToContent() {
+        if (!minimapCanvas || !currentData || !currentData.width) return;
+        const W = minimapCanvas.width, H = minimapCanvas.height;
+        const w = currentData.width, h = currentData.height;
+        if (!w || !h) return;
+        const margin = 24;
+        // drawMinimap/drawFloorLayer 中 cell = min(W/w, H/h)
+        const cell = Math.min(W / w, H / h);
+        // 建筑实际像素宽 = w*cell，高 = h*cell。留 margin 后需要的缩放：
+        const sx = (W - margin * 2) / (w * cell);
+        const sy = (H - margin * 2) / (h * cell);
+        minimapView.scale = Math.max(0.1, Math.min(sx, sy));
+        // 居中：建筑缩放后宽 = w*cell*scale，放在画布中心
+        minimapView.offsetX = (W - w * cell * minimapView.scale) / 2;
+        minimapView.offsetY = (H - h * cell * minimapView.scale) / 2;
     }
 
     // ================================================================
@@ -719,19 +805,36 @@
     // ★ 小地图：2D 俯视图绘制（增强版：信息维度+视觉+交互+楼层检测）
     // ================================================================
 
-    // 楼层检测：优先用服务端 floorSlabs，否则几何检测（墙体覆盖率>40%）
+    // ★ 楼层范围：detectedFloors 存「用于平面图绘制的 displayZ」（行走层切片），
+    //   floorRanges[i] 存对应层的 slabZ/displayZ/bottom/top（人/火/出口归属用范围而非单点）
+    let floorRanges = [];   // [{slabZ, displayZ, bottom, top}]
+    let __lastDetectStep = -1;  // 上次执行 detectFloors 时的 step，用于按步重检
+
+    function rangeOfDisplayZ(z) {
+        for (const r of floorRanges) if (r.displayZ === z) return r;
+        return null;
+    }
+    function fallbackRangeForZ(z, depth) {
+        // 未检测到楼层时：把整栋按 3m 估一层构造一个假范围让内容能显示
+        const step = Math.max(1, Math.round(3.0 / voxelSize));
+        const idx = Math.max(0, Math.min(Math.floor(z / step), Math.ceil(depth / step) - 1));
+        return { slabZ: -1, displayZ: z, bottom: idx * step, top: Math.min(depth, (idx + 1) * step) };
+    }
+
+    // 楼层检测：每层范围 [slabZ, nextSlabZ) 覆盖整层（含楼板），人员/火/烟在该 z 范围内即可显示
     function detectFloors() {
         if (!currentData) return;
         const w = currentData.width || 1;
         const h = currentData.height || 1;
         const depth = currentData.depth || 1;
-        const prevFirst = detectedFloors[0];
+        const slabs = [];
+        floorRanges = [];
         detectedFloors = [];
-        // 优先用服务端提供的 floorSlabs
+
+        // 1) 收集楼板 slabZ
         if (currentData.floorSlabs && currentData.floorSlabs.length > 0) {
-            detectedFloors = currentData.floorSlabs.slice();
+            for (const z of currentData.floorSlabs) slabs.push(Number(z) | 0);
         } else {
-            // 几何检测：与 Java 端 zGround/zRoof 一致
             for (let z = 0; z < depth; z++) {
                 let wallCount = 0;
                 if (currentData.obstacle && currentData.obstacle[z]) {
@@ -739,26 +842,96 @@
                         for (let y = 0; y < h; y++)
                             if (currentData.obstacle[z][x]?.[y] === 1) wallCount++;
                 }
-                if (wallCount > w * h * 0.4) detectedFloors.push(z);
-            }
-            // 兜底：等分虚拟楼层（用真实层高 voxel_size 推算，默认 3m/层）
-            if (detectedFloors.length === 0) {
-                const layerHeight = Math.max(1, Math.round(3.0 / voxelSize));
-                const n = Math.max(1, Math.floor(depth / layerHeight));
-                for (let i = 1; i <= n; i++) detectedFloors.push(Math.floor(i * depth / (n + 1)) - 1);
+                if (wallCount > w * h * 0.4) slabs.push(z);
             }
         }
-        if (currentFloorZ < 0 && detectedFloors.length > 0) {
-            currentFloorZ = detectedFloors[detectedFloors.length - 1];
+        slabs.sort((a, b) => a - b);
+
+        // 1.5) 兜底：floorSlabs 为空时按层高（默认 3m）等分
+        if (slabs.length === 0) {
+            const layerHeight = Math.max(1, Math.round(3.0 / voxelSize));
+            const n = Math.max(1, Math.ceil(depth / layerHeight));
+            for (let i = 0; i < n; i++) slabs.push(i * layerHeight);
         }
-        // 若服务端楼层列表变化，修正 currentFloorZ 到最近的楼层
-        if (currentFloorZ >= 0 && detectedFloors.length > 0 && detectedFloors.indexOf(currentFloorZ) < 0) {
-            let best = detectedFloors[0], bd = Math.abs(currentFloorZ - best);
-            for (const fz of detectedFloors) { const d = Math.abs(currentFloorZ - fz); if (d < bd) { bd = d; best = fz; } }
+
+        // 2) 每层范围 [slabZ, nextSlabZ)，整层覆盖；displayZ 从 slabZ+1 开始找（跳过楼板层本身，
+        //   楼板 obstacle 覆盖率过高不适合画墙体轮廓）
+        for (let i = 0; i < slabs.length; i++) {
+            const slabZ = slabs[i];
+            const nextSlab = (i + 1 < slabs.length) ? slabs[i + 1] : depth;
+            const bottom = slabZ;
+            const top = Math.max(bottom + 1, Math.min(depth, nextSlab));
+            if (bottom >= depth) break;
+            const floorThickness = top - bottom;
+            // 楼层只有 1 格厚的退化情况：直接用 bottom 作为 displayZ
+            if (floorThickness <= 1) {
+                floorRanges.push({ slabZ, displayZ: bottom, bottom, top });
+                detectedFloors.push(bottom);
+                continue;
+            }
+            // displayZ：从 slabZ+1 到 top-1 之间找第一个有 obstacle 或 inside 的 z
+            let displayZ = Math.min(depth - 1, bottom + 1);
+            let found = false;
+            for (let z = bottom + 1; z < top; z++) {
+                let has = false;
+                if (currentData.obstacle && currentData.obstacle[z]) {
+                    scan: for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
+                        if (currentData.obstacle[z][x]?.[y] === 1) { has = true; break scan; }
+                    }
+                }
+                if (!has && currentData.inside && currentData.inside[z]) {
+                    scan2: for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
+                        if (currentData.inside[z][x]?.[y] === 1) { has = true; break scan2; }
+                    }
+                }
+                if (has) { displayZ = z; found = true; break; }
+            }
+            if (!found) displayZ = Math.min(depth - 1, bottom + Math.max(1, Math.floor((top - bottom) / 2)));
+            floorRanges.push({ slabZ, displayZ, bottom, top });
+            detectedFloors.push(displayZ);
+        }
+
+        // 3) 兜底：仍然没检测到楼层，整栋虚拟一层
+        if (detectedFloors.length === 0) {
+            const r = { slabZ: -1, displayZ: Math.max(0, Math.floor(depth / 2)), bottom: 0, top: depth };
+            floorRanges.push(r); detectedFloors.push(r.displayZ);
+        }
+
+        // 4) 初始或修正 currentFloorZ —— 优先选「有人员/火源的楼层」，让用户立刻看到内容
+        const prevFloor = currentFloorZ;
+        const preferredFloor = pickDefaultFloor();
+        if (prevFloor < 0) {
+            currentFloorZ = preferredFloor;
+        } else if (detectedFloors.indexOf(prevFloor) < 0) {
+            // 之前的 currentFloorZ 不在新楼层列表里，吸附到最近楼层
+            let best = detectedFloors[0], bd = Math.abs(prevFloor - best);
+            for (const fz of detectedFloors) { const d = Math.abs(prevFloor - fz); if (d < bd) { bd = d; best = fz; } }
             currentFloorZ = best;
         }
         updateFloorLabel();
         buildThumbStrip();
+    }
+
+    // ★ 选默认显示楼层：优先「同时有人员和火源的楼层」，否则「有人员的楼层」，
+    //   否则「有火源的楼层」，否则「有 obstacle 的中间层」，否则最底层。
+    //   这样保证平面图一打开就能看到人/火，不会出现空白楼层。
+    function pickDefaultFloor() {
+        if (!currentData || floorRanges.length === 0) return detectedFloors[0] || 0;
+        const persons = currentData.persons || [];
+        const fireSources = currentData.fireSources || [];
+        const inRange = (z, r) => z >= r.bottom && z < r.top;
+        let bestWithBoth = -1, bestWithPerson = -1, bestWithFire = -1;
+        for (const r of floorRanges) {
+            const hasPerson = persons.some(p => inRange(p[2], r));
+            const hasFire = fireSources.some(f => inRange(f.z, r));
+            if (hasPerson && hasFire) { bestWithBoth = r.displayZ; break; }
+            if (hasPerson && bestWithPerson < 0) bestWithPerson = r.displayZ;
+            if (hasFire && bestWithFire < 0) bestWithFire = r.displayZ;
+        }
+        if (bestWithBoth >= 0) return bestWithBoth;
+        if (bestWithPerson >= 0) return bestWithPerson;
+        if (bestWithFire >= 0) return bestWithFire;
+        return detectedFloors[0];
     }
 
     // 体素坐标 → 小地图屏幕坐标（含缩放/平移）
@@ -776,15 +949,26 @@
     }
 
     // 绘制单层（供主图与缩略图复用）
-    // ctx/canvas: 目标；zSlice: 楼层；opts: {walls, smoke, fire, exits, sources, persons, dim}
+    // ctx/canvas: 目标；zSlice: 楼层显示切片；
+    // opts: {walls, smoke, fire, exits, sources, persons, dim, range?}
+    //   opts.range = {bottom, top}：该层在 z 方向的范围（人员/出口/火源按范围归属，不写则退化为 abs(z-zSlice)<=1）
     function drawFloorLayer(ctx, canvas, zSlice, opts) {
         if (!currentData) return;
         const W = canvas.width, H = canvas.height;
         const w = currentData.width || 1, h = currentData.height || 1;
-        const cellW = W / w, cellH = H / h;
+        // ★ 正方形 cell：保持建筑真实比例，避免被 canvas 比例拉伸变形
+        const cell = Math.min(W / w, H / h);
+        const cellW = cell, cellH = cell;
         const dim = opts.dim || 1.0;  // 暗化系数（叠加模式用）
+        const range = opts.range || null;
 
-        // 墙体（带浅色描边）
+        function zInThisFloor(z) {
+            if (range) return z >= range.bottom && z < range.top;
+            return Math.abs(z - zSlice) <= 1;
+        }
+
+        // 墙体（带浅色描边）——始终只用 displayZ 单层绘制（楼板 slabZ 本身 obstacle 覆盖率过高，
+        //   OR 聚合会把整层变成实心黑块）。range 仅用于动态对象归属，不用于墙体聚合。
         if (opts.walls && currentData.obstacle && currentData.obstacle[zSlice]) {
             for (let x = 0; x < w; x++) {
                 for (let y = 0; y < h; y++) {
@@ -798,64 +982,97 @@
             if (cellW > 3) {
                 ctx.strokeStyle = `rgba(120,130,160,${0.5 * dim})`;
                 ctx.lineWidth = 0.5;
+                const wallAt = (x, y) => {
+                    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+                    return currentData.obstacle?.[zSlice]?.[x]?.[y] === 1;
+                };
                 for (let x = 0; x < w; x++) {
                     for (let y = 0; y < h; y++) {
-                        if (currentData.obstacle[zSlice][x]?.[y] === 1) {
-                            // 上方无墙 → 画上边
-                            if (y === 0 || currentData.obstacle[zSlice][x]?.[y-1] !== 1)
-                                { ctx.beginPath(); ctx.moveTo(x*cellW, y*cellH); ctx.lineTo((x+1)*cellW, y*cellH); ctx.stroke(); }
-                            if (y === h-1 || currentData.obstacle[zSlice][x]?.[y+1] !== 1)
-                                { ctx.beginPath(); ctx.moveTo(x*cellW, (y+1)*cellH); ctx.lineTo((x+1)*cellW, (y+1)*cellH); ctx.stroke(); }
-                            if (x === 0 || currentData.obstacle[zSlice][x-1]?.[y] !== 1)
-                                { ctx.beginPath(); ctx.moveTo(x*cellW, y*cellH); ctx.lineTo(x*cellW, (y+1)*cellH); ctx.stroke(); }
-                            if (x === w-1 || currentData.obstacle[zSlice][x+1]?.[y] !== 1)
-                                { ctx.beginPath(); ctx.moveTo((x+1)*cellW, y*cellH); ctx.lineTo((x+1)*cellW, (y+1)*cellH); ctx.stroke(); }
+                        if (wallAt(x, y)) {
+                            if (!wallAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, y * cellH); ctx.stroke(); }
+                            if (!wallAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, (y + 1) * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                            if (!wallAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo(x * cellW, (y + 1) * cellH); ctx.stroke(); }
+                            if (!wallAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
                         }
                     }
                 }
             }
         }
 
-        // 烟雾（蓝灰半透明）
-        if (opts.smoke && currentData.smoke && currentData.smoke[zSlice]) {
-            for (let x = 0; x < w; x++) {
-                for (let y = 0; y < h; y++) {
-                    const s = currentData.smoke[zSlice][x]?.[y] || 0;
-                    if (s > 0.1) {
-                        const alpha = Math.min(s * 0.85, 0.7) * dim;
-                        ctx.fillStyle = `rgba(110,135,165,${alpha})`;
-                        ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+        // 烟雾（范围聚合：取 max，使整层的烟都可见）
+        if (opts.smoke && currentData.smoke) {
+            if (range) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        let sMax = 0;
+                        for (let z = range.bottom; z < range.top; z++) {
+                            const s = currentData.smoke[z]?.[x]?.[y] || 0;
+                            if (s > sMax) sMax = s;
+                        }
+                        if (sMax > 0.1) {
+                            const alpha = Math.min(sMax * 0.85, 0.7) * dim;
+                            ctx.fillStyle = `rgba(110,135,165,${alpha})`;
+                            ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+                        }
+                    }
+                }
+            } else if (currentData.smoke[zSlice]) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        const s = currentData.smoke[zSlice][x]?.[y] || 0;
+                        if (s > 0.1) {
+                            const alpha = Math.min(s * 0.85, 0.7) * dim;
+                            ctx.fillStyle = `rgba(110,135,165,${alpha})`;
+                            ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+                        }
                     }
                 }
             }
         }
 
-        // 高温区
-        if (opts.fire && currentData.fire && currentData.fire[zSlice]) {
-            for (let x = 0; x < w; x++) {
-                for (let y = 0; y < h; y++) {
-                    const t = currentData.fire[zSlice][x]?.[y] || T_AMB;
-                    if (t > T_AMB + 1.0) {
-                        const intensity = Math.min((t - T_AMB) / (1173 - T_AMB), 1.0);
-                        const r = 255, g = Math.floor(60 + 195 * (1 - intensity));
-                        ctx.fillStyle = `rgba(${r},${g},0,${0.85 * dim})`;
-                        ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+        // 高温区（范围聚合：取 max 温度）
+        if (opts.fire && currentData.fire) {
+            if (range) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        let tMax = T_AMB;
+                        for (let z = range.bottom; z < range.top; z++) {
+                            const t = currentData.fire[z]?.[x]?.[y] || T_AMB;
+                            if (t > tMax) tMax = t;
+                        }
+                        if (tMax > T_AMB + 1.0) {
+                            const intensity = Math.min((tMax - T_AMB) / (1173 - T_AMB), 1.0);
+                            const r = 255, g = Math.floor(60 + 195 * (1 - intensity));
+                            ctx.fillStyle = `rgba(${r},${g},0,${0.85 * dim})`;
+                            ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+                        }
+                    }
+                }
+            } else if (currentData.fire[zSlice]) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        const t = currentData.fire[zSlice][x]?.[y] || T_AMB;
+                        if (t > T_AMB + 1.0) {
+                            const intensity = Math.min((t - T_AMB) / (1173 - T_AMB), 1.0);
+                            const r = 255, g = Math.floor(60 + 195 * (1 - intensity));
+                            ctx.fillStyle = `rgba(${r},${g},0,${0.85 * dim})`;
+                            ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+                        }
                     }
                 }
             }
         }
 
-        // 出口（绿色标记，★ 图标）
+        // 出口（绿色标记，★ 图标）——按该层范围归属
         if (opts.exits && currentData.exits) {
             for (const e of currentData.exits) {
-                if (Math.abs(e.z - zSlice) <= 1) {
+                if (zInThisFloor(e.z)) {
                     const px = e.x * cellW + cellW / 2;
                     const py = e.y * cellH + cellH / 2;
                     const r = Math.max(3, cellW * 0.45);
                     ctx.fillStyle = `rgba(76,175,80,${dim})`;
                     ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
                     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
-                    // EXIT 文字（仅大图）
                     if (cellW > 6) {
                         ctx.fillStyle = '#fff';
                         ctx.font = `bold ${Math.max(7, cellW*0.5)}px sans-serif`;
@@ -869,7 +1086,7 @@
         // 火源点（红色火焰图标）
         if (opts.sources && currentData.fireSources) {
             for (const f of currentData.fireSources) {
-                if (Math.abs(f.z - zSlice) <= 1) {
+                if (zInThisFloor(f.z)) {
                     const px = f.x * cellW + cellW / 2;
                     const py = f.y * cellH + cellH / 2;
                     const r = Math.max(3, cellW * 0.5);
@@ -885,11 +1102,11 @@
             }
         }
 
-        // 人员
+        // 人员（按范围归属）
         if (opts.persons && currentData.persons) {
             ctx.fillStyle = `rgba(255,255,255,${dim})`;
             for (const p of currentData.persons) {
-                if (Math.abs(p[2] - zSlice) <= 1) {
+                if (zInThisFloor(p[2])) {
                     const px = p[0] * cellW + cellW / 2;
                     const py = p[1] * cellH + cellH / 2;
                     ctx.beginPath();
@@ -906,16 +1123,23 @@
         const W = minimapCanvas.width, H = minimapCanvas.height;
         const w = currentData.width || 1, h = currentData.height || 1;
         const depth = currentData.depth || 1;
-        const cellW = W / w, cellH = H / h;
+        // ★ 正方形 cell（与 drawFloorLayer 一致），保持建筑真实比例
+        const cell = Math.min(W / w, H / h);
+        const cellW = cell, cellH = cell;
 
-        // 楼层检测
-        if (detectedFloors.length === 0) detectFloors();
+        // 楼层检测（数据更新后重新检测，保证人员/火出现后能选到正确的默认楼层；
+        //   detectFloors 内部会保留用户已选的 currentFloorZ，只在无效时重选）
+        if (detectedFloors.length === 0 || __lastDetectStep !== currentData.step) {
+            __lastDetectStep = currentData.step;
+            detectFloors();
+        }
 
         // 背景
         ctx.fillStyle = '#05060a';
         ctx.fillRect(0, 0, W, H);
 
         const zSlice = (currentFloorZ >= 0 && currentFloorZ < depth) ? currentFloorZ : Math.floor(depth / 2);
+        const curRange = rangeOfDisplayZ(zSlice) || fallbackRangeForZ(zSlice, depth);
 
         ctx.save();
         ctx.translate(minimapView.offsetX, minimapView.offsetY);
@@ -925,17 +1149,18 @@
         if (minimapOptions.overlay && detectedFloors.length > 1) {
             for (const fz of detectedFloors) {
                 if (fz === zSlice) continue;
+                const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, depth);
                 drawFloorLayer(ctx, minimapCanvas, fz, {
                     walls: true, smoke: false, fire: false, exits: true,
-                    sources: false, persons: false, dim: 0.25
+                    sources: false, persons: false, dim: 0.25, range: r
                 });
             }
         }
 
-        // 当前楼层（完整图层）
+        // 当前楼层（完整图层 + 该层 z 范围，使人员/火/出口/烟全部显示）
         drawFloorLayer(ctx, minimapCanvas, zSlice, {
             walls: true, smoke: true, fire: true, exits: true,
-            sources: true, persons: true, dim: 1.0
+            sources: true, persons: true, dim: 1.0, range: curRange
         });
 
         // 网格线
@@ -951,21 +1176,23 @@
             }
         }
 
-        // 建筑外轮廓高亮
-        if (currentData.inside && currentData.inside[zSlice]) {
+        // 建筑外轮廓高亮（在该层范围内聚合 inside，跳过 slabZ 本身避免楼板干扰）
+        if (currentData.inside) {
+            const insideAt = (x, y) => {
+                if (x < 0 || y < 0 || x >= w || y >= h) return false;
+                const b = curRange.bottom, t = curRange.top;
+                for (let z = b + 1; z < t; z++) if (currentData.inside?.[z]?.[x]?.[y] === 1) return true;
+                return currentData.inside?.[zSlice]?.[x]?.[y] === 1;
+            };
             ctx.strokeStyle = 'rgba(100,150,255,0.5)';
             ctx.lineWidth = 1.5 / minimapView.scale;
             for (let x = 0; x < w; x++) {
                 for (let y = 0; y < h; y++) {
-                    if (currentData.inside[zSlice][x]?.[y] === 1) {
-                        if (y === 0 || currentData.inside[zSlice][x]?.[y-1] !== 1)
-                            { ctx.beginPath(); ctx.moveTo(x*cellW, y*cellH); ctx.lineTo((x+1)*cellW, y*cellH); ctx.stroke(); }
-                        if (y === h-1 || currentData.inside[zSlice][x]?.[y+1] !== 1)
-                            { ctx.beginPath(); ctx.moveTo(x*cellW, (y+1)*cellH); ctx.lineTo((x+1)*cellW, (y+1)*cellH); ctx.stroke(); }
-                        if (x === 0 || currentData.inside[zSlice][x-1]?.[y] !== 1)
-                            { ctx.beginPath(); ctx.moveTo(x*cellW, y*cellH); ctx.lineTo(x*cellW, (y+1)*cellH); ctx.stroke(); }
-                        if (x === w-1 || currentData.inside[zSlice][x+1]?.[y] !== 1)
-                            { ctx.beginPath(); ctx.moveTo((x+1)*cellW, y*cellH); ctx.lineTo((x+1)*cellW, (y+1)*cellH); ctx.stroke(); }
+                    if (insideAt(x, y)) {
+                        if (!insideAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, y * cellH); ctx.stroke(); }
+                        if (!insideAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, (y + 1) * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                        if (!insideAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo(x * cellW, (y + 1) * cellH); ctx.stroke(); }
+                        if (!insideAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
                     }
                 }
             }
@@ -974,7 +1201,35 @@
         ctx.restore();
 
         // 相机位置/朝向（屏幕空间，不受缩放影响）
-        drawCameraMarker(ctx, cellW, cellH);
+        drawCameraMarker(ctx, cellW, cellH, w, h, W, H);
+
+        // ★ 建筑四角坐标参考标记（与 3D 对照，验证一一对应）
+        if (currentData) {
+            const markers = [
+                { x: 0,         y: 0,         label: 'O(0,0)', color: '#ff0' }, // 体素原点（北/西）
+                { x: w - 1,     y: 0,         label: `(${w-1},0)`, color: '#0ff' },
+                { x: 0,         y: h - 1,     label: `(0,${h-1})`, color: '#f0f' },
+                { x: w - 1,     y: h - 1,     label: `(${w-1},${h-1})`, color: '#0f0' }
+            ];
+            ctx.save();
+            for (const m of markers) {
+                const px = (m.x * cell + cell / 2) * minimapView.scale + minimapView.offsetX;
+                const py = (m.y * cell + cell / 2) * minimapView.scale + minimapView.offsetY;
+                ctx.fillStyle = m.color;
+                ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+                ctx.lineWidth = 2;
+                ctx.font = 'bold 10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+                const tx = m.x > w / 2 ? px - 4 : px + 4;
+                const ty = m.y > h / 2 ? py - 4 : py + 14;
+                ctx.strokeText(m.label, tx, ty);
+                ctx.fillText(m.label, tx, ty);
+            }
+            ctx.restore();
+        }
 
         // 悬停高亮
         if (minimapHover) {
@@ -1029,20 +1284,55 @@
         ctx.strokeStyle = '#4488ff';
         ctx.lineWidth = 2;
         ctx.strokeRect(0, 0, W, H);
+
+        // ★ 诊断条（左上角）：显示当前层范围/人员/火源/出口数量，便于排查"看不到人/火"
+        if (currentData) {
+            const persons = currentData.persons || [];
+            const fireSources = currentData.fireSources || [];
+            const exits = currentData.exits || [];
+            const personsInLayer = persons.filter(p => p[2] >= curRange.bottom && p[2] < curRange.top).length;
+            const fireInLayer = fireSources.filter(f => f.z >= curRange.bottom && f.z < curRange.top).length;
+            const exitsInLayer = exits.filter(e => e.z >= curRange.bottom && e.z < curRange.top).length;
+            const totalPersons = persons.length;
+            const totalFire = fireSources.length;
+            const totalExits = exits.length;
+            const line1 = `F${detectedFloors.indexOf(currentFloorZ) + 1} z[${curRange.bottom}-${curRange.top - 1}] disp=${zSlice}`;
+            const line2 = `人 ${personsInLayer}/${totalPersons}  火 ${fireInLayer}/${totalFire}  出口 ${exitsInLayer}/${totalExits}`;
+            const line3 = `step=${currentData.step} floors=${detectedFloors.length} depth=${depth}`;
+            ctx.save();
+            ctx.font = '11px monospace';
+            ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+            const padX = 6, padY = 4, lineH = 13;
+            const boxW = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width, ctx.measureText(line3).width) + padX * 2;
+            const boxH = lineH * 3 + padY * 2;
+            ctx.fillStyle = 'rgba(0,0,0,0.82)';
+            ctx.fillRect(4, 4, boxW, boxH);
+            ctx.strokeStyle = '#4488ff'; ctx.lineWidth = 1;
+            ctx.strokeRect(4, 4, boxW, boxH);
+            ctx.fillStyle = '#88aaff';
+            ctx.fillText(line1, 4 + padX, 4 + padY);
+            ctx.fillStyle = personsInLayer > 0 ? '#88ff88' : '#ff8888';
+            ctx.fillText(line2, 4 + padX, 4 + padY + lineH);
+            ctx.fillStyle = '#aaa';
+            ctx.fillText(line3, 4 + padX, 4 + padY + lineH * 2);
+            ctx.restore();
+        }
     }
 
-    // 绘制相机位置/朝向标记
-    function drawCameraMarker(ctx, cellW, cellH) {
-        const W = minimapCanvas.width, H = minimapCanvas.height;
+    // 绘制相机位置/朝向标记（必须与 drawMinimap 同用正方形 cell，保证坐标对齐）
+    function drawCameraMarker(ctx, cellW, cellH, gridW, gridH, canvasW, canvasH) {
         let camX, camY, yaw;
+        // ★ 正方形 cell：与 drawMinimap 保持一致
+        const cell = Math.min(canvasW / gridW, canvasH / gridH);
         if (walkMode && pointerLockControls) {
             const camPos = pointerLockControls.getObject().position;
-            camX = (camPos.x / dx) * cellW;
-            camY = (camPos.z / dx) * cellH;
+            // Three.js (x, y垂直, z水平) = 体素 (x, z垂直, y水平) * voxelSize
+            camX = (camPos.x / dx) * cell;  // 体素 x → 平面图 x
+            camY = (camPos.z / dx) * cell;  // 体素 y (水平) → Three.z → 平面图 y (canvas 向下)
             yaw = camera.rotation.y;
         } else {
-            camX = (camera.position.x / dx) * cellW;
-            camY = (camera.position.z / dx) * cellH;
+            camX = (camera.position.x / dx) * cell;
+            camY = (camera.position.z / dx) * cell;
             yaw = camera.rotation.y;
         }
         const sx = camX * minimapView.scale + minimapView.offsetX;
@@ -1097,13 +1387,15 @@
 
     function drawThumbStrip() {
         if (!thumbCanvases.length) return;
+        const depth = (currentData && currentData.depth) || 1;
         for (const t of thumbCanvases) {
             const ctx = t.canvas.getContext('2d');
             ctx.fillStyle = '#000'; ctx.fillRect(0, 0, t.canvas.width, t.canvas.height);
             const isCurrent = detectedFloors.indexOf(currentFloorZ) === t.idx;
+            const r = rangeOfDisplayZ(t.floorZ) || fallbackRangeForZ(t.floorZ, depth);
             drawFloorLayer(ctx, t.canvas, t.floorZ, {
                 walls: true, smoke: false, fire: false, exits: true,
-                sources: true, persons: false, dim: isCurrent ? 1.0 : 0.5
+                sources: true, persons: false, dim: isCurrent ? 1.0 : 0.5, range: r
             });
             t.canvas.className = isCurrent ? 'active' : '';
         }
@@ -1184,6 +1476,11 @@
         e.target.classList.toggle('active', minimapOptions.focus);
         addLog(minimapOptions.focus ? '🎯 点击地图定位已开启' : '点击定位已关闭', 'info');
     });
+    document.getElementById('btn-fit').addEventListener('click', () => {
+        resizePlanViewCanvas(false);
+        fitMinimapToContent();
+        addLog('🗺️ 平面图已自动适配视图', 'info');
+    });
 
     // ★ 小地图交互：滚轮缩放 / 右键平移 / 点击定位 / 悬停 tooltip
     (function setupMinimapInteraction() {
@@ -1234,7 +1531,8 @@
             const mx = (e.clientX - rect.left) * (cvs().width / rect.width);
             const my = (e.clientY - rect.top) * (cvs().height / rect.height);
             const w = currentData.width, h = currentData.height;
-            const cellW = cvs().width / w, cellH = cvs().height / h;
+            const cellW = Math.min(cvs().width / w, cvs().height / h);
+            const cellH = cellW;
             const v = screenToVoxel(mx, my, cellW, cellH);
             if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
                 focusMainView(v.x, v.y);
@@ -1248,7 +1546,8 @@
             const mx = (e.clientX - rect.left) * (cvs().width / rect.width);
             const my = (e.clientY - rect.top) * (cvs().height / rect.height);
             const w = currentData.width, h = currentData.height;
-            const cellW = cvs().width / w, cellH = cvs().height / h;
+            const cellW = Math.min(cvs().width / w, cvs().height / h);
+            const cellH = cellW;
             const v = screenToVoxel(mx, my, cellW, cellH);
             const tooltip = document.getElementById('minimap-tooltip');
             if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
@@ -1292,6 +1591,12 @@
         }
     }
     window.addEventListener('resize', resizeCanvas);
+    // ★ 平面图容器尺寸变化时自动重算物理像素 + 保持比例（带防抖）
+    let __planResizeTimer = null;
+    window.addEventListener('resize', () => {
+        if (__planResizeTimer) clearTimeout(__planResizeTimer);
+        __planResizeTimer = setTimeout(() => resizePlanViewCanvas(true), 120);
+    });
 
     // ================================================================
     // ★ 飞行模式：键盘事件监听
