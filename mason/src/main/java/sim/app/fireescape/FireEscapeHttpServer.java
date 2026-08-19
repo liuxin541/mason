@@ -333,7 +333,15 @@ public class FireEscapeHttpServer {
     static class IndexHandler implements HttpHandler {
         @Override public void handle(HttpExchange exchange) throws IOException {
             byte[] bytes = htmlContent.getBytes(StandardCharsets.UTF_8);
+            // 尝试从磁盘读取最新 fireescape.html（开发期热加载）
+            File local = new File("fireescape.html");
+            if (local.exists()) {
+                try { bytes = Files.readAllBytes(local.toPath()); } catch (Exception ignored) {}
+            }
             exchange.getResponseHeaders().set("Content-Type", "text/html;charset=UTF-8");
+            // 开发期禁用缓存
+            exchange.getResponseHeaders().set("Cache-Control", "no-store, no-cache, must-revalidate");
+            exchange.getResponseHeaders().set("Pragma", "no-cache");
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
         }
@@ -661,6 +669,18 @@ public class FireEscapeHttpServer {
                 for (int j=0; j<model.gridHeight; j++)
                     if (model.obstacleGrid.get(i,j,z)==1) wallCount++;
             if (wallCount > model.gridWidth * model.gridHeight * 0.4) slabs.add(z);
+        }
+        // 合并同一楼板的多个 z（slab 顶面+天花板面紧贴，间距≤2）
+        final int MERGE_GAP = 2;
+        if (slabs.size() > 1) {
+            java.util.List<Integer> merged = new ArrayList<>();
+            merged.add(slabs.get(0));
+            for (int i=1; i<slabs.size(); i++) {
+                if (slabs.get(i) - merged.get(merged.size()-1) > MERGE_GAP) {
+                    merged.add(slabs.get(i));
+                }
+            }
+            slabs = merged;
         }
         for (int i=0; i<slabs.size(); i++) {
             if (i>0) sb.append(",");

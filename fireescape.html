@@ -402,7 +402,7 @@
     const canvas = document.getElementById('simCanvas');
     const loadingTip = document.getElementById('loadingTip');
     let scene, camera, renderer, controls;
-    let voxelMesh = null;        // 用于渲染火、烟（不发散实体墙体）
+    let voxelMesh = null;        // 用于渲染火、烟（不发散实体墙体）——保留作为旧版兼容
     let personGroup = new THREE.Group();
     let buildingGroup = null;    // 用于承载加载的 glTF 真实模型
     let lastStep = -1, currentData = null;
@@ -412,6 +412,312 @@
     let originOffset = [0.0, 0.0, 0.0];
     // 前端渲染步长：x/y/z 统一使用 voxelSize，与 Java deltaX/deltaZ 和 Python voxel_size 一致
     let dx = voxelSize, dz = voxelSize;
+
+    // ================================================================
+    // ★ 仿真烟/火粒子系统（替代 Box InstancedMesh）
+    // ================================================================
+    let smokeGroup = new THREE.Group();     // 烟雾粒子容器
+    let fireGroup = new THREE.Group();      // 火焰粒子容器
+    smokeGroup.name = 'SmokeParticles';
+    fireGroup.name = 'FireParticles';
+    scene && (scene.add(smokeGroup), scene.add(fireGroup));
+
+    // 烟雾/火焰纹理（Canvas 动态生成，不用外部资源）
+    let _smokeTex = null, _fireTex = null;
+    function _makeSmokeTex() {
+        const c = document.createElement('canvas'); c.width = c.height = 128;
+        const ctx = c.getContext('2d');
+        // 多层径向渐变：中心淡、边缘柔 + 噪声扰动
+        for (let pass = 0; pass < 4; pass++) {
+            const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+            const a = [0.55, 0.30, 0.15, 0.05][pass];
+            const b = [0.40, 0.18, 0.08, 0.0][pass];
+            grad.addColorStop(0.0, `rgba(255,255,255,${a})`);
+            grad.addColorStop(0.5, `rgba(230,230,235,${b})`);
+            grad.addColorStop(1.0, 'rgba(180,180,190,0)');
+            ctx.fillStyle = grad;
+            ctx.globalAlpha = 1.0;
+            ctx.fillRect(0, 0, 128, 128);
+        }
+        // 边缘噪声：8 个方向的扰动点，制造非规则轮廓
+        ctx.globalCompositeOperation = 'destination-out';
+        for (let k = 0; k < 6; k++) {
+            const ang = (k / 6) * Math.PI * 2 + Math.random() * 0.8;
+            const rad = 40 + Math.random() * 18;
+            const cx = 64 + Math.cos(ang) * rad * 0.7;
+            const cy = 64 + Math.sin(ang) * rad * 0.7;
+            const r = 24 + Math.random() * 20;
+            const ng = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+            ng.addColorStop(0, 'rgba(0,0,0,0.9)');
+            ng.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = ng;
+            ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+        }
+        ctx.globalCompositeOperation = 'source-over';
+        const t = new THREE.CanvasTexture(c);
+        t.needsUpdate = true;
+        return t;
+    }
+    function _makeFireTex() {
+        const c = document.createElement('canvas'); c.width = c.height = 128;
+        const ctx = c.getContext('2d');
+        // 多层径向渐变：白心 → 黄 → 橙 → 红 → 透明（发光质感）
+        const layers = [
+            { r0: 0, r1: 10, inner: 'rgba(255,255,255,1)',    outer: 'rgba(255,255,200,0.9)' },
+            { r0: 0, r1: 28, inner: 'rgba(255,255,120,0.8)',  outer: 'rgba(255,200,0,0.5)' },
+            { r0: 0, r1: 48, inner: 'rgba(255,170,0,0.55)',   outer: 'rgba(255,60,0,0.2)' },
+            { r0: 0, r1: 64, inner: 'rgba(255,50,0,0.25)',    outer: 'rgba(120,0,0,0)' }
+        ];
+        for (const L of layers) {
+            const g = ctx.createRadialGradient(64, 64, L.r0, 64, 64, L.r1);
+            g.addColorStop(0, L.inner);
+            g.addColorStop(1, L.outer);
+            ctx.fillStyle = g;
+            ctx.fillRect(0, 0, 128, 128);
+        }
+        // 抖动火焰边缘
+        ctx.globalCompositeOperation = 'destination-out';
+        for (let k = 0; k < 8; k++) {
+            const ang = (k / 8) * Math.PI * 2 + (Math.random() - 0.5) * 0.6;
+            const rad = 40 + Math.random() * 18;
+            const cx = 64 + Math.cos(ang) * rad * 0.75;
+            const cy = 64 + Math.sin(ang) * rad * 0.75;
+            const r = 16 + Math.random() * 14;
+            const ng = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+            ng.addColorStop(0, 'rgba(0,0,0,0.85)');
+            ng.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = ng;
+            ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+        }
+        ctx.globalCompositeOperation = 'source-over';
+        const t = new THREE.CanvasTexture(c);
+        t.needsUpdate = true;
+        return t;
+    }
+
+    /**
+     * 创建单层 Points 粒子系统
+     * @param {object} opts { count, sizeRange, baseColor, texture, additive, opacity }
+     */
+    function _makeParticleSys(opts) {
+        const { count, sizeRange, texture, additive, opacity } = opts;
+        const geo = new THREE.BufferGeometry();
+        const pos = new Float32Array(count * 3);
+        const col = new Float32Array(count * 3);
+        const age = new Float32Array(count);          // 0..1 归一化生命
+        const life = new Float32Array(count);         // 寿命(秒)
+        const seed = new Float32Array(count);         // 随机种子（防闪烁）
+        const size = new Float32Array(count);         // 当前尺寸 (BufferAttribute)
+        const alpha = new Float32Array(count);        // 当前 alpha
+        const vel = new Float32Array(count * 3);      // 速度（用于上升/漂移动画）
+        const born = new Float32Array(count);         // 粒子是否已出生
+        for (let i = 0; i < count; i++) {
+            age[i] = 0; life[i] = 1; seed[i] = Math.random() * 1000;
+            size[i] = sizeRange[0] + Math.random() * (sizeRange[1] - sizeRange[0]);
+            alpha[i] = 0; born[i] = 0;
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+        geo.setAttribute('a_color', new THREE.BufferAttribute(col, 3).setUsage(THREE.DynamicDrawUsage));
+        geo.setAttribute('a_size', new THREE.BufferAttribute(size, 1).setUsage(THREE.DynamicDrawUsage));
+        geo.setAttribute('a_alpha', new THREE.BufferAttribute(alpha, 1).setUsage(THREE.DynamicDrawUsage));
+        geo.setAttribute('a_age', new THREE.BufferAttribute(age, 1).setUsage(THREE.DynamicDrawUsage));
+        geo.userData = { life, seed, vel, born, _count: count, _sizeRange: sizeRange, _baseColor: opts.baseColor, _texture: texture, _fire: opts.fire };
+
+        const mat = new THREE.ShaderMaterial({
+            uniforms: {
+                u_tex: { value: texture },
+                // 透视点尺寸换算：u_pixelScale = canvas_height / (2 * tan(FOV/2))
+                // gl_PointSize = a_size(米) * u_pixelScale / distance(米) → 像素
+                u_pixelScale: { value: 600 },
+            },
+            vertexShader: /* glsl */`
+                attribute float a_size;
+                attribute float a_alpha;
+                attribute float a_age;
+                attribute vec3 a_color;
+                uniform float u_pixelScale;
+                varying float v_alpha;
+                varying float v_age;
+                varying vec3 v_color;
+                void main() {
+                    v_alpha = a_alpha;
+                    v_age = a_age;
+                    v_color = a_color;
+                    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+                    gl_Position = projectionMatrix * mv;
+                    // 透视校正：a_size 为米单位，u_pixelScale 已含 FOV 与画布高度换算
+                    float ps = a_size * u_pixelScale / max(0.0001, -mv.z);
+                    // 保底 1.5 像素，防止远处粒子被裁剪到不可见
+                    gl_PointSize = max(1.5, ps);
+                }
+            `,
+            fragmentShader: /* glsl */`
+                uniform sampler2D u_tex;
+                varying float v_alpha;
+                varying float v_age;
+                varying vec3 v_color;
+                void main() {
+                    vec4 c = texture2D(u_tex, gl_PointCoord);
+                    // 纹理 RGB 乘 per-particle 颜色（按温度/密度区分层次）
+                    c.rgb *= v_color;
+                    c.a *= v_alpha;
+                    if (c.a < 0.01) discard;
+                    gl_FragColor = c;
+                }
+            `,
+            transparent: true,
+            depthWrite: false,
+            blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+            vertexColors: false,
+        });
+        const pts = new THREE.Points(geo, mat);
+        pts.frustumCulled = false;
+        return pts;
+    }
+
+    /**
+     * 批量设置粒子位置/颜色/寿命（由 voxel 数据驱动）
+     * @param {THREE.Points} pts
+     * @param {Array} items - [{pos:Vector3, color:Color, intensity, life}]
+     * @param {number} baseLift - 起始随机上升高度（voxel unit）
+     */
+    function _assignParticles(pts, items, baseLift) {
+        const geo = pts.geometry;
+        const pos = geo.attributes.position.array;
+        const col = geo.attributes.a_color.array;
+        const age = geo.attributes.a_age.array;
+        const size = geo.attributes.a_size.array;
+        const alpha = geo.attributes.a_alpha.array;
+        const ud = geo.userData;
+        const { life, seed, vel, born, _count, _sizeRange, _baseColor, _fire } = ud;
+        const usedCount = Math.min(items.length, _count);
+        // 已出生的全部老化
+        for (let i = 0; i < _count; i++) {
+            if (born[i]) age[i] += 0.0001;
+        }
+        for (let i = 0; i < _count; i++) {
+            if (i < usedCount) {
+                const it = items[i];
+                pos[i * 3]     = it.pos.x;
+                pos[i * 3 + 1] = it.pos.y + (baseLift ? (seed[i] % baseLift) * 0.05 : 0);
+                pos[i * 3 + 2] = it.pos.z;
+                // 颜色：item 颜色 × 层基础色 → 内层白热、中层橙、外层红（按温度+层次区分）
+                const c = it.color || _baseColor;
+                const tint = it.intensity !== undefined ? it.intensity : 1.0;
+                col[i * 3]     = Math.min(1.5, c.r * tint * _baseColor.r);
+                col[i * 3 + 1] = Math.min(1.5, c.g * tint * _baseColor.g);
+                col[i * 3 + 2] = Math.min(1.5, c.b * tint * _baseColor.b);
+                // 未出生 → 出生态；已出生 → 保持生命流动
+                if (!born[i]) {
+                    born[i] = 1;
+                    age[i] = 0;
+                    life[i] = (it.life || (_fire ? 1.2 : 3.0)) * (0.8 + 0.4 * (seed[i] % 1));
+                    // 初速度：火焰上冲，烟雾缓慢上浮+水平漂移
+                    vel[i * 3]     = _fire ? 0 : (Math.sin(seed[i]) * 0.15);
+                    vel[i * 3 + 1] = _fire ? (2.2 + (seed[i] % 1) * 1.5) : (0.4 + (seed[i] % 0.8));
+                    vel[i * 3 + 2] = _fire ? 0 : (Math.cos(seed[i]) * 0.15);
+                }
+                size[i] = _sizeRange[0] + (_sizeRange[1] - _sizeRange[0]) * (seed[i] % 1) * (it.intensity || 1.0);
+                alpha[i] = alpha[i]; // 由 _updateParticles 每帧推进淡入淡出
+            } else {
+                born[i] = 0;
+                age[i] = 0;
+                alpha[i] = 0;
+                pos[i * 3] = 0; pos[i * 3 + 1] = -10000; pos[i * 3 + 2] = 0; // 远离
+            }
+        }
+        geo.attributes.position.needsUpdate = true;
+        geo.attributes.a_color.needsUpdate = true;
+        geo.attributes.a_size.needsUpdate = true;
+        geo.attributes.a_alpha.needsUpdate = true;
+        geo.attributes.a_age.needsUpdate = true;
+    }
+
+    /**
+     * 每帧推进粒子（动画 + 淡入淡出 + 漂移 + 尺寸曲线）
+     */
+    function _updateParticles(pts, dtSec) {
+        const geo = pts.geometry;
+        const pos = geo.attributes.position.array;
+        const age = geo.attributes.a_age.array;
+        const size = geo.attributes.a_size.array;
+        const alpha = geo.attributes.a_alpha.array;
+        const ud = geo.userData;
+        const { life, seed, vel, born, _count, _sizeRange, _fire } = ud;
+        for (let i = 0; i < _count; i++) {
+            if (!born[i]) continue;
+            age[i] = Math.min(1.0, age[i] + dtSec / Math.max(0.01, life[i]));
+            const A = age[i];
+            // 淡入淡出：smoothstep(0,0.2,A) * (1 - smoothstep(0.7,1,A))
+            const fadeIn = A < 0.2 ? (A / 0.2) : 1.0;
+            const fadeOut = A > 0.7 ? Math.max(0, (1.0 - A) / 0.3) : 1.0;
+            alpha[i] = Math.max(0, fadeIn * fadeOut) * (_fire ? 0.95 : 0.72);
+            // 尺寸：出生小 → 成长 → 晚期扩大（烟雾扩散）
+            const grow = _fire
+                ? Math.sin(A * Math.PI) * 0.7 + 0.7  // 火焰脉冲（中部最大）
+                : 0.55 + A * 1.6;                    // 烟雾持续扩散变大
+            size[i] = _sizeRange[0] + (_sizeRange[1] - _sizeRange[0]) * (seed[i] % 1) * grow;
+            // 位置漂移
+            pos[i * 3]     += vel[i * 3]     * dtSec * (_fire ? 1.0 : 0.6);
+            pos[i * 3 + 1] += vel[i * 3 + 1] * dtSec * (_fire ? 1.2 : 0.5);
+            pos[i * 3 + 2] += vel[i * 3 + 2] * dtSec * (_fire ? 1.0 : 0.6);
+            // 火焰闪烁：速度周期扰动
+            if (_fire) {
+                const phase = (A * 3.0 + seed[i] * 0.1) % 1.0;
+                vel[i * 3 + 1] *= (0.88 + 0.35 * Math.sin(phase * Math.PI * 2 + seed[i]));
+            }
+        }
+        geo.attributes.position.needsUpdate = true;
+        geo.attributes.a_size.needsUpdate = true;
+        geo.attributes.a_alpha.needsUpdate = true;
+        geo.attributes.a_age.needsUpdate = true;
+    }
+
+    // 三层配置：内层稠密、中层中等、外层稀薄（增强体积感）
+    // sizeRange 单位：米（与 voxel_size 一致），允许火焰跨越多 voxel 形成体积感
+    const SMOKE_LAYERS = [
+        { count: 400, sizeRange: [0.6, 1.2], tint: [0.75, 0.75, 0.78] }, // 内密
+        { count: 300, sizeRange: [1.2, 2.4], tint: [0.66, 0.66, 0.70] }, // 中
+        { count: 200, sizeRange: [2.5, 4.5], tint: [0.55, 0.55, 0.60] }, // 外稀
+    ];
+    const FIRE_LAYERS = [
+        { count: 300, sizeRange: [0.5, 1.0], tint: [1.00, 1.00, 0.88], fire: true }, // 白心（热核）
+        { count: 350, sizeRange: [1.0, 2.0], tint: [1.00, 0.75, 0.15], fire: true }, // 橙黄（主焰）
+        { count: 200, sizeRange: [1.8, 3.5], tint: [1.00, 0.28, 0.00], fire: true }, // 外围红（光晕）
+    ];
+    let _smokeLayers = null;  // 由 _ensureFx 延迟初始化
+    let _fireLayers = null;
+
+    function _ensureFx() {
+        if (_smokeLayers && _fireLayers) return;
+        if (!scene) return;
+        if (!_smokeTex) _smokeTex = _makeSmokeTex();
+        if (!_fireTex)  _fireTex  = _makeFireTex();
+        _smokeLayers = SMOKE_LAYERS.map((L, i) => {
+            const pts = _makeParticleSys({
+                count: L.count,
+                sizeRange: L.sizeRange,
+                baseColor: new THREE.Color(L.tint[0], L.tint[1], L.tint[2]),
+                texture: _smokeTex,
+                additive: false,
+                fire: false,
+            });
+            smokeGroup.add(pts);
+            return pts;
+        });
+        _fireLayers = FIRE_LAYERS.map((L) => {
+            const pts = _makeParticleSys({
+                count: L.count,
+                sizeRange: L.sizeRange,
+                baseColor: new THREE.Color(L.tint[0], L.tint[1], L.tint[2]),
+                texture: _fireTex,
+                additive: true,
+                fire: true,
+            });
+            fireGroup.add(pts);
+            return pts;
+        });
+    }
 
     // ★ 漫游模式相关（已改为飞行模式）
     let pointerLockControls = null;     // PointerLockControls 实例
@@ -433,6 +739,303 @@
     let minimapHover = null;   // {x, y, z, type} 当前悬停的格子
     let minimapOptions = { grid: true, overlay: false, scale: true, focus: true };
     let thumbCanvases = [];    // 侧边缩略条 canvas 列表
+
+    // ================================================================
+    // ★ 平面图渲染缓存（cell-space，cell = min(W/w, H/h)）
+    //   静态层（墙/外轮廓/网格）预渲染为 OffscreenCanvas/Path2D，
+    //   zoom/pan 只需 blit 时套同一 transform，无需重建缓存。
+    //   三层 dirty：static(墙/外轮廓/网格) / dynamic(烟/火) / redraw(合成帧)
+    // ================================================================
+    let mmCache = {
+        walls: null, wallsKey: '',         // OffscreenCanvas: 墙体填充+描边
+        outline: null, outlineKey: '',     // Path2D: 建筑外轮廓
+        grid: null, gridKey: '',           // Path2D: 网格线
+        smokeFire: null, smokeFireKey: '', // OffscreenCanvas: 烟雾+高温（Phase 2）
+        overlayDim: new Map(),             // key=fz, value={canvas, key}（Phase 2）
+    };
+    let mmDirty = { static: true, dynamic: true, redraw: true };
+    let mmLastCamPos = new THREE.Vector3();
+    let mmLastCamRotY = 0;
+    let mmThumbDirty = true;          // ★ 缩略条 dirty 标记（Phase 4 节流）
+
+    // 创建 OffscreenCanvas（Safari < 16.4 降级到普通 canvas）
+    function createOffscreen(w, h) {
+        if (typeof OffscreenCanvas !== 'undefined') {
+            return new OffscreenCanvas(w, h);
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        return c;
+    }
+
+    // 与 drawMinimap/drawFloorLayer 一致的 cell 定义（物理像素）
+    function mmCell() {
+        if (!currentData || !minimapCanvas) return 0;
+        const w = currentData.width || 1, h = currentData.height || 1;
+        return Math.min(minimapCanvas.width / w, minimapCanvas.height / h);
+    }
+
+    // 缓存键：维度拼接，任一变化即重建
+    function mmStaticKey(zSlice) {
+        const d = currentData;
+        return [zSlice, d.width, d.height, minimapCanvas.width, minimapCanvas.height,
+                voxelSize, d.obstacle ? d.obstacle.length : 0].join('|');
+    }
+    function mmOutlineKey(zSlice, range) {
+        const d = currentData;
+        return [zSlice, range.bottom, range.top,
+                d.inside ? d.inside.length : 0, d.step].join('|');
+    }
+    function mmGridKey(cell, scale) {
+        const d = currentData;
+        const step = Math.max(1, Math.round(8 / (cell * scale)));
+        return [minimapOptions.grid, d.width, d.height, cell.toFixed(3), scale.toFixed(3), step].join('|');
+    }
+
+    // 重建墙体层（填充+描边）。dim=1.0 当前层，dim=0.25 overlay 暗化层
+    function rebuildWallsLayer(zSlice, cell, dim) {
+        const d = currentData;
+        const w = d.width || 1, h = d.height || 1;
+        const W = Math.ceil(w * cell), H = Math.ceil(h * cell);
+        const off = createOffscreen(W, H);
+        const c = off.getContext('2d');
+        const layer = d.obstacle?.[zSlice];
+        if (layer) {
+            // 填充：逐列 run-length 合并 fillRect（11388 次 → ~列数×段数）
+            c.fillStyle = `rgba(58,58,74,${dim})`;
+            for (let x = 0; x < w; x++) {
+                const col = layer[x]; if (!col) continue;
+                let runStart = -1;
+                for (let y = 0; y <= h; y++) {
+                    const on = (y < h) && (col[y] === 1);
+                    if (on && runStart < 0) runStart = y;
+                    else if (!on && runStart >= 0) {
+                        c.fillRect(x * cell, runStart * cell, cell + 0.5, (y - runStart) * cell + 0.5);
+                        runStart = -1;
+                    }
+                }
+            }
+            // 描边：4 条 Path2D 累积所有边缘后单次 stroke（cell > 3 才画）
+            if (cell > 3) {
+                c.strokeStyle = `rgba(120,130,160,${0.5 * dim})`;
+                c.lineWidth = 0.5;
+                const wallAt = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) && d.obstacle?.[zSlice]?.[x]?.[y] === 1;
+                const topP = new Path2D(), botP = new Path2D(), lftP = new Path2D(), rgtP = new Path2D();
+                for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
+                    if (!wallAt(x, y)) continue;
+                    if (!wallAt(x, y - 1)) { topP.moveTo(x * cell, y * cell); topP.lineTo((x + 1) * cell, y * cell); }
+                    if (!wallAt(x, y + 1)) { botP.moveTo(x * cell, (y + 1) * cell); botP.lineTo((x + 1) * cell, (y + 1) * cell); }
+                    if (!wallAt(x - 1, y)) { lftP.moveTo(x * cell, y * cell); lftP.lineTo(x * cell, (y + 1) * cell); }
+                    if (!wallAt(x + 1, y)) { rgtP.moveTo((x + 1) * cell, y * cell); rgtP.lineTo((x + 1) * cell, (y + 1) * cell); }
+                }
+                c.stroke(topP); c.stroke(botP); c.stroke(lftP); c.stroke(rgtP);
+            }
+        }
+        return off;
+    }
+
+    // 重建建筑外轮廓 Path2D（4 邻居判断结果存入单条路径）
+    function rebuildOutlinePath(zSlice, range, cell) {
+        const d = currentData;
+        if (!d.inside) return null;
+        const w = d.width || 1, h = d.height || 1;
+        const p = new Path2D();
+        const insideAt = (x, y) => {
+            if (x < 0 || y < 0 || x >= w || y >= h) return false;
+            for (let z = range.bottom + 1; z < range.top; z++) {
+                if (d.inside?.[z]?.[x]?.[y] === 1) return true;
+            }
+            return d.inside?.[zSlice]?.[x]?.[y] === 1;
+        };
+        for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
+            if (!insideAt(x, y)) continue;
+            if (!insideAt(x, y - 1)) { p.moveTo(x * cell, y * cell); p.lineTo((x + 1) * cell, y * cell); }
+            if (!insideAt(x, y + 1)) { p.moveTo(x * cell, (y + 1) * cell); p.lineTo((x + 1) * cell, (y + 1) * cell); }
+            if (!insideAt(x - 1, y)) { p.moveTo(x * cell, y * cell); p.lineTo(x * cell, (y + 1) * cell); }
+            if (!insideAt(x + 1, y)) { p.moveTo((x + 1) * cell, y * cell); p.lineTo((x + 1) * cell, (y + 1) * cell); }
+        }
+        return p;
+    }
+
+    // 重建网格线 Path2D（所有垂直+水平线累积到单条路径）
+    function rebuildGridPath(cell, scale) {
+        const d = currentData;
+        if (!minimapOptions.grid || cell * scale <= 4) return null;
+        const w = d.width || 1, h = d.height || 1;
+        const step = Math.max(1, Math.round(8 / (cell * scale)));
+        const p = new Path2D();
+        for (let x = 0; x <= w; x += step) { p.moveTo(x * cell, 0); p.lineTo(x * cell, h * cell); }
+        for (let y = 0; y <= h; y += step) { p.moveTo(0, y * cell); p.lineTo(w * cell, y * cell); }
+        return p;
+    }
+
+    // 按需重建静态缓存（按键比较）
+    function ensureStaticCaches(zSlice, range, cell, scale) {
+        const sk = mmStaticKey(zSlice);
+        if (sk !== mmCache.wallsKey) {
+            mmCache.walls = rebuildWallsLayer(zSlice, cell, 1.0);
+            mmCache.wallsKey = sk;
+            mmCache.overlayDim.clear();  // 墙体变了，暗化层一并失效
+        }
+        const ok = mmOutlineKey(zSlice, range);
+        if (ok !== mmCache.outlineKey) {
+            mmCache.outline = rebuildOutlinePath(zSlice, range, cell);
+            mmCache.outlineKey = ok;
+        }
+        const gk = mmGridKey(cell, scale);
+        if (gk !== mmCache.gridKey) {
+            mmCache.grid = rebuildGridPath(cell, scale);
+            mmCache.gridKey = gk;
+        }
+    }
+
+    // 动态缓存键：step 变了或 z 范围变了即重建
+    function mmDynamicKey(zSlice, range) {
+        return [currentData.step, zSlice, range.bottom, range.top].join('|');
+    }
+
+    // 重建烟雾+高温层（按 alpha/intensity 分桶 fillRect，11388 次 → ~8 次 fillStyle 切换）
+    function rebuildSmokeFireLayer(zSlice, range, cell) {
+        const d = currentData;
+        const w = d.width || 1, h = d.height || 1;
+        const W = Math.ceil(w * cell), H = Math.ceil(h * cell);
+        const off = createOffscreen(W, H);
+        const c = off.getContext('2d');
+        // 烟雾：按 alpha 离散为 8 档分桶
+        if (d.smoke) {
+            const buckets = new Map();  // alphaKey -> [x0,y0,x1,y1,...]
+            for (let x = 0; x < w; x++) {
+                for (let y = 0; y < h; y++) {
+                    let sMax = 0;
+                    for (let z = range.bottom; z < range.top; z++) {
+                        const s = d.smoke[z]?.[x]?.[y] || 0;
+                        if (s > sMax) sMax = s;
+                    }
+                    if (sMax > 0.1) {
+                        const alpha = Math.min(sMax * 0.85, 0.7);
+                        const k = Math.round(alpha * 8) / 8;  // 离散为 8 档
+                        let arr = buckets.get(k);
+                        if (!arr) { arr = []; buckets.set(k, arr); }
+                        arr.push(x, y);
+                    }
+                }
+            }
+            for (const [a, arr] of buckets) {
+                c.fillStyle = `rgba(110,135,165,${a})`;
+                for (let i = 0; i < arr.length; i += 2) {
+                    c.fillRect(arr[i] * cell, arr[i+1] * cell, cell + 0.5, cell + 0.5);
+                }
+            }
+        }
+        // 高温：按 intensity 离散为 8 档分桶
+        if (d.fire) {
+            const buckets = new Map();
+            for (let x = 0; x < w; x++) {
+                for (let y = 0; y < h; y++) {
+                    let tMax = T_AMB;
+                    for (let z = range.bottom; z < range.top; z++) {
+                        const t = d.fire[z]?.[x]?.[y] || T_AMB;
+                        if (t > tMax) tMax = t;
+                    }
+                    if (tMax > T_AMB + 1.0) {
+                        const intensity = Math.min((tMax - T_AMB) / (1173 - T_AMB), 1.0);
+                        const k = Math.round(intensity * 8) / 8;
+                        let arr = buckets.get(k);
+                        if (!arr) { arr = []; buckets.set(k, arr); }
+                        arr.push(x, y);
+                    }
+                }
+            }
+            for (const [intensity, arr] of buckets) {
+                const g = Math.floor(60 + 195 * (1 - intensity));
+                c.fillStyle = `rgba(255,${g},0,0.85)`;
+                for (let i = 0; i < arr.length; i += 2) {
+                    c.fillRect(arr[i] * cell, arr[i+1] * cell, cell + 0.5, cell + 0.5);
+                }
+            }
+        }
+        return off;
+    }
+
+    // 绘制动态实体（出口/火源/人员）——少量元素，每帧重画可接受
+    function drawDynamicEntities(ctx, zSlice, range, cell) {
+        const d = currentData;
+        const cellW = cell, cellH = cell;
+        function zInThisFloor(z) {
+            if (range) return z >= range.bottom && z < range.top;
+            return Math.abs(z - zSlice) <= 1;
+        }
+        // 出口（绿色 E 图标）
+        if (d.exits) {
+            for (const e of d.exits) {
+                if (zInThisFloor(e.z)) {
+                    const px = e.x * cellW + cellW / 2;
+                    const py = e.y * cellH + cellH / 2;
+                    const r = Math.max(3, cellW * 0.45);
+                    ctx.fillStyle = `rgba(76,175,80,1.0)`;
+                    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+                    if (cellW > 6) {
+                        ctx.fillStyle = '#fff';
+                        ctx.font = `bold ${Math.max(7, cellW*0.5)}px sans-serif`;
+                        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                        ctx.fillText('E', px, py);
+                    }
+                }
+            }
+        }
+        // 火源点（红色火焰图标）
+        if (d.fireSources) {
+            for (const f of d.fireSources) {
+                if (zInThisFloor(f.z)) {
+                    const px = f.x * cellW + cellW / 2;
+                    const py = f.y * cellH + cellH / 2;
+                    const r = Math.max(3, cellW * 0.5);
+                    ctx.fillStyle = `rgba(255,87,34,1.0)`;
+                    ctx.beginPath();
+                    ctx.moveTo(px, py - r);
+                    ctx.quadraticCurveTo(px + r, py - r/2, px + r/3, py + r/2);
+                    ctx.quadraticCurveTo(px, py + r, px - r/3, py + r/2);
+                    ctx.quadraticCurveTo(px - r, py - r/2, px, py - r);
+                    ctx.fill();
+                    ctx.strokeStyle = '#ff0'; ctx.lineWidth = 0.8; ctx.stroke();
+                }
+            }
+        }
+        // 人员（白色圆点）
+        if (d.persons) {
+            ctx.fillStyle = `rgba(255,255,255,1.0)`;
+            for (const p of d.persons) {
+                if (zInThisFloor(p[2])) {
+                    const px = p[0] * cellW + cellW / 2;
+                    const py = p[1] * cellH + cellH / 2;
+                    ctx.beginPath();
+                    ctx.arc(px, py, Math.max(2, cellW * 0.3), 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+    }
+
+    // overlay 暗化层缓存：复用 drawFloorLayer 画墙+暗化出口到 OffscreenCanvas
+    function ensureOverlayDim(fz, cell) {
+        let entry = mmCache.overlayDim.get(fz);
+        const key = mmStaticKey(fz);
+        if (!entry || entry.key !== key) {
+            const d = currentData;
+            const w = d.width || 1, h = d.height || 1;
+            const W = Math.ceil(w * cell), H = Math.ceil(h * cell);
+            const off = createOffscreen(W, H);
+            const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, d.depth || 1);
+            drawFloorLayer(off.getContext('2d'), off, fz, {
+                walls: true, smoke: false, fire: false, exits: true,
+                sources: false, persons: false, dim: 0.25, range: r
+            });
+            entry = { canvas: off, key };
+            mmCache.overlayDim.set(fz, entry);
+        }
+        return entry.canvas;
+    }
 
     // ================================================================
     // 3. 辅助函数
@@ -487,7 +1090,12 @@
                 update3DWorld(d);
                 // ★ 平面图：首次有数据时自适应画布 + 自动 fit 居中
                 ensurePlanViewReady(d);
-                if (lastStep !== d.step) lastStep = d.step;
+                if (lastStep !== d.step) {
+                    lastStep = d.step;
+                    mmDirty.dynamic = true;  // ★ step 变了，烟/火重算
+                    mmDirty.redraw = true;
+                    mmThumbDirty = true;     // ★ step 变了，缩略条重画
+                }
             })
             .catch(e => addLog('获取状态失败: ' + e, 'error'));
     }
@@ -496,9 +1104,10 @@
     function ensurePlanViewReady(d) {
         if (!minimapCanvas || !d || !d.width) return;
         // 若 voxelSize/dx 来自后端，覆盖默认值
-        if (d.voxelSize && d.voxelSize > 0) {
+        if (d.voxelSize && d.voxelSize > 0 && d.voxelSize !== voxelSize) {
             voxelSize = d.voxelSize;
             dx = voxelSize; dz = voxelSize;
+            mmDirty.static = true;  // ★ voxelSize 变，保守重建静态缓存
         }
         const sizeChanged = resizePlanViewCanvas(false);
         const dimsChanged = lastMinimapSize.gridW !== d.width || lastMinimapSize.gridH !== d.height;
@@ -507,6 +1116,8 @@
             minimapReady = true;
             lastMinimapSize.gridW = d.width;
             lastMinimapSize.gridH = d.height;
+            mmDirty.static = true;   // ★ 尺寸/网格变化，重建静态缓存
+            mmDirty.redraw = true;
         }
     }
 
@@ -526,6 +1137,8 @@
         lastMinimapSize.w = cssW;
         lastMinimapSize.h = cssH;
         if (doFit) fitMinimapToContent();
+        mmDirty.static = true;   // ★ canvas 物理尺寸变化，cell 变了，重建静态缓存
+        mmDirty.redraw = true;
         return true;
     }
 
@@ -581,6 +1194,10 @@
     function init3D() {
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0x111122);
+
+        // ★ 将烟/火粒子容器加入 scene（_ensureFx 会懒加载实际粒子层）
+        scene.add(smokeGroup);
+        scene.add(fireGroup);
 
         camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
         camera.position.set(50, 30, 50);
@@ -672,12 +1289,12 @@
     function animate() {
         requestAnimationFrame(animate);
 
+        const time = performance.now();
+        const delta = Math.min((time - prevTime) / 1000, 0.1);  // 限制单帧最大时间，避免卡顿瞬移
+        prevTime = time;
+
         // ★ 飞行模式：根据按键状态更新相机位置（无重力，可悬停）
         if (walkMode && pointerLockControls && pointerLockControls.isLocked) {
-            const time = performance.now();
-            const delta = Math.min((time - prevTime) / 1000, 0.1);  // 限制单帧最大时间，避免卡顿瞬移
-            prevTime = time;
-
             // 阻尼衰减（X/Z 平面阻尼让松开按键后逐渐停下；Y 轴也阻尼实现悬停）
             const damping = 6.0;
             moveVelocity.x -= moveVelocity.x * damping * delta;
@@ -719,6 +1336,21 @@
 
         // OrbitControls 仅在非漫游模式时更新
         if (!walkMode) controls.update();
+
+        // ★ 粒子系统每帧更新（烟/火：生命周期推进 + 淡入淡出 + 漂移 + 闪烁）
+        if (_smokeLayers && _smokeLayers.length) {
+            for (const pts of _smokeLayers) _updateParticles(pts, delta);
+            // 透视换算：u_pixelScale = canvas_h / (2 * tan(FOV/2))
+            const fov = camera.fov || 45;
+            const uScale = renderer.domElement.clientHeight / (2 * Math.tan(fov * Math.PI / 360));
+            for (const pts of _smokeLayers) pts.material.uniforms.u_pixelScale.value = uScale;
+        }
+        if (_fireLayers && _fireLayers.length) {
+            for (const pts of _fireLayers) _updateParticles(pts, delta);
+            const fov = camera.fov || 45;
+            const uScale = renderer.domElement.clientHeight / (2 * Math.tan(fov * Math.PI / 360));
+            for (const pts of _fireLayers) pts.material.uniforms.u_pixelScale.value = uScale;
+        }
 
         renderer.render(scene, camera);
 
@@ -847,6 +1479,20 @@
         }
         slabs.sort((a, b) => a - b);
 
+        // 1.3) 合并同一楼板的多个 z（slab 顶面+天花板面紧贴，间距≤2）
+        //      真实数据如 [17,18,32,46,47,59,60] 应合并为 [17,32,46,59]（4 层）
+        const MERGE_GAP = 2;
+        if (slabs.length > 1) {
+            const merged = [slabs[0]];
+            for (let i = 1; i < slabs.length; i++) {
+                if (slabs[i] - merged[merged.length - 1] > MERGE_GAP) {
+                    merged.push(slabs[i]);
+                }
+            }
+            slabs.length = 0;
+            slabs.push(...merged);
+        }
+
         // 1.5) 兜底：floorSlabs 为空时按层高（默认 3m）等分
         if (slabs.length === 0) {
             const layerHeight = Math.max(1, Math.round(3.0 / voxelSize));
@@ -869,23 +1515,54 @@
                 detectedFloors.push(bottom);
                 continue;
             }
-            // displayZ：从 slabZ+1 到 top-1 之间找第一个有 obstacle 或 inside 的 z
-            let displayZ = Math.min(depth - 1, bottom + 1);
+            // displayZ：跳过楼板本身（wallCount>50%），选墙体轮廓 z
+            // 真实数据中 slab z 覆盖率达 80%+，直接用会画成整块灰
+            let displayZ = -1;
             let found = false;
+            const _totalCells = w * h;
+            const _slabThreshold = _totalCells * 0.5;
+
+            // 第一优先：wallCount 在 3%-40% 之间（墙体轮廓）
             for (let z = bottom + 1; z < top; z++) {
-                let has = false;
-                if (currentData.obstacle && currentData.obstacle[z]) {
-                    scan: for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
-                        if (currentData.obstacle[z][x]?.[y] === 1) { has = true; break scan; }
-                    }
+                if (!currentData.obstacle || !currentData.obstacle[z]) continue;
+                let wc = 0;
+                for (let x = 0; x < w; x++) {
+                    const layer = currentData.obstacle[z][x];
+                    if (!layer) continue;
+                    for (let y = 0; y < h; y++) { if (layer[y] === 1) wc++; }
                 }
-                if (!has && currentData.inside && currentData.inside[z]) {
-                    scan2: for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
-                        if (currentData.inside[z][x]?.[y] === 1) { has = true; break scan2; }
-                    }
+                if (wc > _totalCells * 0.03 && wc <= _totalCells * 0.4) {
+                    displayZ = z; found = true; break;
                 }
-                if (has) { displayZ = z; found = true; break; }
             }
+            // 第二优先：跳过楼板，任意有 obstacle 的 z
+            if (!found) {
+                for (let z = bottom + 1; z < top; z++) {
+                    if (!currentData.obstacle || !currentData.obstacle[z]) continue;
+                    let wc = 0;
+                    for (let x = 0; x < w; x++) {
+                        const layer = currentData.obstacle[z][x];
+                        if (!layer) continue;
+                        for (let y = 0; y < h; y++) { if (layer[y] === 1) wc++; }
+                    }
+                    if (wc > 0 && wc <= _slabThreshold) { displayZ = z; found = true; break; }
+                }
+            }
+            // 第三优先：任意有 obstacle 的 z（含楼板本身）
+            if (!found) {
+                for (let z = bottom + 1; z < top; z++) {
+                    if (currentData.obstacle && currentData.obstacle[z]) {
+                        let has = false;
+                        for (let x = 0; x < w && !has; x++) {
+                            const layer = currentData.obstacle[z][x];
+                            if (!layer) continue;
+                            for (let y = 0; y < h; y++) { if (layer[y] === 1) { has = true; break; } }
+                        }
+                        if (has) { displayZ = z; found = true; break; }
+                    }
+                }
+            }
+            // 最终兜底：取中间 z
             if (!found) displayZ = Math.min(depth - 1, bottom + Math.max(1, Math.floor((top - bottom) / 2)));
             floorRanges.push({ slabZ, displayZ, bottom, top });
             detectedFloors.push(displayZ);
@@ -1127,6 +1804,17 @@
         const cell = Math.min(W / w, H / h);
         const cellW = cell, cellH = cell;
 
+        // ★ 跳帧：observation 静止且无 dirty 时直接返回（walkMode 相机移动强制重画）
+        const camMoved = walkMode
+            || Math.abs(camera.position.x - mmLastCamPos.x) > 1e-4
+            || Math.abs(camera.position.y - mmLastCamPos.y) > 1e-4
+            || Math.abs(camera.position.z - mmLastCamPos.z) > 1e-4
+            || Math.abs(camera.rotation.y - mmLastCamRotY) > 1e-4;
+        mmLastCamPos.copy(camera.position);
+        mmLastCamRotY = camera.rotation.y;
+        if (!mmDirty.redraw && !camMoved) return;
+        mmDirty.redraw = false;
+
         // 楼层检测（数据更新后重新检测，保证人员/火出现后能选到正确的默认楼层；
         //   detectFloors 内部会保留用户已选的 currentFloorZ，只在无效时重选）
         if (detectedFloors.length === 0 || __lastDetectStep !== currentData.step) {
@@ -1141,61 +1829,56 @@
         const zSlice = (currentFloorZ >= 0 && currentFloorZ < depth) ? currentFloorZ : Math.floor(depth / 2);
         const curRange = rangeOfDisplayZ(zSlice) || fallbackRangeForZ(zSlice, depth);
 
+        // ★ 按需重建静态缓存（墙/外轮廓/网格）
+        if (mmDirty.static) {
+            ensureStaticCaches(zSlice, curRange, cell, minimapView.scale);
+            mmDirty.static = false;
+        }
+
         ctx.save();
         ctx.translate(minimapView.offsetX, minimapView.offsetY);
         ctx.scale(minimapView.scale, minimapView.scale);
 
-        // 叠加模式：先画其它楼层（暗化）
+        // ★ 按需重建动态缓存（烟/火）
+        if (mmDirty.dynamic) {
+            const dk = mmDynamicKey(zSlice, curRange);
+            if (dk !== mmCache.smokeFireKey) {
+                mmCache.smokeFire = rebuildSmokeFireLayer(zSlice, curRange, cell);
+                mmCache.smokeFireKey = dk;
+            }
+            mmDirty.dynamic = false;
+        }
+
+        // 叠加模式：先画其它楼层（暗化）—— 从 overlayDim 缓存 blit
         if (minimapOptions.overlay && detectedFloors.length > 1) {
             for (const fz of detectedFloors) {
                 if (fz === zSlice) continue;
-                const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, depth);
-                drawFloorLayer(ctx, minimapCanvas, fz, {
-                    walls: true, smoke: false, fire: false, exits: true,
-                    sources: false, persons: false, dim: 0.25, range: r
-                });
+                const dimCanvas = ensureOverlayDim(fz, cell);
+                if (dimCanvas) ctx.drawImage(dimCanvas, 0, 0);
             }
         }
 
-        // 当前楼层（完整图层 + 该层 z 范围，使人员/火/出口/烟全部显示）
-        drawFloorLayer(ctx, minimapCanvas, zSlice, {
-            walls: true, smoke: true, fire: true, exits: true,
-            sources: true, persons: true, dim: 1.0, range: curRange
-        });
+        // ★ 当前层墙体：从缓存 blit
+        if (mmCache.walls) ctx.drawImage(mmCache.walls, 0, 0);
 
-        // 网格线
-        if (minimapOptions.grid && cellW * minimapView.scale > 4) {
+        // ★ 当前层烟雾+高温：从缓存 blit
+        if (mmCache.smokeFire) ctx.drawImage(mmCache.smokeFire, 0, 0);
+
+        // ★ 当前层动态实体（出口/火源/人员）：每帧重画（少量元素）
+        drawDynamicEntities(ctx, zSlice, curRange, cell);
+
+        // ★ 网格线：从缓存 Path2D 单次 stroke
+        if (mmCache.grid) {
             ctx.strokeStyle = 'rgba(80,100,140,0.15)';
             ctx.lineWidth = 0.5 / minimapView.scale;
-            const step = Math.max(1, Math.round(8 / (cellW * minimapView.scale))) ; // 自适应步长
-            for (let x = 0; x <= w; x += step) {
-                ctx.beginPath(); ctx.moveTo(x * cellW, 0); ctx.lineTo(x * cellW, h * cellH); ctx.stroke();
-            }
-            for (let y = 0; y <= h; y += step) {
-                ctx.beginPath(); ctx.moveTo(0, y * cellH); ctx.lineTo(w * cellW, y * cellH); ctx.stroke();
-            }
+            ctx.stroke(mmCache.grid);
         }
 
-        // 建筑外轮廓高亮（在该层范围内聚合 inside，跳过 slabZ 本身避免楼板干扰）
-        if (currentData.inside) {
-            const insideAt = (x, y) => {
-                if (x < 0 || y < 0 || x >= w || y >= h) return false;
-                const b = curRange.bottom, t = curRange.top;
-                for (let z = b + 1; z < t; z++) if (currentData.inside?.[z]?.[x]?.[y] === 1) return true;
-                return currentData.inside?.[zSlice]?.[x]?.[y] === 1;
-            };
+        // ★ 建筑外轮廓高亮：从缓存 Path2D 单次 stroke
+        if (mmCache.outline) {
             ctx.strokeStyle = 'rgba(100,150,255,0.5)';
             ctx.lineWidth = 1.5 / minimapView.scale;
-            for (let x = 0; x < w; x++) {
-                for (let y = 0; y < h; y++) {
-                    if (insideAt(x, y)) {
-                        if (!insideAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, y * cellH); ctx.stroke(); }
-                        if (!insideAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, (y + 1) * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
-                        if (!insideAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo(x * cellW, (y + 1) * cellH); ctx.stroke(); }
-                        if (!insideAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
-                    }
-                }
-            }
+            ctx.stroke(mmCache.outline);
         }
 
         ctx.restore();
@@ -1378,15 +2061,22 @@
                 currentFloorZ = detectedFloors[i];
                 updateFloorLabel();
                 addLog(`🗺️ 跳转楼层 F${i + 1} (z=${currentFloorZ})`, 'info');
+                mmDirty.static = true;   // ★ zSlice 变了，重建静态缓存
+                mmDirty.dynamic = true;
+                mmDirty.redraw = true;
+                mmThumbDirty = true;     // ★ 楼层切换，缩略条高亮更新
             });
             wrap.appendChild(lbl); wrap.appendChild(cvs);
             strip.appendChild(wrap);
             thumbCanvases.push({ canvas: cvs, floorZ: fz, idx: i });
         }
+        mmThumbDirty = true;  // ★ 新建/重建缩略条，触发首次重画
     }
 
     function drawThumbStrip() {
         if (!thumbCanvases.length) return;
+        if (!mmThumbDirty) return;  // ★ Phase 4 节流：无变化跳过整帧重画
+        mmThumbDirty = false;
         const depth = (currentData && currentData.depth) || 1;
         for (const t of thumbCanvases) {
             const ctx = t.canvas.getContext('2d');
@@ -1439,6 +2129,10 @@
             currentFloorZ = detectedFloors[idx + 1];
             updateFloorLabel();
             addLog(`🗺️ 切换到楼层 F${idx + 2} (z=${currentFloorZ})`, 'info');
+            mmDirty.static = true;   // ★ zSlice 变了，重建静态缓存
+            mmDirty.dynamic = true;
+            mmDirty.redraw = true;
+            mmThumbDirty = true;     // ★ 楼层切换，缩略条高亮更新
         }
     });
     document.getElementById('floor-down').addEventListener('click', () => {
@@ -1449,6 +2143,10 @@
             currentFloorZ = detectedFloors[idx - 1];
             updateFloorLabel();
             addLog(`🗺️ 切换到楼层 F${idx} (z=${currentFloorZ})`, 'info');
+            mmDirty.static = true;   // ★ zSlice 变了，重建静态缓存
+            mmDirty.dynamic = true;
+            mmDirty.redraw = true;
+            mmThumbDirty = true;     // ★ 楼层切换，缩略条高亮更新
         }
     });
 
@@ -1462,14 +2160,18 @@
     document.getElementById('btn-grid').addEventListener('click', (e) => {
         minimapOptions.grid = !minimapOptions.grid;
         e.target.classList.toggle('active', minimapOptions.grid);
+        mmDirty.static = true;   // ★ grid 切换，重建 grid Path2D（mmGridKey 含 minimapOptions.grid）
+        mmDirty.redraw = true;
     });
     document.getElementById('btn-overlay').addEventListener('click', (e) => {
         minimapOptions.overlay = !minimapOptions.overlay;
         e.target.classList.toggle('active', minimapOptions.overlay);
+        mmDirty.redraw = true;  // ★ overlay 切换，触发重画
     });
     document.getElementById('btn-scale').addEventListener('click', (e) => {
         minimapOptions.scale = !minimapOptions.scale;
         e.target.classList.toggle('active', minimapOptions.scale);
+        mmDirty.redraw = true;  // ★ 比例尺/指北针切换，触发重画
     });
     document.getElementById('btn-focus').addEventListener('click', (e) => {
         minimapOptions.focus = !minimapOptions.focus;
@@ -1480,6 +2182,7 @@
         resizePlanViewCanvas(false);
         fitMinimapToContent();
         addLog('🗺️ 平面图已自动适配视图', 'info');
+        mmDirty.redraw = true;  // ★ 适配后 scale/offset 变化，触发重画
     });
 
     // ★ 小地图交互：滚轮缩放 / 右键平移 / 点击定位 / 悬停 tooltip
@@ -1500,6 +2203,7 @@
             minimapView.offsetX = mx - (mx - minimapView.offsetX) * (ns / oldScale);
             minimapView.offsetY = my - (my - minimapView.offsetY) * (ns / oldScale);
             minimapView.scale = ns;
+            mmDirty.redraw = true;  // ★ 缩放变化，触发重画
         }, { passive: false });
 
         cvs().addEventListener('mousedown', (e) => {
@@ -1520,6 +2224,7 @@
                 minimapView.offsetX += dx_;
                 minimapView.offsetY += dy_;
                 lastX = e.clientX; lastY = e.clientY;
+                mmDirty.redraw = true;  // ★ 平移变化，触发重画
             }
         });
         cvs().addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1568,10 +2273,12 @@
                 minimapHover = null;
                 tooltip.style.display = 'none';
             }
+            mmDirty.redraw = true;  // ★ hover 变化，触发重画（高亮框）
         });
         cvs().addEventListener('mouseleave', () => {
             minimapHover = null;
             document.getElementById('minimap-tooltip').style.display = 'none';
+            mmDirty.redraw = true;  // ★ hover 清除，触发重画
         });
     })();
 
@@ -1645,10 +2352,9 @@
         scene.remove(personGroup);
         personGroup = new THREE.Group();
 
-        const matrices = [];
-        const colors = [];
-        const dummy = new THREE.Object3D();
-
+        // ---- 收集火源/烟雾 voxel 条目（分层打包，用于 _assignParticles 分配） ----
+        const fireItems = [];
+        const smokeItems = [];
         // ★ 遍历 3D 体素数据，仅仅提取火焰/烟雾部分
         // 坐标系约定：体素网格 (x, y, z) 中 z 为垂直方向(对应 IFC Z)，
         //   Three.js 中 Y 为垂直方向。因此渲染时需 Y-Z 互换：
@@ -1664,56 +2370,94 @@
                     const temp = data.fire[z]?.[x]?.[y] || T_AMB;
                     const smoke = data.smoke[z]?.[x]?.[y] || 0;
 
-                    // ★ 跳过实体墙体！因为如果 glTF 加载成功，墙体由精细模型负责。
-                    // 如果没有 glTF，obs===1 也不会显示（保留火烟供用户看）
+                    // ★ 跳过实体墙体
                     if (obs !== undefined && obs === 1) continue;
 
-                    let color = null;
-                    let draw = false;
-
-                    // 渲染火源
+                    // 🔥 火源（温度分级 → 颜色/强度）
                     if (temp > T_AMB + 1.0) {
-                        draw = true;
-                        color = temperatureToColor(temp);
+                        const c = temperatureToColor(temp);
+                        // 温度越高，颜色越亮、寿命越短（火焰闪烁越快）
+                        const intensity = Math.min(1.4, 0.5 + (temp - T_AMB) / 800);
+                        const life = Math.max(0.35, 1.3 - (temp - T_AMB) / 1200);
+                        // 每个 fire voxel 分摊到多个粒子（热核最多）：3~12 个
+                        const n = Math.min(12, 2 + Math.floor((temp - T_AMB) / 80));
+                        for (let k = 0; k < n; k++) {
+                            fireItems.push({
+                                pos: new THREE.Vector3(
+                                    xPos + (Math.random() - 0.5) * dx * 0.4,
+                                    yPos + (Math.random() - 0.5) * dz * 0.25,
+                                    zPos + (Math.random() - 0.5) * dx * 0.4
+                                ),
+                                color: c,
+                                intensity: intensity * (0.65 + Math.random() * 0.5),
+                                life: life * (0.7 + Math.random() * 0.6),
+                            });
+                        }
                     }
-                    // 渲染烟雾
-                    else if (smoke > 0.1) {
-                        draw = true;
-                        color = new THREE.Color(0.5, 0.5, 0.5);
-                    }
-
-                    if (draw && color) {
-                        dummy.position.set(xPos, yPos, zPos);  // Three.js (x, y垂直, z水平)
-                        dummy.updateMatrix();
-                        matrices.push(dummy.matrix.clone());
-                        colors.push(color);
+                    // 💨 烟雾（密度分级 → 尺寸/颜色/寿命）
+                    else if (smoke > 0.05) {
+                        const sNorm = Math.min(smoke / 0.3, 1.0); // 0.3 饱和
+                        const gray = 0.88 - sNorm * 0.55;
+                        const c = new THREE.Color(gray, gray, gray - 0.02);
+                        const intensity = 0.4 + sNorm * 0.9;
+                        // 烟密度越高 → 粒子越多、寿命越长、上升越慢
+                        const n = Math.min(8, 1 + Math.floor(sNorm * 7));
+                        for (let k = 0; k < n; k++) {
+                            smokeItems.push({
+                                pos: new THREE.Vector3(
+                                    xPos + (Math.random() - 0.5) * dx * 0.7,
+                                    yPos + (Math.random() - 0.5) * dz * 0.4,
+                                    zPos + (Math.random() - 0.5) * dx * 0.7
+                                ),
+                                color: c,
+                                intensity: intensity * (0.6 + Math.random() * 0.5),
+                                life: (2.0 + sNorm * 5.0) * (0.75 + Math.random() * 0.5),
+                            });
+                        }
                     }
                 }
             }
         }
 
-        // 生成半透明火焰/烟雾实例
-        // 几何体尺寸也按 Y-Z 互换后的语义：Three.js (x=dx, y垂直=dz, z水平=dx)
-        if (matrices.length > 0) {
-            if (!voxelMesh || matrices.length !== voxelMesh.count) {
-                if (voxelMesh) scene.remove(voxelMesh);
-                const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
-                const material = new THREE.MeshLambertMaterial({
-                    vertexColors: false,
-                    transparent: true,
-                    opacity: 0.8,
-                    depthWrite: false
-                });
-                voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
-                scene.add(voxelMesh);
+        // ---- 分配到三层粒子系统（内密/中/外稀，数量与强度成正比分配） ----
+        _ensureFx();
+        if (scene && !scene.children.includes(smokeGroup)) scene.add(smokeGroup);
+        if (scene && !scene.children.includes(fireGroup))  scene.add(fireGroup);
+
+        function _splitForLayers(items, layerCounts) {
+            // 按比例打乱后切分给各层；密度越高分给外层越多（体积感）
+            const copy = items.slice();
+            for (let i = copy.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [copy[i], copy[j]] = [copy[j], copy[i]];
             }
-            for (let i = 0; i < matrices.length; i++) {
-                voxelMesh.setMatrixAt(i, matrices[i]);
-                voxelMesh.setColorAt(i, colors[i]);
-            }
-            voxelMesh.instanceMatrix.needsUpdate = true;
-            voxelMesh.instanceColor.needsUpdate = true;
+            const total = layerCounts.reduce((a, b) => a + b, 0);
+            let consumed = 0;
+            return layerCounts.map((cnt) => {
+                const take = Math.min(cnt, Math.ceil(copy.length * cnt / total));
+                const slice = copy.slice(consumed, consumed + take);
+                consumed += take;
+                return slice;
+            });
         }
+
+        if (_smokeLayers && smokeItems.length > 0) {
+            const counts = SMOKE_LAYERS.map(L => L.count);
+            const slices = _splitForLayers(smokeItems, counts);
+            _smokeLayers.forEach((pts, i) => _assignParticles(pts, slices[i], 1));
+        } else if (_smokeLayers) {
+            _smokeLayers.forEach(pts => _assignParticles(pts, [], 0));
+        }
+        if (_fireLayers && fireItems.length > 0) {
+            const counts = FIRE_LAYERS.map(L => L.count);
+            const slices = _splitForLayers(fireItems, counts);
+            _fireLayers.forEach((pts, i) => _assignParticles(pts, slices[i], 2));
+        } else if (_fireLayers) {
+            _fireLayers.forEach(pts => _assignParticles(pts, [], 0));
+        }
+
+        // 隐藏/移除旧版方块化 voxelMesh（用粒子系统取代）
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
 
         // ★ 人员生成 (无论是否加载了 glTF，坐标与体素网络完全对齐)
         // 人员数据 p = [px, py, pz] 为体素坐标 (pz 为垂直方向)

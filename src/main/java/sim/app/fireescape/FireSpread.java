@@ -292,7 +292,8 @@ public class FireSpread implements Steppable {
                 }
             }
 
-            // ===== 优化项 11: 羽流卷吸 =====
+            // ===== 优化项 11: 羽流卷吸（LES模式下禁用，由速度场浮力自然产生） =====
+            if (!fire.useLESSmoke) {
             double Q_src = Q_total / nSources;
             double Q_13 = Math.pow(Q_src, 1.0 / 3.0);
             int plumeTop = Math.min(cz + PLUME_MAX_HEIGHT_CELLS, d);
@@ -321,6 +322,7 @@ public class FireSpread implements Steppable {
                     }
                 }
             }
+            } // end if (!useLESSmoke)
         }
 
         // ===================================================================
@@ -440,6 +442,15 @@ public class FireSpread implements Steppable {
             }
         }
 
+        // ===================================================================
+        // (7)(8) 烟雾输运：LES 求解器 或 原有经验模型
+        // ===================================================================
+        if (fire.useLESSmoke && fire.smokeLESolver != null) {
+            // ===== LES 模式：显式速度场 + 压力投影 + Smagorinsky + Semi-Lagrangian =====
+            // 求解器直接更新 nextT（温度平流）和 nextC（烟雾平流+扩散）
+            // 羽流、顶棚射流由浮力驱动的速度场自然产生，无需经验模型
+            fire.smokeLESolver.step(nextT, nextC, obstacle, inside, DT_FINAL);
+        } else {
         // ===================================================================
         // (7) 烟气扩散 - 优化项 13: 分层抑制(Richardson 数)
         // ===================================================================
@@ -650,6 +661,8 @@ public class FireSpread implements Steppable {
                     nextC[x][y][z] = C_afterAdvection[x][y][z];
                     nextT[x][y][z] = T_afterAdvection[x][y][z];
                 }
+
+        } // end of else (非LES模式)
 
         // ===================================================================
         // (9) 冷却衰减 + 优化项 14: 高温烟 Stefan-Boltzmann 辐射
