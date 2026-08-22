@@ -144,6 +144,7 @@
     let personGroup = new THREE.Group();
     let lastStep = -1, currentData = null;
     const T_AMB = 293.15;
+    const T_MAX_HOT = 1273.15;
 
     const dx = 0.5, dz = 0.25;
     const clock = new THREE.Clock();
@@ -194,7 +195,7 @@
                 currentData = d;
                 updateStats(d);
                 update3DWorld(d);
-                if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz);
+                if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz, d.fire);
                 if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth);
                 updateFireLights(d);
                 if (lastStep !== d.step) lastStep = d.step;
@@ -378,13 +379,51 @@
             scene.add(this.points);
         }
 
-        updateSources(fireSources, dx, dz) {
-            this.sources = (fireSources || []).map(f => ({
+        updateSources(fireSources, dx, dz, fireData) {
+            const srcs = (fireSources || []).map(f => ({
                 pos: new THREE.Vector3(f.x * dx + dx/2, f.z * dz + dz/2, f.y * dx + dx/2),
                 flameHeight: f.flameHeight || 2.0,
-                emissionRate: Math.min(80, 20 + (f.heatRelease || 0) * 0.1),
+                emissionRate: Math.min(120, 20 + (f.heatRelease || 0) * 0.15),
                 accumulator: 0
             }));
+            // ★ 次级火源: 温度场高温体素(火焰蔓延区域)也发射粒子
+            if (fireData && fireData.length) {
+                const depth = fireData.length;
+                const w = (fireData[0] || []).length;
+                const h = (fireData[0]?.[0]) ? fireData[0][0].length : 0;
+                if (w && h) {
+                    const thresh = T_AMB + 0.25 * (T_MAX_HOT - T_AMB);
+                    const baseFh = (fireSources && fireSources[0] && fireSources[0].flameHeight) || 2.0;
+                    const spread = [];
+                    for (let z = 0; z < depth; z++) {
+                        const layer = fireData[z];
+                        if (!layer) continue;
+                        for (let x = 0; x < w; x++) {
+                            const row = layer[x];
+                            if (!row) continue;
+                            for (let y = 0; y < h; y++) {
+                                const t = row[y] || 0;
+                                if (t > thresh) {
+                                    spread.push({ t: t, x: x, y: y, z: z });
+                                }
+                            }
+                        }
+                    }
+                    // 按温度取前 150 个, 控制粒子总量
+                    spread.sort((a, b) => b.t - a.t);
+                    const cap = Math.min(spread.length, 150);
+                    for (let i = 0; i < cap; i++) {
+                        const s = spread[i];
+                        srcs.push({
+                            pos: new THREE.Vector3(s.x * dx + dx/2, s.z * dz + dz/2, s.y * dx + dx/2),
+                            flameHeight: baseFh * 0.6,
+                            emissionRate: Math.min(30, 10 + (s.t - T_AMB) * 0.015),
+                            accumulator: 0
+                        });
+                    }
+                }
+            }
+            this.sources = srcs;
         }
 
         emit(dt) {
@@ -422,7 +461,7 @@
 
             this.emit(dt);
             // 生命衰减
-            const decay = dt * 1.5;  // 粒子寿命 ~0.67s
+            const decay = dt * 1.2;  // 粒子寿命 ~0.83s
             for (let i = 0; i < this.activeCount; i++) {
                 this.life[i] -= decay;
             }
@@ -513,7 +552,7 @@
             if (dist > 0.5) discard;
             // 软边高斯
             float alpha = smoothstep(0.5, 0.0, dist);
-            alpha *= 0.35 * vDensity;  // 烟雾半透明
+            alpha *= 0.45 * vDensity;  // 烟雾半透明
             // 颜色: 淡灰 → 深灰 (基于生命和随机)
             float gray = 0.35 + 0.25 * vSeed + (1.0 - vDensity) * 0.2;
             vec3 col = vec3(gray);
@@ -599,7 +638,7 @@
         emit(dt) {
             const scale = this.emissionScale;
             for (const cell of this.emissionCells) {
-                const rate = Math.min(5, 0.5 + cell.density * 8) * scale;
+                const rate = Math.min(8, 1 + cell.density * 12) * scale;
                 cell.acc += rate * dt;
                 const n = Math.floor(cell.acc);
                 cell.acc -= n;
@@ -614,7 +653,7 @@
                     this.velocities[idx*3+2] = cell.vel.z + (Math.random() - 0.5) * 0.2;
                     this.life[idx] = 1.0;
                     this.seed[idx] = Math.random();
-                    this.size[idx] = dx * 1.5 + Math.random() * dx;
+                    this.size[idx] = 40 + Math.random() * 25;
                 }
             }
         }
