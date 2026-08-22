@@ -148,6 +148,7 @@
     const dx = 0.5, dz = 0.25;
     const clock = new THREE.Clock();
     let fireParticles = null;
+    let smokeParticles = null;
 
     // ================================================================
     // 3. 辅助函数
@@ -193,6 +194,7 @@
                 updateStats(d);
                 update3DWorld(d);
                 if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz);
+                if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth);
                 if (lastStep !== d.step) lastStep = d.step;
             })
             .catch(e => addLog('获取状态失败: ' + e, 'error'));
@@ -411,6 +413,202 @@
         }
     }
 
+    // ============================================================
+    // 烟雾粒子系统 (GPU Shader)
+    // ============================================================
+    const smokeVertexShader = `
+        attribute float aLife;
+        attribute float aSeed;
+        attribute float aSize;
+        attribute vec3  aVelocity;
+        uniform float uTime;
+        varying float vLife;
+        varying float vSeed;
+        varying float vDensity;
+
+        vec3 noise3(vec3 p) {
+            return vec3(
+                sin(p.y*1.5 + p.z + uTime*0.5),
+                sin(p.x*1.5 + p.z*1.2 + uTime*0.4),
+                sin(p.x*1.2 + p.y*1.5 + uTime*0.6)
+            ) * 0.5;
+        }
+
+        void main() {
+            vLife = aLife;
+            vSeed = aSeed;
+            float t = 1.0 - aLife;
+            vec3 pos = position + aVelocity * t * 3.0;
+            // 烟雾湍流 (比火焰慢、幅度大)
+            vec3 turb = noise3(pos * 0.8 + aSeed * 5.0) * t * 1.5;
+            pos += turb;
+            // 烟雾随时间膨胀
+            pos *= 1.0 + t * 0.5;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            float grow = 1.0 + t * 2.0;  // 粒子越老越大
+            gl_PointSize = aSize * grow * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+            vDensity = aLife;
+        }
+    `;
+
+    const smokeFragmentShader = `
+        varying float vLife;
+        varying float vSeed;
+        varying float vDensity;
+        void main() {
+            vec2 uv = gl_PointCoord - 0.5;
+            float dist = length(uv);
+            if (dist > 0.5) discard;
+            // 软边高斯
+            float alpha = smoothstep(0.5, 0.0, dist);
+            alpha *= 0.35 * vDensity;  // 烟雾半透明
+            // 颜色: 淡灰 → 深灰 (基于生命和随机)
+            float gray = 0.35 + 0.25 * vSeed + (1.0 - vDensity) * 0.2;
+            vec3 col = vec3(gray);
+            gl_FragColor = vec4(col, alpha);
+        }
+    `;
+
+    class SmokeParticleSystem {
+        constructor(scene, maxParticles = 6000) {
+            this.scene = scene;
+            this.maxParticles = maxParticles;
+            this.activeCount = 0;
+            this.emissionCells = [];  // [{pos, vel, density, acc}]
+            this.emissionScale = 1.0;
+
+            const geo = new THREE.BufferGeometry();
+            this.positions = new Float32Array(maxParticles * 3);
+            this.velocities = new Float32Array(maxParticles * 3);
+            this.life = new Float32Array(maxParticles);
+            this.seed = new Float32Array(maxParticles);
+            this.size = new Float32Array(maxParticles);
+            geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+            geo.setAttribute('aVelocity', new THREE.BufferAttribute(this.velocities, 3));
+            geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+            geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
+            geo.setDrawRange(0, 0);
+
+            this.material = new THREE.ShaderMaterial({
+                vertexShader: smokeVertexShader,
+                fragmentShader: smokeFragmentShader,
+                uniforms: {
+                    uTime: { value: 0 }
+                },
+                transparent: true,
+                blending: THREE.NormalBlending,
+                depthWrite: false
+            });
+
+            this.points = new THREE.Points(geo, this.material);
+            this.points.frustumCulled = false;
+            scene.add(this.points);
+        }
+
+        // 从后端浓度场收集发射单元: 浓度 > 0.05 的体素, 速度=垂直上升+温度梯度水平分量
+        updateFromField(smokeData, fireData, dx, dz, depth) {
+            this.emissionCells = [];
+            if (!smokeData || !fireData || !depth) return;
+            const w = (smokeData[0] || []).length;
+            const h = (smokeData[0]?.[0]) ? smokeData[0][0].length : 0;
+            if (!w || !h) return;
+
+            const cells = [];
+            for (let z = 0; z < depth; z++) {
+                const layer = smokeData[z];
+                if (!layer) continue;
+                for (let x = 0; x < w; x++) {
+                    const row = layer[x];
+                    if (!row) continue;
+                    for (let y = 0; y < h; y++) {
+                        const c = row[y] || 0;
+                        if (c <= 0.05) continue;
+                        // 温度梯度水平分量 (驱动水平飘散)
+                        const xm = Math.max(0, x - 1), xp = Math.min(w - 1, x + 1);
+                        const ym = Math.max(0, y - 1), yp = Math.min(h - 1, y + 1);
+                        const gx = ((fireData[z]?.[xp]?.[y] || 0) - (fireData[z]?.[xm]?.[y] || 0)) * 0.002;
+                        const gz = ((fireData[z]?.[x]?.[yp] || 0) - (fireData[z]?.[x]?.[ym] || 0)) * 0.002;
+                        const pos = new THREE.Vector3(x * dx + dx/2, z * dz + dz/2, y * dx + dx/2);
+                        cells.push({
+                            pos: pos,
+                            vel: new THREE.Vector3(gx, 1.0, gz),
+                            density: c,
+                            acc: 0
+                        });
+                    }
+                }
+            }
+            // 只保留浓度最高的前 500 个单元, 聚焦烟羽与顶棚层
+            cells.sort((a, b) => b.density - a.density);
+            this.emissionCells = cells.slice(0, 500);
+        }
+
+        emit(dt) {
+            const scale = this.emissionScale;
+            for (const cell of this.emissionCells) {
+                const rate = Math.min(5, 0.5 + cell.density * 8) * scale;
+                cell.acc += rate * dt;
+                const n = Math.floor(cell.acc);
+                cell.acc -= n;
+                for (let i = 0; i < n; i++) {
+                    if (this.activeCount >= this.maxParticles) return;
+                    const idx = this.activeCount++;
+                    this.positions[idx*3]   = cell.pos.x + (Math.random() - 0.5) * dx;
+                    this.positions[idx*3+1] = cell.pos.y + (Math.random() - 0.5) * dz;
+                    this.positions[idx*3+2] = cell.pos.z + (Math.random() - 0.5) * dx;
+                    this.velocities[idx*3]   = cell.vel.x + (Math.random() - 0.5) * 0.2;
+                    this.velocities[idx*3+1] = cell.vel.y * (0.8 + Math.random() * 0.4);
+                    this.velocities[idx*3+2] = cell.vel.z + (Math.random() - 0.5) * 0.2;
+                    this.life[idx] = 1.0;
+                    this.seed[idx] = Math.random();
+                    this.size[idx] = dx * 1.5 + Math.random() * dx;
+                }
+            }
+        }
+
+        update(dt, time) {
+            this.emit(dt);
+            const decay = dt / 3.0;  // 烟雾粒子寿命 ~3s
+            for (let i = 0; i < this.activeCount; i++) {
+                this.life[i] -= decay;
+            }
+            let writeIdx = 0;
+            for (let i = 0; i < this.activeCount; i++) {
+                if (this.life[i] > 0) {
+                    if (writeIdx !== i) {
+                        this.positions[writeIdx*3]   = this.positions[i*3];
+                        this.positions[writeIdx*3+1] = this.positions[i*3+1];
+                        this.positions[writeIdx*3+2] = this.positions[i*3+2];
+                        this.velocities[writeIdx*3]   = this.velocities[i*3];
+                        this.velocities[writeIdx*3+1] = this.velocities[i*3+1];
+                        this.velocities[writeIdx*3+2] = this.velocities[i*3+2];
+                        this.life[writeIdx] = this.life[i];
+                        this.seed[writeIdx] = this.seed[i];
+                        this.size[writeIdx] = this.size[i];
+                    }
+                    writeIdx++;
+                }
+            }
+            this.activeCount = writeIdx;
+            this.points.geometry.setDrawRange(0, this.activeCount);
+            this.points.geometry.attributes.position.needsUpdate = true;
+            this.points.geometry.attributes.aVelocity.needsUpdate = true;
+            this.points.geometry.attributes.aLife.needsUpdate = true;
+            this.points.geometry.attributes.aSeed.needsUpdate = true;
+            this.points.geometry.attributes.aSize.needsUpdate = true;
+            this.material.uniforms.uTime.value = time;
+        }
+
+        dispose() {
+            this.scene.remove(this.points);
+            this.points.geometry.dispose();
+            this.material.dispose();
+        }
+    }
+
     // ================================================================
     // 6. 3D 场景初始化
     // ================================================================
@@ -445,13 +643,16 @@
         loadingTip.style.display = 'none';
         addLog('3D 引擎加载完毕，按住左键可旋转视角', 'info');
         fireParticles = new FireParticleSystem(scene, 3000);
+        smokeParticles = new SmokeParticleSystem(scene, 6000);
         animate();
     }
 
     function animate() {
         requestAnimationFrame(animate);
         const dt = clock.getDelta();
-        if (fireParticles) fireParticles.update(dt, clock.getElapsedTime());
+        const time = clock.getElapsedTime();
+        if (fireParticles) fireParticles.update(dt, time);
+        if (smokeParticles) smokeParticles.update(dt, time);
         controls.update();
         renderer.render(scene, camera);
     }
@@ -509,12 +710,9 @@
                         draw = true;
                         color = valueToColor(obs);
                     }
-                    // 2. 其次渲染烟雾（烟雾优先于温度显示）
+                    // 2. 烟雾已由 GPU 粒子系统渲染, 此处跳过立方体
                     else if (smoke > 0.001) {
-                        draw = true;
-                        const t = Math.min(smoke / 0.15, 1.0);
-                        const gray = 0.78 - t * 0.58;
-                        color = new THREE.Color(gray, gray, gray);
+                        draw = false;
                     }
                     // 3. 温度分级渲染（仅无烟雾时显示）
                     else if (temp > 473.15) {
