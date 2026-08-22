@@ -14,11 +14,72 @@
         .canvas-container { flex: 2; background: #0f0f1a; border-radius: 16px; padding: 12px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.5); overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
         #simCanvas { background-color: #111; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.5); cursor: grab; max-width: 100%; max-height: 100%; width: auto; height: auto; border: 1px solid #333; }
         #simCanvas:active { cursor: grabbing; }
-        .right-panel { flex: 1; display: flex; flex-direction: column; gap: 20px; height: 100%; overflow: hidden; }
-        .info-box { background: #16213e; border-radius: 16px; padding: 12px 16px; flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
-        .info-content { background: #0a0c15; border-radius: 12px; padding: 12px; overflow-y: auto; }
+        .right-panel { flex: 1; display: flex; flex-direction: column; gap: 12px; height: 100%; overflow: hidden; }
+        /* ★ 实时统计（紧凑版） */
+        .info-box { background: #16213e; border-radius: 12px; padding: 6px 12px; flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+        .info-box > h3 { margin: 0 0 4px 0; font-size: 13px; color: #88aaff; }
+        .info-content { background: #0a0c15; border-radius: 8px; padding: 4px 6px; color: #bcd; }
+        .info-content .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 3px 4px;
+        }
+        .info-content .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            padding: 2px 4px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 4px;
+            min-width: 0;
+        }
+        .info-content .stat-label {
+            font-size: 10px;
+            color: #88aaff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .info-content .stat-value {
+            font-size: 14px;
+            color: #fff;
+            font-weight: bold;
+            line-height: 1.2;
+        }
+        .info-content .stat-item.danger .stat-value { color: #ff5722; }
+        .info-content .stat-item.warn .stat-value { color: #ffc107; }
+        .info-content .stat-item.success .stat-value { color: #4caf50; }
+        /* ★ 楼层信息条（紧凑版） */
+        #floor-info-bar {
+            display: flex;
+            gap: 8px;
+            padding: 3px 8px;
+            background: rgba(15, 52, 96, 0.6);
+            border: 1px solid rgba(68, 136, 255, 0.5);
+            border-radius: 6px;
+            margin-bottom: 4px;
+            font-size: 11px;
+            color: #bcd;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #floor-info-bar .fi-item { white-space: nowrap; }
+        #floor-info-bar strong { color: #fff; font-weight: 600; }
+        #floor-info-bar .fi-pill {
+            background: linear-gradient(135deg, #4488ff, #2266dd);
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+        }
+        #fi-status.fire { color: #ff5722; font-weight: bold; }
+        #fi-status.smoke { color: #ffc107; font-weight: bold; }
+        #fi-status.normal { color: #4caf50; font-weight: bold; }
         /* ★ 平面图容器（替换原事件日志区块） */
-        .plan-box { background: #16213e; border-radius: 16px; padding: 12px; flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 0; }
+        .plan-body { position: relative; flex: 1; display: flex; gap: 8px; overflow: hidden; min-height: 0; }
+        .plan-box { background: #16213e; border-radius: 16px; padding: 12px; flex: 1; display: flex; flex-direction: column; overflow: visible; position: relative; min-height: 0; }
         .plan-box > h3 { margin: 0 0 8px 0; font-size: 15px; color: #88aaff; flex: 0 0 auto; }
         .plan-body { position: relative; flex: 1; display: flex; gap: 8px; overflow: hidden; min-height: 0; }
         .control-bar { background: #16213e; border-radius: 16px; padding: 12px 20px; display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
@@ -154,16 +215,22 @@
         #minimap-toolbar button:hover { background: #1976d2; color: #fff; }
         #minimap-toolbar button.active { background: #ff5722; color: #fff; }
 
-        /* ★ 小地图图例 */
+        /* ★ 小地图图例（浮层） */
         #minimap-legend {
             display: none;
-            margin-top: 4px;
-            padding: 4px 6px;
-            background: rgba(0,0,0,0.5);
-            border-radius: 4px;
-            font-size: 10px;
+            position: absolute;
+            left: 70px;
+            top: 130px;
+            z-index: 100;
+            padding: 6px 8px;
+            background: rgba(0,0,0,0.75);
+            border: 1px solid #4488ff;
+            border-radius: 6px;
+            font-size: 11px;
             color: #bcd;
-            line-height: 1.5;
+            line-height: 1.6;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
         }
         #minimap-legend .lg-row { display: flex; align-items: center; gap: 4px; }
         #minimap-legend .lg-swatch {
@@ -171,6 +238,92 @@
             width: 10px; height: 10px;
             border-radius: 2px;
             border: 1px solid rgba(255,255,255,0.3);
+        }
+
+        /* ★ 全屏放大弹窗 */
+        .zoom-modal {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 5, 15, 0.95);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+        }
+        .zoom-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 20px;
+            background: #0a1628;
+            border-bottom: 2px solid #4488ff;
+            color: #88aaff;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .zoom-modal-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .zoom-modal-controls button {
+            background: #1a2a4a;
+            color: #bcd;
+            border: 1px solid #4488ff;
+            border-radius: 4px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .zoom-modal-controls button:hover { background: #1976d2; color: #fff; }
+        .zoom-modal-body {
+            flex: 1;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            overflow: hidden;
+            min-height: 0;
+        }
+        #zoom-canvas {
+            background: #000;
+            border: 2px solid #4488ff;
+            border-radius: 8px;
+            cursor: grab;
+            box-shadow: 0 0 30px rgba(68, 136, 255, 0.3);
+        }
+        #zoom-canvas.dragging { cursor: grabbing; }
+        .zoom-legend {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.75);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #bcd;
+            line-height: 1.8;
+            border: 1px solid rgba(68,136,255,0.4);
+        }
+        .zoom-tooltip {
+            position: absolute;
+            display: none;
+            pointer-events: none;
+            background: rgba(0,0,0,0.92);
+            color: #ffe;
+            border: 1px solid #4488ff;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+            z-index: 20;
+        }
+        .zoom-modal-footer {
+            padding: 8px 20px;
+            background: #0a1628;
+            border-top: 1px solid rgba(68,136,255,0.3);
+            color: #668;
+            font-size: 12px;
+            text-align: center;
         }
 
         /* ★ 悬停 tooltip */
@@ -290,9 +443,18 @@
             <div id="crosshair"></div>
         </div>
         <div class="right-panel">
+            <!-- ★ 实时统计（紧凑版） -->
             <div class="info-box"><h3>📊 实时统计</h3><div class="info-content" id="infoContent">加载中...</div></div>
             <div class="plan-box">
                 <h3>🗺️ 楼层平面图</h3>
+                <!-- ★ 楼层信息条 -->
+                <div id="floor-info-bar">
+                    <span id="fi-floor" class="fi-pill">F1 层</span>
+                    <span class="fi-item">📐 建筑面积: <strong id="fi-area">--</strong> m²</span>
+                    <span class="fi-item">👥 人员: <strong id="fi-persons">--</strong></span>
+                    <span class="fi-item">🚪 出口: <strong id="fi-exits">--</strong></span>
+                    <span class="fi-item" id="fi-status-wrap">⚠️ 状态: <strong id="fi-status">正常</strong></span>
+                </div>
                 <div class="plan-body">
                     <!-- ★ 楼层缩略条（点击直跳楼层） -->
                     <div id="floor-thumb-strip"></div>
@@ -311,25 +473,55 @@
                         <div id="minimap-toolbar">
                             <button id="btn-legend" title="图例">图例</button>
                             <button id="btn-grid" class="active" title="网格线">网格</button>
-                            <button id="btn-overlay" title="全部楼层叠加">叠加</button>
+                            <button id="btn-overlay" title="楼层偏移叠加">叠加</button>
                             <button id="btn-scale" class="active" title="比例尺/指北针">比例</button>
                             <button id="btn-fit" title="自动适配视图">适配</button>
                             <button id="btn-focus" title="点击地图定位主视图">定位</button>
-                        </div>
-                        <!-- ★ 图例 -->
-                        <div id="minimap-legend">
-                            <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
-                            <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
-                            <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
-                            <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
-                            <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
-                            <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
+                            <button id="btn-zoom" title="全屏放大查看">🔍 放大</button>
                         </div>
                     </div>
                     <!-- ★ 悬停信息 -->
                     <div id="minimap-tooltip"></div>
                 </div>
+                <!-- ★ 图例（浮层，在 plan-box 层级，不受 plan-body overflow:hidden 限制） -->
+                <div id="minimap-legend">
+                    <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
+                </div>
             </div>
+        </div>
+    </div>
+
+    <!-- ★ 全屏放大弹窗 -->
+    <div id="zoom-modal" class="zoom-modal" style="display:none;">
+        <div class="zoom-modal-header">
+            <span id="zoom-modal-title">2D 俯视图 - 放大模式</span>
+            <div class="zoom-modal-controls">
+                <button id="zoom-floor-down" title="下一层">▼</button>
+                <span id="zoom-floor-label">F1</span>
+                <button id="zoom-floor-up" title="上一层">▲</button>
+                <button id="zoom-fit" title="自动适配">适配</button>
+                <button id="zoom-close" title="关闭 (ESC)">✕ 关闭</button>
+            </div>
+        </div>
+        <div class="zoom-modal-body">
+            <canvas id="zoom-canvas"></canvas>
+            <div id="zoom-legend" class="zoom-legend">
+                <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
+            </div>
+            <div id="zoom-tooltip" class="zoom-tooltip"></div>
+        </div>
+        <div class="zoom-modal-footer">
+            <span>💡 滚轮缩放 · 左键拖动平移 · 双击定位 3D 视图 · ESC 关闭</span>
         </div>
     </div>
     <div class="control-bar">
@@ -458,14 +650,89 @@
 
     function updateStats(d) {
         let timeStr = d.currentTime ? d.currentTime.toFixed(1) : '0.0';
+        // ★ 更新实时统计面板（三列网格布局）
         document.getElementById('infoContent').innerHTML =
-            `时间: <strong>${timeStr} s</strong><br>` +
-            `步数: ${d.step}<br>` +
-            `存活: ${d.active}<br>` +
-            `火烧死: ${d.deadFire}<br>` +
-            `烟熏死: ${d.deadSmoke}<br>` +
-            `逃出: ${d.escaped}<br>` +
-            `总人数: ${d.total}`;
+            `<div class="stat-grid">
+                <div class="stat-item"><span class="stat-label">⏱ 时间</span><span class="stat-value">${timeStr}s</span></div>
+                <div class="stat-item"><span class="stat-label">👣 步数</span><span class="stat-value">${d.step}</span></div>
+                <div class="stat-item"><span class="stat-label">👥 存活</span><span class="stat-value">${d.active}</span></div>
+                <div class="stat-item danger"><span class="stat-label">🔥 火烧死</span><span class="stat-value">${d.deadFire}</span></div>
+                <div class="stat-item warn"><span class="stat-label">💨 烟熏死</span><span class="stat-value">${d.deadSmoke}</span></div>
+                <div class="stat-item success"><span class="stat-label">🚪 逃出</span><span class="stat-value">${d.escaped}</span></div>
+                <div class="stat-item"><span class="stat-label">👤 总人数</span><span class="stat-value">${d.total}</span></div>
+            </div>`;
+        // ★ 更新楼层信息条
+        updateFloorInfo(d);
+    }
+
+    // ★ 楼层信息条更新函数
+    function updateFloorInfo(d) {
+        if (!currentData) return;
+        
+        const idx = detectedFloors.indexOf(currentFloorZ);
+        const floorNum = idx >= 0 ? idx + 1 : 1;
+        
+        // 1. 楼层号
+        const fiFloor = document.getElementById('fi-floor');
+        if (fiFloor) fiFloor.textContent = `F${floorNum} 层`;
+        
+        // 2. 建筑面积 (体素数 × 单个体素面积, dx=0.5m)
+        const voxelSize = 0.5;
+        const area = currentData.width * currentData.height * voxelSize * voxelSize;
+        const fiArea = document.getElementById('fi-area');
+        if (fiArea) fiArea.textContent = area.toFixed(0);
+        
+        // 3. 人员数（按楼层分组）
+        const nextFloorZ = (idx >= 0 && idx + 1 < detectedFloors.length) ? detectedFloors[idx + 1] : currentFloorZ + 17;
+        const persons = d.persons || currentData.persons || [];
+        const personsOnFloor = persons.filter(p => {
+            const z = p[2] !== undefined ? p[2] : p.z;
+            return z >= currentFloorZ && z < nextFloorZ;
+        }).length;
+        const fiPersons = document.getElementById('fi-persons');
+        if (fiPersons) fiPersons.textContent = personsOnFloor;
+        
+        // 4. 出口数（按楼层分组）
+        const exits = currentData.exits || [];
+        const exitsOnFloor = exits.filter(e => e.z === currentFloorZ).length;
+        const fiExits = document.getElementById('fi-exits');
+        if (fiExits) fiExits.textContent = exitsOnFloor;
+        
+        // 5. 状态判断
+        const fiStatus = document.getElementById('fi-status');
+        if (fiStatus) {
+            let status = '正常', statusClass = 'normal';
+            if (hasFireOnFloor(currentFloorZ)) { status = '火灾'; statusClass = 'fire'; }
+            else if (hasSmokeOnFloor(currentFloorZ)) { status = '烟雾'; statusClass = 'smoke'; }
+            fiStatus.textContent = status;
+            fiStatus.className = statusClass;
+        }
+    }
+
+    // ★ 辅助：判断楼层是否有火灾
+    function hasFireOnFloor(z) {
+        const fire = currentData?.fire;
+        if (!fire || !fire.length) return false;
+        for (let x = 0; x < fire.length; x++) {
+            if (!fire[x] || !fire[x][z]) continue;
+            for (let y = 0; y < fire[x].length; y++) {
+                if (fire[x][y][z] > 500) return true;  // 温度 > 500K 视为火灾
+            }
+        }
+        return false;
+    }
+
+    // ★ 辅助：判断楼层是否有烟雾
+    function hasSmokeOnFloor(z) {
+        const smoke = currentData?.smoke;
+        if (!smoke || !smoke.length) return false;
+        for (let x = 0; x < smoke.length; x++) {
+            if (!smoke[x] || !smoke[x][z]) continue;
+            for (let y = 0; y < smoke[x].length; y++) {
+                if (smoke[x][y][z] > 0.3) return true;  // 烟雾浓度 > 0.3
+            }
+        }
+        return false;
     }
 
     function sendCommand(cmd) {
@@ -1172,6 +1439,10 @@
         // ★ 更新小地图（每帧绘制，与主画面同步）
         drawMinimap();
         drawThumbStrip();
+        // 若放大弹窗打开，同步重绘
+        if (window.__isZoomOpen && window.__isZoomOpen()) {
+            window.__drawZoomMap && window.__drawZoomMap();
+        }
     }
 
     // ================================================================
@@ -1395,6 +1666,15 @@
         return { x: vx, y: vy };
     }
 
+    // 放大弹窗的屏幕坐标 → 体素坐标转换（使用 zoomView 独立坐标系）
+    function zoomScreenToVoxel(sx, sy) {
+        const w = currentData?.width || 1, h = currentData?.height || 1;
+        const cell = Math.min(zoomCanvas.width / w, zoomCanvas.height / h);
+        const vx = Math.floor((sx - zoomView.offsetX) / (cell * zoomView.scale));
+        const vy = Math.floor((sy - zoomView.offsetY) / (cell * zoomView.scale));
+        return { x: vx, y: vy };
+    }
+
     // 绘制单层（供主图与缩略图复用）
     // ctx/canvas: 目标；zSlice: 楼层显示切片；
     // opts: {walls, smoke, fire, exits, sources, persons, dim, range?}
@@ -1408,6 +1688,7 @@
         const cellW = cell, cellH = cell;
         const dim = opts.dim || 1.0;  // 暗化系数（叠加模式用）
         const range = opts.range || null;
+        const tint = opts.tint || null;  // 楼层叠加的染色（HSL 字符串）
 
         function zInThisFloor(z) {
             if (range) return z >= range.bottom && z < range.top;
@@ -1420,14 +1701,14 @@
             for (let x = 0; x < w; x++) {
                 for (let y = 0; y < h; y++) {
                     if (currentData.obstacle[zSlice][x]?.[y] === 1) {
-                        ctx.fillStyle = `rgba(58,58,74,${dim})`;
+                        ctx.fillStyle = tint ? tint : `rgba(58,58,74,${dim})`;
                         ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
                     }
                 }
             }
             // 浅色描边（仅边缘墙体）
             if (cellW > 3) {
-                ctx.strokeStyle = `rgba(120,130,160,${0.5 * dim})`;
+                ctx.strokeStyle = tint ? tint : `rgba(120,130,160,${0.5 * dim})`;
                 ctx.lineWidth = 0.5;
                 const wallAt = (x, y) => {
                     if (x < 0 || y < 0 || x >= w || y >= h) return false;
@@ -1592,16 +1873,32 @@
         ctx.translate(minimapView.offsetX, minimapView.offsetY);
         ctx.scale(minimapView.scale, minimapView.scale);
 
-        // 叠加模式：先画其它楼层（暗化）
+        // 叠加模式：显示楼层偏移差异（每层错位绘制，形成堆叠效果）
         if (minimapOptions.overlay && detectedFloors.length > 1) {
-            for (const fz of detectedFloors) {
+            const floorCount = detectedFloors.length;
+            const offsetStep = Math.max(3, Math.min(cellW, cellH) * 0.5); // 每层偏移距离（小地图）
+            for (let fi = 0; fi < floorCount; fi++) {
+                const fz = detectedFloors[fi];
                 if (fz === zSlice) continue;
                 const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, depth);
+                // 按楼层序号递增偏移，形成阶梯状堆叠
+                ctx.save();
+                const offsetX = fi * offsetStep;
+                const offsetY = fi * offsetStep * 0.5;
+                ctx.translate(offsetX, offsetY);
+                // 按楼层序号区分颜色（冷色调渐变）
+                const hue = 200 + fi * 25;
+                const lightness = 35 + fi * 8;
+                ctx.globalAlpha = 0.75;
                 drawFloorLayer(ctx, minimapCanvas, fz, {
-                    walls: true, smoke: false, fire: false, exits: true,
-                    sources: false, persons: false, dim: 0.25, range: r
+                    walls: true, smoke: false, fire: false, exits: false,
+                    sources: false, persons: false, dim: 0.9, range: r,
+                    tint: `hsl(${hue}, 70%, ${lightness}%)`
                 });
+                ctx.restore();
             }
+            // 叠加层完成后，恢复透明度
+            ctx.globalAlpha = 1.0;
         }
 
         // 当前楼层（完整图层 + 该层 z 范围，使人员/火/出口/烟全部显示）
@@ -1731,39 +2028,6 @@
         ctx.strokeStyle = '#4488ff';
         ctx.lineWidth = 2;
         ctx.strokeRect(0, 0, W, H);
-
-        // ★ 诊断条（左上角）：显示当前层范围/人员/火源/出口数量，便于排查"看不到人/火"
-        if (currentData) {
-            const persons = currentData.persons || [];
-            const fireSources = currentData.fireSources || [];
-            const exits = currentData.exits || [];
-            const personsInLayer = persons.filter(p => p[2] >= curRange.bottom && p[2] < curRange.top).length;
-            const fireInLayer = fireSources.filter(f => f.z >= curRange.bottom && f.z < curRange.top).length;
-            const exitsInLayer = exits.filter(e => e.z >= curRange.bottom && e.z < curRange.top).length;
-            const totalPersons = persons.length;
-            const totalFire = fireSources.length;
-            const totalExits = exits.length;
-            const line1 = `F${detectedFloors.indexOf(currentFloorZ) + 1} z[${curRange.bottom}-${curRange.top - 1}] disp=${zSlice}`;
-            const line2 = `人 ${personsInLayer}/${totalPersons}  火 ${fireInLayer}/${totalFire}  出口 ${exitsInLayer}/${totalExits}`;
-            const line3 = `step=${currentData.step} floors=${detectedFloors.length} depth=${depth}`;
-            ctx.save();
-            ctx.font = '11px monospace';
-            ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-            const padX = 6, padY = 4, lineH = 13;
-            const boxW = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width, ctx.measureText(line3).width) + padX * 2;
-            const boxH = lineH * 3 + padY * 2;
-            ctx.fillStyle = 'rgba(0,0,0,0.82)';
-            ctx.fillRect(4, 4, boxW, boxH);
-            ctx.strokeStyle = '#4488ff'; ctx.lineWidth = 1;
-            ctx.strokeRect(4, 4, boxW, boxH);
-            ctx.fillStyle = '#88aaff';
-            ctx.fillText(line1, 4 + padX, 4 + padY);
-            ctx.fillStyle = personsInLayer > 0 ? '#88ff88' : '#ff8888';
-            ctx.fillText(line2, 4 + padX, 4 + padY + lineH);
-            ctx.fillStyle = '#aaa';
-            ctx.fillText(line3, 4 + padX, 4 + padY + lineH * 2);
-            ctx.restore();
-        }
     }
 
     // 绘制相机位置/朝向标记（必须与 drawMinimap 同用正方形 cell，保证坐标对齐）
@@ -1886,6 +2150,8 @@
             currentFloorZ = detectedFloors[idx + 1];
             updateFloorLabel();
             addLog(`🗺️ 切换到楼层 F${idx + 2} (z=${currentFloorZ})`, 'info');
+            // 同步放大弹窗
+            if (window.__syncZoomFloor) window.__syncZoomFloor(currentFloorZ);
         }
     });
     document.getElementById('floor-down').addEventListener('click', () => {
@@ -1896,6 +2162,8 @@
             currentFloorZ = detectedFloors[idx - 1];
             updateFloorLabel();
             addLog(`🗺️ 切换到楼层 F${idx} (z=${currentFloorZ})`, 'info');
+            // 同步放大弹窗
+            if (window.__syncZoomFloor) window.__syncZoomFloor(currentFloorZ);
         }
     });
 
@@ -1928,6 +2196,429 @@
         fitMinimapToContent();
         addLog('🗺️ 平面图已自动适配视图', 'info');
     });
+
+    // ★ 全屏放大弹窗逻辑
+    (function setupZoomModal() {
+        const modal = document.getElementById('zoom-modal');
+        const zoomCanvas = document.getElementById('zoom-canvas');
+        const zoomCtx = zoomCanvas ? zoomCanvas.getContext('2d') : null;
+        const zoomTitle = document.getElementById('zoom-modal-title');
+        const zoomFloorLabel = document.getElementById('zoom-floor-label');
+        const zoomTooltip = document.getElementById('zoom-tooltip');
+
+        // 缩放视图状态（独立于小地图）
+        let zoomView = { scale: 1, offsetX: 0, offsetY: 0 };
+        let zoomHover = null;
+        let zoomFloorZ = -1;
+        let zoomPanning = false, zoomLastX = 0, zoomLastY = 0;
+        let zoomMouseDownX = 0, zoomMouseDownY = 0, zoomDragged = false;
+
+        function openZoomModal() {
+            if (!currentData) { addLog('暂无数据，无法放大', 'error'); return; }
+            modal.style.display = 'flex';
+            // 同步楼层：吸附到最近的已检测楼层
+            if (detectedFloors.length > 0) {
+                let best = detectedFloors[0], bd = Math.abs(currentFloorZ - best);
+                for (const fz of detectedFloors) {
+                    const d = Math.abs(currentFloorZ - fz);
+                    if (d < bd) { bd = d; best = fz; }
+                }
+                zoomFloorZ = best;
+            } else {
+                zoomFloorZ = currentFloorZ;
+            }
+            updateZoomFloorLabel();
+            // 适配 canvas 尺寸：使用 setTimeout 确保弹窗布局完成
+            setTimeout(() => {
+                const body = modal.querySelector('.zoom-modal-body');
+                const bodyW = Math.max(300, body.clientWidth - 48);
+                const bodyH = Math.max(200, body.clientHeight - 48);
+                const w = currentData.width || 1, h = currentData.height || 1;
+                const cell = Math.max(2, Math.min(bodyW / w, bodyH / h));
+                zoomCanvas.width = Math.max(300, Math.floor(w * cell));
+                zoomCanvas.height = Math.max(200, Math.floor(h * cell));
+                zoomCanvas.style.width = '';
+                zoomCanvas.style.height = '';
+                zoomView.scale = 1.0;
+                zoomView.offsetX = 0;
+                zoomView.offsetY = 0;
+                drawZoomMap();
+            }, 100);
+        }
+
+        function closeZoomModal() {
+            modal.style.display = 'none';
+            // 释放焦点
+            document.activeElement?.blur();
+        }
+
+        function updateZoomFloorLabel() {
+            let idx = detectedFloors.indexOf(zoomFloorZ);
+            if (idx < 0 && detectedFloors.length > 0) {
+                // 吸附到最近楼层
+                let bestIdx = 0, bd = Math.abs(zoomFloorZ - detectedFloors[0]);
+                for (let i = 1; i < detectedFloors.length; i++) {
+                    const d = Math.abs(zoomFloorZ - detectedFloors[i]);
+                    if (d < bd) { bd = d; bestIdx = i; }
+                }
+                zoomFloorZ = detectedFloors[bestIdx];
+                idx = bestIdx;
+            }
+            const displayNum = (idx >= 0) ? (idx + 1) : (zoomFloorZ + 1);
+            zoomFloorLabel.textContent = 'F' + displayNum;
+        }
+
+        function fitZoomToContent() {
+            if (!zoomCtx || !currentData) return;
+            const W = zoomCanvas.width, H = zoomCanvas.height;
+            const w = currentData.width || 1, h = currentData.height || 1;
+            // cell 与 drawZoomMap 一致：建筑恰好填满画布
+            const cell = Math.min(W / w, H / h);
+            const buildingW = w * cell;
+            const buildingH = h * cell;
+            // 初始 scale = 1.0，建筑完整显示，不做额外放大
+            zoomView.scale = 1.0;
+            // 居中放置（cell 已适配画布，偏移只需居中）
+            zoomView.offsetX = (W - buildingW) / 2;
+            zoomView.offsetY = (H - buildingH) / 2;
+        }
+
+        function drawZoomMap() {
+            if (!zoomCtx || !currentData) return;
+            const ctx = zoomCtx;
+            const W = zoomCanvas.width, H = zoomCanvas.height;
+            const w = currentData.width || 1, h = currentData.height || 1;
+            const depth = currentData.depth || 1;
+            const cell = Math.min(W / w, H / h);
+            const cellW = cell, cellH = cell;
+
+            ctx.fillStyle = '#05060a';
+            ctx.fillRect(0, 0, W, H);
+
+            const zSlice = (zoomFloorZ >= 0 && zoomFloorZ < depth) ? zoomFloorZ : Math.floor(depth / 2);
+            const curRange = rangeOfDisplayZ(zSlice) || fallbackRangeForZ(zSlice, depth);
+
+            ctx.save();
+            ctx.translate(zoomView.offsetX, zoomView.offsetY);
+            ctx.scale(zoomView.scale, zoomView.scale);
+
+            // 叠加模式：显示楼层偏移差异（每层错位绘制，形成堆叠效果）
+            if (minimapOptions.overlay && detectedFloors.length > 1) {
+                const floorCount = detectedFloors.length;
+                const offsetStep = Math.max(4, Math.min(cellW, cellH) * 0.8); // 每层偏移距离（放大弹窗）
+                for (let fi = 0; fi < floorCount; fi++) {
+                    const fz = detectedFloors[fi];
+                    if (fz === zSlice) continue;
+                    const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, depth);
+                    ctx.save();
+                    const offsetX = fi * offsetStep;
+                    const offsetY = fi * offsetStep * 0.5;
+                    ctx.translate(offsetX, offsetY);
+                    const hue = 200 + fi * 25;
+                    const lightness = 35 + fi * 8;
+                    ctx.globalAlpha = 0.75;
+                    drawFloorLayer(ctx, zoomCanvas, fz, {
+                        walls: true, smoke: false, fire: false, exits: false,
+                        sources: false, persons: false, dim: 0.9, range: r,
+                        tint: `hsl(${hue}, 70%, ${lightness}%)`
+                    });
+                    ctx.restore();
+                }
+                ctx.globalAlpha = 1.0;
+            }
+
+            drawFloorLayer(ctx, zoomCanvas, zSlice, {
+                walls: true, smoke: true, fire: true, exits: true,
+                sources: true, persons: true, dim: 1.0, range: curRange
+            });
+
+            // 网格线
+            if (minimapOptions.grid && cellW * zoomView.scale > 4) {
+                ctx.strokeStyle = 'rgba(80,100,140,0.15)';
+                ctx.lineWidth = 0.5 / zoomView.scale;
+                const step = Math.max(1, Math.round(8 / (cellW * zoomView.scale)));
+                for (let x = 0; x <= w; x += step) {
+                    ctx.beginPath(); ctx.moveTo(x * cellW, 0); ctx.lineTo(x * cellW, h * cellH); ctx.stroke();
+                }
+                for (let y = 0; y <= h; y += step) {
+                    ctx.beginPath(); ctx.moveTo(0, y * cellH); ctx.lineTo(w * cellW, y * cellH); ctx.stroke();
+                }
+            }
+
+            // 建筑外轮廓
+            if (currentData.inside) {
+                const insideAt = (x, y) => {
+                    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+                    const b = curRange.bottom, t = curRange.top;
+                    for (let z = b + 1; z < t; z++) if (currentData.inside?.[z]?.[x]?.[y] === 1) return true;
+                    return currentData.inside?.[zSlice]?.[x]?.[y] === 1;
+                };
+                ctx.strokeStyle = 'rgba(100,150,255,0.5)';
+                ctx.lineWidth = 1.5 / zoomView.scale;
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        if (insideAt(x, y)) {
+                            if (!insideAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, y * cellH); ctx.stroke(); }
+                            if (!insideAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, (y + 1) * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                            if (!insideAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo(x * cellW, (y + 1) * cellH); ctx.stroke(); }
+                            if (!insideAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                        }
+                    }
+                }
+            }
+
+            ctx.restore();
+
+            // 相机标记
+            drawCameraMarker(ctx, cellW, cellH, w, h, W, H);
+
+            // 四角标记
+            if (currentData) {
+                const markers = [
+                    { x: 0, y: 0, label: 'O(0,0)', color: '#ff0' },
+                    { x: w - 1, y: 0, label: `(${w-1},0)`, color: '#0ff' },
+                    { x: 0, y: h - 1, label: `(0,${h-1})`, color: '#f0f' },
+                    { x: w - 1, y: h - 1, label: `(${w-1},${h-1})`, color: '#0f0' }
+                ];
+                ctx.save();
+                for (const m of markers) {
+                    const px = (m.x * cell + cell / 2) * zoomView.scale + zoomView.offsetX;
+                    const py = (m.y * cell + cell / 2) * zoomView.scale + zoomView.offsetY;
+                    ctx.fillStyle = m.color;
+                    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+                    ctx.lineWidth = 2;
+                    ctx.font = 'bold 13px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    const tx = m.x > w / 2 ? px - 8 : px + 8;
+                    const ty = m.y > h / 2 ? py - 4 : py + 16;
+                    ctx.strokeText(m.label, tx, ty);
+                    ctx.fillText(m.label, tx, ty);
+                }
+                ctx.restore();
+            }
+
+            // 悬停高亮
+            if (zoomHover) {
+                const sx = zoomHover.x * cellW * zoomView.scale + zoomView.offsetX;
+                const sy = zoomHover.y * cellH * zoomView.scale + zoomView.offsetY;
+                ctx.strokeStyle = '#ffeb3b';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(sx, sy, cellW * zoomView.scale, cellH * zoomView.scale);
+            }
+
+            // 指北针
+            if (minimapOptions.scale) {
+                ctx.save();
+                ctx.translate(W - 40, 32);
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#4488ff'; ctx.lineWidth = 1.5; ctx.stroke();
+                ctx.fillStyle = '#ff4444';
+                ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(-7, 6); ctx.lineTo(0, 0); ctx.lineTo(7, 6); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = '#bcd';
+                ctx.beginPath(); ctx.moveTo(0, 16); ctx.lineTo(-7, -6); ctx.lineTo(0, 0); ctx.lineTo(7, -6); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText('N', 0, -24);
+                ctx.restore();
+            }
+
+            // 比例尺
+            if (minimapOptions.scale) {
+                const pxPerMeter = (cellW * zoomView.scale) / voxelSize;
+                const targetMeters = 10;
+                let barLen = pxPerMeter * targetMeters;
+                let label = targetMeters + 'm';
+                if (barLen > W * 0.4) { barLen = pxPerMeter * 5; label = '5m'; }
+                if (barLen > W * 0.4) { barLen = pxPerMeter * 2; label = '2m'; }
+                if (barLen < 30) { barLen = pxPerMeter * 20; label = '20m'; }
+                const bx = 20, by = H - 24;
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(bx - 6, by - 10, barLen + 40, 22);
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + barLen, by); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(bx, by - 4); ctx.lineTo(bx, by + 4); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(bx + barLen, by - 4); ctx.lineTo(bx + barLen, by + 4); ctx.stroke();
+                ctx.fillStyle = '#fff';
+                ctx.font = '13px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+                ctx.fillText(label, bx + barLen + 6, by + 4);
+            }
+
+            // 边框
+            ctx.strokeStyle = '#4488ff';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(0, 0, W, H);
+        }
+
+        // ====== 事件绑定 ======
+
+        document.getElementById('btn-zoom').addEventListener('click', openZoomModal);
+        document.getElementById('zoom-close').addEventListener('click', closeZoomModal);
+
+        // 楼层切换
+        document.getElementById('zoom-floor-up').addEventListener('click', () => {
+            if (detectedFloors.length === 0) return;
+            let idx = detectedFloors.indexOf(zoomFloorZ);
+            if (idx < 0) {
+                // 吸附到最近楼层
+                let bestIdx = 0, bd = Math.abs(zoomFloorZ - detectedFloors[0]);
+                for (let i = 1; i < detectedFloors.length; i++) {
+                    const d = Math.abs(zoomFloorZ - detectedFloors[i]);
+                    if (d < bd) { bd = d; bestIdx = i; }
+                }
+                idx = bestIdx;
+            }
+            zoomFloorZ = detectedFloors[(idx + 1) % detectedFloors.length];
+            updateZoomFloorLabel();
+            drawZoomMap();
+        });
+        document.getElementById('zoom-floor-down').addEventListener('click', () => {
+            if (detectedFloors.length === 0) return;
+            let idx = detectedFloors.indexOf(zoomFloorZ);
+            if (idx < 0) {
+                let bestIdx = 0, bd = Math.abs(zoomFloorZ - detectedFloors[0]);
+                for (let i = 1; i < detectedFloors.length; i++) {
+                    const d = Math.abs(zoomFloorZ - detectedFloors[i]);
+                    if (d < bd) { bd = d; bestIdx = i; }
+                }
+                idx = bestIdx;
+            }
+            zoomFloorZ = detectedFloors[(idx - 1 + detectedFloors.length) % detectedFloors.length];
+            updateZoomFloorLabel();
+            drawZoomMap();
+        });
+
+        document.getElementById('zoom-fit').addEventListener('click', () => {
+            fitZoomToContent();
+            drawZoomMap();
+        });
+
+        // ESC 关闭
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && modal.style.display !== 'none') {
+                closeZoomModal();
+            }
+        });
+
+        // 滚轮缩放
+        zoomCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = zoomCanvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (zoomCanvas.width / rect.width);
+            const my = (e.clientY - rect.top) * (zoomCanvas.height / rect.height);
+            const oldScale = zoomView.scale;
+            const factor = e.deltaY < 0 ? 1.15 : 0.87;
+            let ns = oldScale * factor;
+            ns = Math.max(0.3, Math.min(5.0, ns));
+            zoomView.offsetX = mx - (mx - zoomView.offsetX) * (ns / oldScale);
+            zoomView.offsetY = my - (my - zoomView.offsetY) * (ns / oldScale);
+            zoomView.scale = ns;
+            drawZoomMap();
+        }, { passive: false });
+
+        // 左键拖动平移（支持拖动阈值判定）
+        zoomCanvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0 || e.button === 2) {
+                e.preventDefault();
+                zoomPanning = true;
+                zoomDragged = false;
+                zoomMouseDownX = e.clientX;
+                zoomMouseDownY = e.clientY;
+                zoomLastX = e.clientX;
+                zoomLastY = e.clientY;
+                zoomCanvas.classList.add('dragging');
+            }
+        });
+        document.addEventListener('mouseup', () => {
+            if (zoomPanning) {
+                zoomPanning = false;
+                zoomCanvas.classList.remove('dragging');
+            }
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (zoomPanning) {
+                // 计算从按下点移动的距离
+                const totalDx = e.clientX - zoomMouseDownX;
+                const totalDy = e.clientY - zoomMouseDownY;
+                if (!zoomDragged && Math.sqrt(totalDx * totalDx + totalDy * totalDy) > 5) {
+                    zoomDragged = true;
+                }
+                // 平移视图
+                const rect = zoomCanvas.getBoundingClientRect();
+                const dx_ = (e.clientX - zoomLastX) * (zoomCanvas.width / rect.width);
+                const dy_ = (e.clientY - zoomLastY) * (zoomCanvas.height / rect.height);
+                zoomView.offsetX += dx_;
+                zoomView.offsetY += dy_;
+                zoomLastX = e.clientX;
+                zoomLastY = e.clientY;
+                drawZoomMap();
+            }
+        });
+        zoomCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // 双击定位 3D 视图（左键双击）
+        zoomCanvas.addEventListener('dblclick', (e) => {
+            if (!currentData) return;
+            if (zoomDragged) return;  // 如果之前是拖动则不触发
+            const rect = zoomCanvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (zoomCanvas.width / rect.width);
+            const my = (e.clientY - rect.top) * (zoomCanvas.height / rect.height);
+            const w = currentData.width, h = currentData.height;
+            const v = zoomScreenToVoxel(mx, my);
+            if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
+                // 同步选中楼层
+                currentFloorZ = zoomFloorZ;
+                const mainFloorIdx = detectedFloors.indexOf(zoomFloorZ);
+                document.getElementById('floor-label').textContent = 'F' + (mainFloorIdx >= 0 ? mainFloorIdx + 1 : zoomFloorZ + 1);
+                focusMainView(v.x, v.y);
+            }
+        });
+
+        // 悬停 tooltip
+        zoomCanvas.addEventListener('mousemove', (e) => {
+            if (!currentData) return;
+            const rect = zoomCanvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (zoomCanvas.width / rect.width);
+            const my = (e.clientY - rect.top) * (zoomCanvas.height / rect.height);
+            const w = currentData.width, h = currentData.height;
+            const v = zoomScreenToVoxel(mx, my);
+            if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
+                const obs = currentData.obstacle?.[zoomFloorZ]?.[v.x]?.[v.y];
+                const temp = currentData.fire?.[zoomFloorZ]?.[v.x]?.[v.y] || T_AMB;
+                const smoke = currentData.smoke?.[zoomFloorZ]?.[v.x]?.[v.y] || 0;
+                const inside = currentData.inside?.[zoomFloorZ]?.[v.x]?.[v.y];
+                let type = '空地';
+                if (obs === 1) type = '墙体';
+                else if (inside === 1) type = '室内';
+                zoomHover = { x: v.x, y: v.y, z: zoomFloorZ, type };
+                zoomTooltip.style.display = 'block';
+                zoomTooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+                zoomTooltip.style.top = (e.clientY - rect.top + 14) + 'px';
+                zoomTooltip.innerHTML = `(${v.x},${v.y}) F${(detectedFloors.indexOf(zoomFloorZ) >= 0 ? detectedFloors.indexOf(zoomFloorZ) + 1 : zoomFloorZ + 1)} · ${type}<br>温度: ${temp.toFixed(0)}°C · 烟雾: ${smoke.toFixed(1)}`;
+            } else {
+                zoomHover = null;
+                zoomTooltip.style.display = 'none';
+            }
+            drawZoomMap();
+        });
+        zoomCanvas.addEventListener('mouseleave', () => {
+            zoomHover = null;
+            zoomTooltip.style.display = 'none';
+            drawZoomMap();
+        });
+
+        // 暴露给外部：数据更新时重绘 + 楼层同步
+        window.__drawZoomMap = drawZoomMap;
+        window.__isZoomOpen = () => modal.style.display !== 'none';
+        window.__syncZoomFloor = (z) => {
+            zoomFloorZ = z;
+            updateZoomFloorLabel();
+            if (modal.style.display !== 'none') drawZoomMap();
+        };
+    })();
 
     // ★ 小地图交互：滚轮缩放 / 右键平移 / 点击定位 / 悬停 tooltip
     (function setupMinimapInteraction() {
