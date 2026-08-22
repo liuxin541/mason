@@ -54,6 +54,9 @@ public class FireEscapeHttpServer {
         server.createContext("/uploadMapImage", new UploadMapImageHandler());
         server.createContext("/setBoundary", new SetBoundaryHandler());
         server.createContext("/setFireSources", new SetFireSourcesHandler());
+        // 静态文件服务：ifc_output/ 和 test_output/ 目录
+        server.createContext("/ifc_output/", new StaticFileHandler("ifc_output"));
+        server.createContext("/test_output/", new StaticFileHandler("test_output"));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
         System.out.println("Web 界面已启动: http://localhost:" + serverPort);
@@ -266,6 +269,59 @@ public class FireEscapeHttpServer {
             exchange.getResponseHeaders().set("Content-Type", "text/html;charset=UTF-8");
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
+        }
+    }
+
+    /**
+     * 静态文件处理器：服务指定目录下的文件
+     */
+    static class StaticFileHandler implements HttpHandler {
+        private final String baseDir;
+
+        public StaticFileHandler(String baseDir) {
+            this.baseDir = baseDir;
+        }
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            // 去掉前缀（/ifc_output/ 或 /test_output/）
+            int idx = path.indexOf('/', 1);
+            String relativePath = idx >= 0 ? path.substring(idx + 1) : "";
+
+            // 安全检查：防止路径穿越
+            if (relativePath.contains("..") || relativePath.startsWith("/")) {
+                exchange.sendResponseHeaders(403, -1);
+                return;
+            }
+
+            File file = new File(baseDir, relativePath);
+            if (!file.exists() || !file.isFile()) {
+                exchange.sendResponseHeaders(404, -1);
+                return;
+            }
+
+            // 根据扩展名设置 Content-Type
+            String contentType = getContentType(file.getName());
+            exchange.getResponseHeaders().set("Content-Type", contentType);
+            byte[] data = Files.readAllBytes(file.toPath());
+            exchange.sendResponseHeaders(200, data.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(data);
+            }
+        }
+
+        private String getContentType(String fileName) {
+            String lower = fileName.toLowerCase();
+            if (lower.endsWith(".json")) return "application/json;charset=UTF-8";
+            if (lower.endsWith(".glb")) return "model/gltf-binary";
+            if (lower.endsWith(".gltf")) return "model/gltf+json";
+            if (lower.endsWith(".png")) return "image/png";
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+            if (lower.endsWith(".gif")) return "image/gif";
+            if (lower.endsWith(".voxel")) return "application/octet-stream";
+            if (lower.endsWith(".bin")) return "application/octet-stream";
+            return "application/octet-stream";
         }
     }
 
@@ -482,6 +538,7 @@ public class FireEscapeHttpServer {
         sb.append("\"width\":").append(model.gridWidth).append(",");
         sb.append("\"height\":").append(model.gridHeight).append(",");
         sb.append("\"depth\":").append(model.gridDepth).append(",");
+        sb.append("\"floorSlabs\":[0,17,34,51],");
 
         sb.append("\"fire\":[");
         for (int z=0; z<model.gridDepth; z++) {
@@ -578,6 +635,15 @@ public class FireEscapeHttpServer {
         } else {
             sb.append("\"persons\":[]");
         }
+        // ★ 添加出口数据
+        sb.append(",\"exits\":[");
+        boolean firstExit=true;
+        for (int[] e : model.exits) {
+            if (!firstExit) sb.append(",");
+            sb.append("{\"x\":").append(e[0]).append(",\"y\":").append(e[1]).append(",\"z\":").append(e[2]).append("}");
+            firstExit=false;
+        }
+        sb.append("]");
         sb.append("}");
         return sb.toString();
     }
