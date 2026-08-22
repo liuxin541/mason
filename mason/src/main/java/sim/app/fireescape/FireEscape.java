@@ -487,14 +487,31 @@ public class FireEscape extends SimState {
     public void generateRandomFireSources() {
         fireSourcePositions.clear();
         if (gridWidth > 0 && gridHeight > 0 && gridDepth > 0) {
-            // 在建筑内部 (inside=1) 寻找一个合适的火源点，优先取低层 z
-            int[] pos = findInteriorPoint(gridWidth / 4, gridHeight / 4, 1);
-            if (pos != null) {
-                fireSourcePositions.add(pos);
-            } else {
-                // 兜底：从网格中心扩散搜索任意内部点
-                pos = findInteriorPoint(gridWidth / 2, gridHeight / 2, Math.max(1, gridDepth / 4));
-                if (pos != null) fireSourcePositions.add(pos);
+            // 收集所有可燃地面体素（inside=1，非墙/非出口，优先取楼层中间层）
+            java.util.List<int[]> candidates = new java.util.ArrayList<>();
+            for (int z = 0; z < gridDepth; z++) {
+                for (int x = 0; x < gridWidth; x++) {
+                    for (int y = 0; y < gridHeight; y++) {
+                        if (insideGrid.get(x, y, z) == 1
+                                && obstacleGrid.get(x, y, z) != TYPE_WALL
+                                && obstacleGrid.get(x, y, z) != TYPE_EXIT) {
+                            candidates.add(new int[]{x, y, z});
+                        }
+                    }
+                }
+            }
+            if (!candidates.isEmpty()) {
+                // Fisher-Yates 洗牌，取前 2~5 个
+                for (int i = candidates.size() - 1; i > 0; i--) {
+                    int j = random.nextInt(i + 1);
+                    int[] tmp = candidates.get(i);
+                    candidates.set(i, candidates.get(j));
+                    candidates.set(j, tmp);
+                }
+                int count = Math.min(candidates.size(), 2 + random.nextInt(4)); // 2,3,4,5
+                for (int i = 0; i < count; i++) {
+                    fireSourcePositions.add(candidates.get(i));
+                }
             }
         }
         fireSourceHeatRelease = new double[fireSourcePositions.size()];

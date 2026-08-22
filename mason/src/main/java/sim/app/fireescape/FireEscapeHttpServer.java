@@ -649,6 +649,7 @@ public class FireEscapeHttpServer {
             srcIdx++;
         }
         sb.append("],");
+        sb.append("\"fireSourceCount\":").append(model.fireSourcePositions.size()).append(",");
 
         // ★ 出口位置（供小地图绘制绿色出口标记）
         sb.append("\"exits\":[");
