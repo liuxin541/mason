@@ -92,6 +92,11 @@ public class FireEscape extends SimState {
     private int fireSourceCount = 1;
     public List<int[]> fireSourcePositions = new ArrayList<>();
 
+    // 每个火源的实时物理参数（与 fireSourcePositions 下标一一对应）
+    public double[] fireSourceHeatRelease = new double[0];  // kW
+    public double[] fireSourceFlameHeight = new double[0];  // m
+    public double[] fireSourcePlumeRadius = new double[0];  // m
+
     // ★ 语义信息（解析自 semantic_info.json，供 HTTP 端暴露给前端）
     public SemanticInfo semanticInfo = new SemanticInfo();
 
@@ -446,6 +451,9 @@ public class FireEscape extends SimState {
     }
 
     public void initMultipleFireSources() {
+        fireSourceHeatRelease = new double[fireSourcePositions.size()];
+        fireSourceFlameHeight = new double[fireSourcePositions.size()];
+        fireSourcePlumeRadius = new double[fireSourcePositions.size()];
         for (int x = 0; x < gridWidth; x++) {
             for (int y = 0; y < gridHeight; y++) {
                 for (int z = 0; z < gridDepth; z++) {
@@ -489,6 +497,9 @@ public class FireEscape extends SimState {
                 if (pos != null) fireSourcePositions.add(pos);
             }
         }
+        fireSourceHeatRelease = new double[fireSourcePositions.size()];
+        fireSourceFlameHeight = new double[fireSourcePositions.size()];
+        fireSourcePlumeRadius = new double[fireSourcePositions.size()];
     }
 
     /** 在 (sx, sy, sz) 附近搜索最近的 inside=1 且非墙非出口体素，返回坐标或 null。 */

@@ -635,10 +635,18 @@ public class FireEscapeHttpServer {
 
         sb.append("\"fireSources\":[");
         boolean firstSrc=true;
+        int srcIdx=0;
         for (int[] p : model.fireSourcePositions) {
             if (!firstSrc) sb.append(",");
-            sb.append("{\"x\":").append(p[0]).append(",\"y\":").append(p[1]).append(",\"z\":").append(p[2]).append("}");
+            double hr = srcIdx < model.fireSourceHeatRelease.length ? model.fireSourceHeatRelease[srcIdx] : 0.0;
+            double fh = srcIdx < model.fireSourceFlameHeight.length ? model.fireSourceFlameHeight[srcIdx] : 0.0;
+            double pr = srcIdx < model.fireSourcePlumeRadius.length ? model.fireSourcePlumeRadius[srcIdx] : 0.0;
+            sb.append("{\"x\":").append(p[0]).append(",\"y\":").append(p[1]).append(",\"z\":").append(p[2])
+              .append(",\"heatRelease\":").append(hr)
+              .append(",\"flameHeight\":").append(fh)
+              .append(",\"plumeRadius\":").append(pr).append("}");
             firstSrc=false;
+            srcIdx++;
         }
         sb.append("],");
 
