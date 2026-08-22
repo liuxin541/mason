@@ -20,6 +20,7 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.Base64;
+import java.util.zip.GZIPOutputStream;
 
 public class FireEscapeHttpServer {
     private static FireEscape model;
@@ -349,6 +350,18 @@ public class FireEscapeHttpServer {
             String json = buildStateJson();
             byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
+            String ae = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+            if (ae != null && ae.toLowerCase().contains("gzip")) {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream(bytes.length / 2);
+                try (GZIPOutputStream gz = new GZIPOutputStream(bos)) { gz.write(bytes); }
+                byte[] gzBytes = bos.toByteArray();
+                if (gzBytes.length < bytes.length) {
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                    exchange.sendResponseHeaders(200, gzBytes.length);
+                    try (OutputStream os = exchange.getResponseBody()) { os.write(gzBytes); }
+                    return;
+                }
+            }
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
         }
@@ -561,20 +574,28 @@ public class FireEscapeHttpServer {
         sb.append("\"height\":").append(model.gridHeight).append(",");
         sb.append("\"depth\":").append(model.gridDepth).append(",");
 
+        // ★ 网格数据压缩: stride=2 (x,y 各降采样一半) + 数值取整, 载荷从 ~12MB 降到 ~1.5MB
+        int stride = 2;
+        sb.append("\"stride\":").append(stride).append(",");
+
         sb.append("\"fire\":[");
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
                     double val = model.fireGrid.get(i, j, z);
                     if (model.obstacleGrid.get(i, j, z) == 1 || model.insideGrid.get(i, j, z) == 0) val = FireEscape.T_AMBIENT;
-                    sb.append(val);
-                    if (j<model.gridHeight-1) sb.append(",");
+                    sb.append(((double)((long)(val*10.0)))/10.0);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -584,16 +605,20 @@ public class FireEscapeHttpServer {
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
                     double val = model.smokeGrid.get(i, j, z);
                     if (model.obstacleGrid.get(i, j, z) == 1 || model.insideGrid.get(i, j, z) == 0) val = 0.0;
-                    sb.append(val);
-                    if (j<model.gridHeight-1) sb.append(",");
+                    sb.append(((double)((long)(val*10.0)))/10.0);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -603,14 +628,23 @@ public class FireEscapeHttpServer {
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
-                    sb.append(model.obstacleGrid.get(i, j, z));
-                    if (j<model.gridHeight-1) sb.append(",");
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
+                    int val = model.obstacleGrid.get(i, j, z);
+                    // 2x2 块取最大(墙/楼梯/出口不丢失)
+                    if (i+1 < model.gridWidth) val = Math.max(val, model.obstacleGrid.get(i+1, j, z));
+                    if (j+1 < model.gridHeight) val = Math.max(val, model.obstacleGrid.get(i, j+1, z));
+                    if (i+1 < model.gridWidth && j+1 < model.gridHeight) val = Math.max(val, model.obstacleGrid.get(i+1, j+1, z));
+                    sb.append(val);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -620,14 +654,22 @@ public class FireEscapeHttpServer {
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
-                    sb.append(model.insideGrid.get(i, j, z));
-                    if (j<model.gridHeight-1) sb.append(",");
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
+                    int val = model.insideGrid.get(i, j, z);
+                    if (i+1 < model.gridWidth) val = Math.max(val, model.insideGrid.get(i+1, j, z));
+                    if (j+1 < model.gridHeight) val = Math.max(val, model.insideGrid.get(i, j+1, z));
+                    if (i+1 < model.gridWidth && j+1 < model.gridHeight) val = Math.max(val, model.insideGrid.get(i+1, j+1, z));
+                    sb.append(val);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
