@@ -146,6 +146,8 @@
     const T_AMB = 293.15;
 
     const dx = 0.5, dz = 0.25;
+    const clock = new THREE.Clock();
+    let fireParticles = null;
 
     // ================================================================
     // 3. 辅助函数
@@ -190,6 +192,7 @@
                 currentData = d;
                 updateStats(d);
                 update3DWorld(d);
+                if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz);
                 if (lastStep !== d.step) lastStep = d.step;
             })
             .catch(e => addLog('获取状态失败: ' + e, 'error'));
@@ -233,7 +236,183 @@
     }
 
     // ================================================================
-    // 5. 3D 场景初始化
+    // 5. 火焰粒子系统 (GPU Shader)
+    // ================================================================
+    const fireVertexShader = `
+        attribute float aLife;      // 0~1 剩余生命比例
+        attribute float aSeed;      // 随机种子 0~1
+        attribute float aSize;      // 基础大小
+        uniform float uTime;
+        uniform float uFlameHeight;
+        uniform vec3  uFirePos;
+        varying float vLife;
+        varying float vSeed;
+
+        // 简化 curl noise (用 sin 模拟湍流)
+        vec3 noise3(vec3 p) {
+            return vec3(
+                sin(p.y*3.0 + p.z*2.0 + uTime*2.0),
+                sin(p.x*3.0 + p.z*2.5 + uTime*1.8),
+                sin(p.x*2.5 + p.y*3.0 + uTime*2.2)
+            ) * 0.5;
+        }
+
+        void main() {
+            vLife = aLife;
+            vSeed = aSeed;
+            float t = 1.0 - aLife;  // 0=出生, 1=死亡
+            // 向上运动, 高度受火焰高度控制
+            vec3 pos = position;
+            pos.y += t * uFlameHeight;
+            // 湍流偏移 (底部小, 顶部大)
+            vec3 turb = noise3(pos * 2.0 + aSeed * 10.0) * t * 0.8;
+            pos.xz += turb.xz;
+            // 底部收缩 (火焰根部窄)
+            float radiusScale = 0.3 + t * 0.7;
+            pos.xz *= radiusScale;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos + uFirePos, 1.0);
+            // 粒子大小: 底部大, 顶部小, 带闪烁
+            float flicker = 0.85 + 0.15 * sin(uTime * 15.0 + aSeed * 50.0);
+            gl_PointSize = aSize * (1.0 - t * 0.6) * flicker * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `;
+
+    const fireFragmentShader = `
+        varying float vLife;
+        varying float vSeed;
+        void main() {
+            // 圆形软边
+            vec2 uv = gl_PointCoord - 0.5;
+            float dist = length(uv);
+            if (dist > 0.5) discard;
+            float alpha = smoothstep(0.5, 0.1, dist);
+            // 颜色渐变: 底部白黄 → 橙 → 红 → 顶部透明
+            float t = 1.0 - vLife;
+            vec3 col;
+            if (t < 0.3)      col = mix(vec3(1.0, 0.95, 0.6), vec3(1.0, 0.6, 0.1), t/0.3);
+            else if (t < 0.7) col = mix(vec3(1.0, 0.6, 0.1), vec3(0.9, 0.2, 0.0), (t-0.3)/0.4);
+            else              col = mix(vec3(0.9, 0.2, 0.0), vec3(0.3, 0.0, 0.0), (t-0.7)/0.3);
+            alpha *= (1.0 - t * 0.8);
+            gl_FragColor = vec4(col, alpha);
+        }
+    `;
+
+    class FireParticleSystem {
+        constructor(scene, maxParticles = 3000) {
+            this.scene = scene;
+            this.maxParticles = maxParticles;
+            this.activeCount = 0;
+            this.sources = [];  // [{pos, flameHeight, emissionRate, accumulator}]
+            this.emissionScale = 1.0;
+
+            const geo = new THREE.BufferGeometry();
+            this.positions = new Float32Array(maxParticles * 3);
+            this.life = new Float32Array(maxParticles);
+            this.seed = new Float32Array(maxParticles);
+            this.size = new Float32Array(maxParticles);
+            geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+            geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+            geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
+            geo.setDrawRange(0, 0);
+
+            this.material = new THREE.ShaderMaterial({
+                vertexShader: fireVertexShader,
+                fragmentShader: fireFragmentShader,
+                uniforms: {
+                    uTime: { value: 0 },
+                    uFlameHeight: { value: 2.0 },
+                    uFirePos: { value: new THREE.Vector3(0,0,0) }
+                },
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            this.points = new THREE.Points(geo, this.material);
+            this.points.frustumCulled = false;
+            scene.add(this.points);
+        }
+
+        updateSources(fireSources, dx, dz) {
+            this.sources = (fireSources || []).map(f => ({
+                pos: new THREE.Vector3(f.x * dx + dx/2, f.z * dz + dz/2, f.y * dx + dx/2),
+                flameHeight: f.flameHeight || 2.0,
+                emissionRate: Math.min(80, 20 + (f.heatRelease || 0) * 0.1),
+                accumulator: 0
+            }));
+        }
+
+        emit(dt) {
+            const scale = this.emissionScale;
+            for (const src of this.sources) {
+                src.accumulator += src.emissionRate * scale * dt;
+                const toEmit = Math.floor(src.accumulator);
+                src.accumulator -= toEmit;
+                for (let i = 0; i < toEmit; i++) {
+                    if (this.activeCount >= this.maxParticles) return;
+                    const idx = this.activeCount++;
+                    // 在火源底部小圆盘内随机分布
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = Math.random() * 0.3;
+                    this.positions[idx*3]   = Math.cos(angle) * r;
+                    this.positions[idx*3+1] = Math.random() * 0.1;
+                    this.positions[idx*3+2] = Math.sin(angle) * r;
+                    this.life[idx] = 1.0;
+                    this.seed[idx] = Math.random();
+                    this.size[idx] = 20 + Math.random() * 15;
+                }
+            }
+        }
+
+        update(dt, time) {
+            this.emit(dt);
+            // 生命衰减
+            const decay = dt * 1.5;  // 粒子寿命 ~0.67s
+            for (let i = 0; i < this.activeCount; i++) {
+                this.life[i] -= decay;
+            }
+            // 死亡粒子压缩到末尾
+            let writeIdx = 0;
+            for (let i = 0; i < this.activeCount; i++) {
+                if (this.life[i] > 0) {
+                    if (writeIdx !== i) {
+                        this.positions[writeIdx*3]   = this.positions[i*3];
+                        this.positions[writeIdx*3+1] = this.positions[i*3+1];
+                        this.positions[writeIdx*3+2] = this.positions[i*3+2];
+                        this.life[writeIdx] = this.life[i];
+                        this.seed[writeIdx] = this.seed[i];
+                        this.size[writeIdx] = this.size[i];
+                    }
+                    writeIdx++;
+                }
+            }
+            this.activeCount = writeIdx;
+            this.points.geometry.setDrawRange(0, this.activeCount);
+            this.points.geometry.attributes.position.needsUpdate = true;
+            this.points.geometry.attributes.aLife.needsUpdate = true;
+            this.points.geometry.attributes.aSeed.needsUpdate = true;
+            this.points.geometry.attributes.aSize.needsUpdate = true;
+
+            // 更新 uniform (取第一个火源, 多火源时可扩展为实例化)
+            if (this.sources.length > 0) {
+                this.material.uniforms.uFirePos.value.copy(this.sources[0].pos);
+                this.material.uniforms.uFlameHeight.value = this.sources[0].flameHeight;
+            }
+            this.material.uniforms.uTime.value = time;
+        }
+
+        dispose() {
+            this.scene.remove(this.points);
+            this.points.geometry.dispose();
+            this.material.dispose();
+        }
+    }
+
+    // ================================================================
+    // 6. 3D 场景初始化
     // ================================================================
     function init3D() {
         scene = new THREE.Scene();
@@ -265,11 +444,14 @@
 
         loadingTip.style.display = 'none';
         addLog('3D 引擎加载完毕，按住左键可旋转视角', 'info');
+        fireParticles = new FireParticleSystem(scene, 3000);
         animate();
     }
 
     function animate() {
         requestAnimationFrame(animate);
+        const dt = clock.getDelta();
+        if (fireParticles) fireParticles.update(dt, clock.getElapsedTime());
         controls.update();
         renderer.render(scene, camera);
     }
@@ -336,14 +518,11 @@
                     }
                     // 3. 温度分级渲染（仅无烟雾时显示）
                     else if (temp > 473.15) {
-                        // > 200°C: 真正的火焰
-                        draw = true;
-                        color = temperatureToColor(temp);
+                        // 火焰已由 GPU 粒子系统渲染, 此处跳过立方体
+                        draw = false;
                     } else if (temp > 373.15) {
-                        // 100-200°C: 热空气（淡橙色）
-                        draw = true;
-                        const t = Math.min((temp - 373.15) / 100.0, 1.0);
-                        color = new THREE.Color(0.95 - t * 0.15, 0.75 - t * 0.35, 0.45 - t * 0.45);
+                        // 火焰已由 GPU 粒子系统渲染, 此处跳过立方体
+                        draw = false;
                     }
 
                     if (draw && color) {
@@ -372,6 +551,9 @@
             }
             voxelMesh.instanceMatrix.needsUpdate = true;
             voxelMesh.instanceColor.needsUpdate = true;
+        } else if (voxelMesh) {
+            scene.remove(voxelMesh);
+            voxelMesh = null;
         }
 
         // ★ 人员生成：接收最新的 3D 坐标 (x, y, z)
