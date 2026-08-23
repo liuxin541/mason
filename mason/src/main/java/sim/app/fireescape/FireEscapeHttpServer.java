@@ -367,13 +367,19 @@ public class FireEscapeHttpServer {
         }
     }
 
+    // ★ 零长度响应必须关闭响应流, 否则 JDK HttpServer 客户端永远收不到响应
+    private static void respondOk(HttpExchange exchange) throws IOException {
+        exchange.sendResponseHeaders(200, 0);
+        exchange.getResponseBody().close();
+    }
+
     static class CommandHandler implements HttpHandler {
         @Override public void handle(HttpExchange exchange) throws IOException {
             if ("POST".equals(exchange.getRequestMethod())) {
                 String body = readRequestBody(exchange.getRequestBody());
                 String cmd = body.startsWith("cmd=") ? body.substring(4) : null;
                 if (cmd != null) {
-                    if (cmd.startsWith("speed_")) { int mult = Integer.parseInt(cmd.substring(6)); setSpeed(mult); exchange.sendResponseHeaders(200, 0); return; }
+                    if (cmd.startsWith("speed_")) { int mult = Integer.parseInt(cmd.substring(6)); setSpeed(mult); respondOk(exchange); return; }
                     switch (cmd) {
                         case "start": noFireMode = false; resetModel(); startAutoStep(); break;
                         case "pause": stopAutoStep(); break;
@@ -392,7 +398,7 @@ public class FireEscapeHttpServer {
                     }
                 }
             }
-            exchange.sendResponseHeaders(200, 0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -421,7 +427,7 @@ public class FireEscapeHttpServer {
             String query = exchange.getRequestURI().getQuery();
             if (query==null || !query.startsWith("name=")) { exchange.sendResponseHeaders(400,-1); return; }
             String mapName = URLDecoder.decode(query.substring(5), "UTF-8");
-            try { loadMapFile(mapName); exchange.sendResponseHeaders(200,0); } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(500,-1); }
+            try { loadMapFile(mapName); respondOk(exchange); } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(500,-1); }
         }
     }
 
@@ -442,7 +448,7 @@ public class FireEscapeHttpServer {
             int[][] obstacles = new int[model.gridWidth][model.gridHeight];
             for (int i=0; i<model.gridWidth; i++) for (int j=0; j<model.gridHeight; j++) obstacles[i][j] = model.obstacleGrid.get(i,j,0);
             saveMapFile(name, obstacles);
-            exchange.sendResponseHeaders(200,0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -519,7 +525,7 @@ public class FireEscapeHttpServer {
             } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(400,-1); return; }
             if (points.size() < 3) { exchange.sendResponseHeaders(400,-1); return; }
             fillInsideFromPolygon(points);
-            exchange.sendResponseHeaders(200,0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -550,7 +556,7 @@ public class FireEscapeHttpServer {
             for (int[] p : sources) { if (model.insideGrid.get(p[0],p[1],0)==1 && model.obstacleGrid.get(p[0],p[1],0)==0) valid.add(new int[]{p[0], p[1], 0}); }
             customFireSources = valid.isEmpty()? null : valid;
             resetModel();
-            exchange.sendResponseHeaders(200,0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
