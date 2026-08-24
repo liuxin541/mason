@@ -1412,7 +1412,8 @@
 
         void main() {
             vec3 ro = vWorldPos - uBoxCenter;
-            vec3 rd = normalize(vWorldPos - uCameraPos);
+            // ★ 光线方向: 从远面朝相机方向步进 (BackSide 远面 → 穿过体积 → 相机)
+            vec3 rd = normalize(uCameraPos - vWorldPos);
 
             vec2 tHit = rayBoxIntersect(ro, rd, -uBoxHalf, uBoxHalf);
             if (tHit.x > tHit.y) discard;
@@ -1423,7 +1424,7 @@
             vec3 accumColor = vec3(0.0);
             float accumAlpha = 0.0;
 
-            for (int i = 0; i < 128; i++) {
+            for (int i = 0; i < 256; i++) {
                 if (i >= uMaxSteps) break;
                 float t = tStart + float(i) * uStepSize;
                 if (t > tEnd) break;
@@ -1439,8 +1440,8 @@
                 float temp = 293.15 + sampleField(uTempTex, uvw) / 255.0 * 880.0;
                 float excessT = max(0.0, temp - 293.15);
 
-                // === 颜色: 深黑色浓烟, 高温区偏灰 ===
-                vec3 smokeColor = mix(vec3(0.01), vec3(0.12), density);
+                // === 颜色: 深灰浓烟 (可见性好), 高温区偏灰亮 ===
+                vec3 smokeColor = mix(vec3(0.08), vec3(0.25), density);
                 smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
 
                 // === 光照散射 ===
@@ -1507,16 +1508,16 @@
 
                 this.smokeTex = new THREE.DataTexture(smokeArr, atlasW, atlasH, THREE.RGBAFormat);
                 this.smokeTex.type = THREE.UnsignedByteType;
-                this.smokeTex.minFilter = THREE.NearestFilter;
-                this.smokeTex.magFilter = THREE.NearestFilter;
+                this.smokeTex.minFilter = THREE.LinearFilter;
+                this.smokeTex.magFilter = THREE.LinearFilter;
                 this.smokeTex.wrapS = THREE.ClampToEdgeWrapping;
                 this.smokeTex.wrapT = THREE.ClampToEdgeWrapping;
                 this.smokeTex.needsUpdate = true;
 
                 this.tempTex = new THREE.DataTexture(tempArr, atlasW, atlasH, THREE.RGBAFormat);
                 this.tempTex.type = THREE.UnsignedByteType;
-                this.tempTex.minFilter = THREE.NearestFilter;
-                this.tempTex.magFilter = THREE.NearestFilter;
+                this.tempTex.minFilter = THREE.LinearFilter;
+                this.tempTex.magFilter = THREE.LinearFilter;
                 this.tempTex.wrapS = THREE.ClampToEdgeWrapping;
                 this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
                 this.tempTex.needsUpdate = true;
@@ -1539,18 +1540,18 @@
                         uCameraPos: { value: new THREE.Vector3() },
                         uLightDir: { value: new THREE.Vector3(0.3, 0.9, 0.2).normalize() },
                         uLightColor: { value: new THREE.Color(0.95, 0.90, 0.80) },
-                        uAmbientColor: { value: new THREE.Color(0.08, 0.08, 0.10) },
+                        uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
                         uAbsorption: { value: 14.0 },
                         uScattering: { value: 3.0 },
-                        uStepSize: { value: 0.4 },
-                        uMaxSteps: { value: 160 },
+                        uStepSize: { value: 0.2 },
+                        uMaxSteps: { value: 256 },
                         uDensityThreshold: { value: 0.008 },
                         uTime: { value: 0 }
                     },
                     transparent: true,
                     side: THREE.BackSide,
                     depthWrite: false,
-                    depthTest: false,
+                    depthTest: true,
                     blending: THREE.NormalBlending
                 });
 
