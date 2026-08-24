@@ -1359,7 +1359,7 @@
     // 4e. 体积烟雾渲染 (3D Texture + Ray Marching)
     // ================================================================
     const volumeVertexShader = `
-        varying vec3 vWorldPos;
+        out vec3 vWorldPos;
         void main() {
             vec4 wp = modelMatrix * vec4(position, 1.0);
             vWorldPos = wp.xyz;
@@ -1369,8 +1369,9 @@
 
     const volumeFragmentShader = `
         precision highp float;
-        uniform sampler3D uSmokeTex;
-        uniform sampler3D uTempTex;
+        uniform highp sampler2D uSmokeTex;
+        uniform highp sampler2D uTempTex;
+        uniform float uLayerCount;    // 高度层数 (3D场打包进2D图集)
         uniform vec3 uBoxHalf;        // 建筑半尺寸 (米)
         uniform vec3 uBoxCenter;      // 建筑中心世界坐标
         uniform vec3 uCameraPos;
@@ -1384,9 +1385,9 @@
         uniform float uDensityThreshold;
         uniform float uTime;
 
-        varying vec3 vWorldPos;
+        in vec3 vWorldPos;
+        out vec4 outFragColor;
 
-        // 光线与 AABB 盒求交 (盒中心在原点, 半尺寸 uBoxHalf)
         vec2 rayBoxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
             vec3 invR = 1.0 / rd;
             vec3 t0 = (bmin - ro) * invR;
@@ -1398,10 +1399,15 @@
             return vec2(tN, tF);
         }
 
-        // Henyey-Greenstein 相位函数 (前向散射)
         float hgPhase(float cosT, float g) {
             float g2 = g * g;
             return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
+        }
+
+        // 3D采样: uvw=(X, 深度, 高度) → 2D图集坐标
+        float sampleField(sampler2D tex, vec3 uvw) {
+            vec2 auv = vec2(uvw.x, (uvw.z * uLayerCount + uvw.y) / uLayerCount);
+            return texture(tex, auv).r;
         }
 
         void main() {
@@ -1423,18 +1429,18 @@
                 if (t > tEnd) break;
 
                 vec3 sp = ro + rd * t;
-                // 建筑坐标 → 纹理 UVW: x→u, 建筑z(深度)→v, 建筑y(高度)→w
                 vec3 p = sp / uBoxHalf;
+                // 建筑坐标 → 3D场坐标: uvw=(X, 深度, 高度)
                 vec3 uvw = vec3(p.x, p.z, p.y) * 0.5 + 0.5;
 
-                float density = texture(uSmokeTex, uvw).r;
+                float density = sampleField(uSmokeTex, uvw) / 255.0;
                 if (density < uDensityThreshold) continue;
 
-                float temp = texture(uTempTex, uvw).r;
+                float temp = 293.15 + sampleField(uTempTex, uvw) / 255.0 * 880.0;
                 float excessT = max(0.0, temp - 293.15);
 
                 // === 颜色: 深黑色浓烟, 高温区偏灰 ===
-                vec3 smokeColor = mix(vec3(0.02), vec3(0.18), density);
+                vec3 smokeColor = mix(vec3(0.01), vec3(0.12), density);
                 smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
 
                 // === 光照散射 ===
@@ -1444,7 +1450,6 @@
 
                 vec3 scatterL = uLightColor * lightTrans * phase * uScattering;
                 vec3 ambientL = uAmbientColor * uScattering * 0.25;
-                // 高温自发光 (橙红)
                 vec3 emissive = vec3(1.0, 0.4, 0.1) * smoothstep(400.0, 900.0, excessT) * density * 0.3;
 
                 vec3 totalLight = scatterL + ambientL + emissive;
@@ -1457,11 +1462,11 @@
                 accumColor += (1.0 - accumAlpha) * color * alpha;
                 accumAlpha += (1.0 - accumAlpha) * alpha;
 
-                if (accumAlpha > 0.97) break;  // 提前终止
+                if (accumAlpha > 0.97) break;
             }
 
             if (accumAlpha < 0.01) discard;
-            gl_FragColor = vec4(accumColor, accumAlpha);
+            outFragColor = vec4(accumColor, accumAlpha);
         }
     `;
 
@@ -1484,11 +1489,15 @@
             const dd = Math.ceil(data.depth / stride);
             const need = dw * dh * dd;
             if (data.smoke.length < need || data.temp.length < need) return;
-            const smokeArr = new Float32Array(need);
-            const tempArr = new Float32Array(need);
+            // ★ 2D 图集: 每高度层一行 (dw x dh*dd), 后端扁平化顺序可直接复用
+            const atlasW = dw, atlasH = dh * dd;
+            const smokeArr = new Uint8Array(atlasW * atlasH * 4);
+            const tempArr = new Uint8Array(atlasW * atlasH * 4);
             for (let i = 0; i < need; i++) {
-                smokeArr[i] = data.smoke[i] || 0;
-                tempArr[i] = data.temp[i] || 0;
+                const s = Math.max(0, Math.min(1, data.smoke[i] || 0));
+                smokeArr[i * 4] = Math.round(s * 255);
+                const t = Math.max(293.15, data.temp[i] || 0);
+                tempArr[i * 4] = Math.round(Math.min(1, (t - 293.15) / 880.0) * 255);
             }
 
             // 首次创建或尺寸变化
@@ -1496,26 +1505,20 @@
                 this.dispose();
                 this.dims = { w: dw, h: dh, d: dd };
 
-                this.smokeTex = new THREE.Data3DTexture(smokeArr, dw, dh, dd);
-                this.smokeTex.format = THREE.RedFormat;
-                this.smokeTex.type = THREE.FloatType;
-                this.smokeTex.minFilter = THREE.LinearFilter;
-                this.smokeTex.magFilter = THREE.LinearFilter;
+                this.smokeTex = new THREE.DataTexture(smokeArr, atlasW, atlasH, THREE.RGBAFormat);
+                this.smokeTex.type = THREE.UnsignedByteType;
+                this.smokeTex.minFilter = THREE.NearestFilter;
+                this.smokeTex.magFilter = THREE.NearestFilter;
                 this.smokeTex.wrapS = THREE.ClampToEdgeWrapping;
                 this.smokeTex.wrapT = THREE.ClampToEdgeWrapping;
-                this.smokeTex.wrapR = THREE.ClampToEdgeWrapping;
-                this.smokeTex.unpackAlignment = 1;
                 this.smokeTex.needsUpdate = true;
 
-                this.tempTex = new THREE.Data3DTexture(tempArr, dw, dh, dd);
-                this.tempTex.format = THREE.RedFormat;
-                this.tempTex.type = THREE.FloatType;
-                this.tempTex.minFilter = THREE.LinearFilter;
-                this.tempTex.magFilter = THREE.LinearFilter;
+                this.tempTex = new THREE.DataTexture(tempArr, atlasW, atlasH, THREE.RGBAFormat);
+                this.tempTex.type = THREE.UnsignedByteType;
+                this.tempTex.minFilter = THREE.NearestFilter;
+                this.tempTex.magFilter = THREE.NearestFilter;
                 this.tempTex.wrapS = THREE.ClampToEdgeWrapping;
                 this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
-                this.tempTex.wrapR = THREE.ClampToEdgeWrapping;
-                this.tempTex.unpackAlignment = 1;
                 this.tempTex.needsUpdate = true;
 
                 // 容器: 尺寸 = 全分辨率建筑体积, 中心在 (w*dx/2, d*dz/2, h*dx/2)
@@ -1526,20 +1529,22 @@
                 this.material = new THREE.ShaderMaterial({
                     vertexShader: volumeVertexShader,
                     fragmentShader: volumeFragmentShader,
+                    glslVersion: THREE.GLSL3,
                     uniforms: {
                         uSmokeTex: { value: this.smokeTex },
                         uTempTex: { value: this.tempTex },
+                        uLayerCount: { value: dd },
                         uBoxHalf: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
                         uBoxCenter: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
                         uCameraPos: { value: new THREE.Vector3() },
-                        uLightDir: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
-                        uLightColor: { value: new THREE.Color(0.9, 0.85, 0.75) },
-                        uAmbientColor: { value: new THREE.Color(0.12, 0.12, 0.15) },
-                        uAbsorption: { value: 8.0 },
-                        uScattering: { value: 2.0 },
-                        uStepSize: { value: 0.5 },
-                        uMaxSteps: { value: 96 },
-                        uDensityThreshold: { value: 0.02 },
+                        uLightDir: { value: new THREE.Vector3(0.3, 0.9, 0.2).normalize() },
+                        uLightColor: { value: new THREE.Color(0.95, 0.90, 0.80) },
+                        uAmbientColor: { value: new THREE.Color(0.08, 0.08, 0.10) },
+                        uAbsorption: { value: 14.0 },
+                        uScattering: { value: 3.0 },
+                        uStepSize: { value: 0.4 },
+                        uMaxSteps: { value: 160 },
+                        uDensityThreshold: { value: 0.008 },
                         uTime: { value: 0 }
                     },
                     transparent: true,
