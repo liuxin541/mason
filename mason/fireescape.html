@@ -150,6 +150,7 @@
     const clock = new THREE.Clock();
     let fireParticles = null;
     let smokeParticles = null;
+    let volumeSmoke = null;
     let fireLights = [];
 
     // ================================================================
@@ -198,7 +199,7 @@
                 updateStats(d);
                 update3DWorld(d);
                 if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz, d.fire, d.stride || 1);
-                if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth, d.stride || 1);
+                // if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth, d.stride || 1);
                 updateFireLights(d);
                 // ★ 首次有数据时自动框住整个建筑（含火/烟区域）
                 if (!cameraFramed && d.width && d.depth && controls && camera) {
@@ -740,6 +741,224 @@
     }
 
     // ================================================================
+    // 5b. 体积烟雾渲染 (3D Texture + Ray Marching)
+    // ================================================================
+    const volumeVertexShader = `
+        varying vec3 vWorldPos;
+        void main() {
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+    `;
+
+    const volumeFragmentShader = `
+        precision highp float;
+        uniform sampler3D uSmokeTex;
+        uniform sampler3D uTempTex;
+        uniform vec3 uBoxHalf;        // 建筑半尺寸 (米)
+        uniform vec3 uBoxCenter;      // 建筑中心世界坐标
+        uniform vec3 uCameraPos;
+        uniform vec3 uLightDir;
+        uniform vec3 uLightColor;
+        uniform vec3 uAmbientColor;
+        uniform float uAbsorption;
+        uniform float uScattering;
+        uniform float uStepSize;
+        uniform int uMaxSteps;
+        uniform float uDensityThreshold;
+        uniform float uTime;
+
+        varying vec3 vWorldPos;
+
+        vec2 rayBoxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
+            vec3 invR = 1.0 / rd;
+            vec3 t0 = (bmin - ro) * invR;
+            vec3 t1 = (bmax - ro) * invR;
+            vec3 tmin = min(t0, t1);
+            vec3 tmax = max(t0, t1);
+            float tN = max(max(tmin.x, tmin.y), tmin.z);
+            float tF = min(min(tmax.x, tmax.y), tmax.z);
+            return vec2(tN, tF);
+        }
+
+        float hgPhase(float cosT, float g) {
+            float g2 = g * g;
+            return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
+        }
+
+        void main() {
+            vec3 ro = vWorldPos - uBoxCenter;
+            vec3 rd = normalize(vWorldPos - uCameraPos);
+
+            vec2 tHit = rayBoxIntersect(ro, rd, -uBoxHalf, uBoxHalf);
+            if (tHit.x > tHit.y) discard;
+
+            float tStart = max(tHit.x, 0.0);
+            float tEnd = tHit.y;
+
+            vec3 accumColor = vec3(0.0);
+            float accumAlpha = 0.0;
+
+            for (int i = 0; i < 128; i++) {
+                if (i >= uMaxSteps) break;
+                float t = tStart + float(i) * uStepSize;
+                if (t > tEnd) break;
+
+                vec3 sp = ro + rd * t;
+                vec3 p = sp / uBoxHalf;
+                vec3 uvw = vec3(p.x, p.z, p.y) * 0.5 + 0.5;
+
+                float density = texture(uSmokeTex, uvw).r;
+                if (density < uDensityThreshold) continue;
+
+                float temp = texture(uTempTex, uvw).r;
+                float excessT = max(0.0, temp - 293.15);
+
+                vec3 smokeColor = mix(vec3(0.02), vec3(0.18), density);
+                smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
+
+                float lightTrans = exp(-density * uAbsorption * 0.8);
+                float cosT = dot(rd, uLightDir);
+                float phase = hgPhase(cosT, 0.55);
+
+                vec3 scatterL = uLightColor * lightTrans * phase * uScattering;
+                vec3 ambientL = uAmbientColor * uScattering * 0.25;
+                vec3 emissive = vec3(1.0, 0.4, 0.1) * smoothstep(400.0, 900.0, excessT) * density * 0.3;
+
+                vec3 totalLight = scatterL + ambientL + emissive;
+                vec3 color = smokeColor * totalLight;
+
+                float absorp = density * uAbsorption * uStepSize;
+                float alpha = 1.0 - exp(-absorp);
+
+                accumColor += (1.0 - accumAlpha) * color * alpha;
+                accumAlpha += (1.0 - accumAlpha) * alpha;
+
+                if (accumAlpha > 0.97) break;
+            }
+
+            if (accumAlpha < 0.01) discard;
+            gl_FragColor = vec4(accumColor, accumAlpha);
+        }
+    `;
+
+    class VolumeSmoke {
+        constructor(scene) {
+            this.scene = scene;
+            this.mesh = null;
+            this.smokeTex = null;
+            this.tempTex = null;
+            this.material = null;
+            this.dims = { w: 0, h: 0, d: 0 };
+        }
+
+        update(data, dx, dz) {
+            if (!data || !data.smoke || !data.temp) return;
+            const stride = data.stride || 1;
+            const dw = Math.ceil(data.width / stride);
+            const dh = Math.ceil(data.height / stride);
+            const dd = Math.ceil(data.depth / stride);
+            const need = dw * dh * dd;
+            if (data.smoke.length < need || data.temp.length < need) return;
+            const smokeArr = new Float32Array(need);
+            const tempArr = new Float32Array(need);
+            for (let i = 0; i < need; i++) {
+                smokeArr[i] = data.smoke[i] || 0;
+                tempArr[i] = data.temp[i] || 0;
+            }
+
+            if (!this.mesh || this.dims.w !== dw || this.dims.h !== dh || this.dims.d !== dd) {
+                this.dispose();
+                this.dims = { w: dw, h: dh, d: dd };
+
+                this.smokeTex = new THREE.Data3DTexture(smokeArr, dw, dh, dd);
+                this.smokeTex.format = THREE.RedFormat;
+                this.smokeTex.type = THREE.FloatType;
+                this.smokeTex.minFilter = THREE.LinearFilter;
+                this.smokeTex.magFilter = THREE.LinearFilter;
+                this.smokeTex.wrapS = THREE.ClampToEdgeWrapping;
+                this.smokeTex.wrapT = THREE.ClampToEdgeWrapping;
+                this.smokeTex.wrapR = THREE.ClampToEdgeWrapping;
+                this.smokeTex.unpackAlignment = 1;
+                this.smokeTex.needsUpdate = true;
+
+                this.tempTex = new THREE.Data3DTexture(tempArr, dw, dh, dd);
+                this.tempTex.format = THREE.RedFormat;
+                this.tempTex.type = THREE.FloatType;
+                this.tempTex.minFilter = THREE.LinearFilter;
+                this.tempTex.magFilter = THREE.LinearFilter;
+                this.tempTex.wrapS = THREE.ClampToEdgeWrapping;
+                this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
+                this.tempTex.wrapR = THREE.ClampToEdgeWrapping;
+                this.tempTex.unpackAlignment = 1;
+                this.tempTex.needsUpdate = true;
+
+                const boxW = data.width * dx, boxH = data.depth * dz, boxD = data.height * dx;
+                const geo = new THREE.BoxGeometry(boxW, boxH, boxD);
+                geo.translate(boxW / 2, boxH / 2, boxD / 2);
+
+                this.material = new THREE.ShaderMaterial({
+                    vertexShader: volumeVertexShader,
+                    fragmentShader: volumeFragmentShader,
+                    uniforms: {
+                        uSmokeTex: { value: this.smokeTex },
+                        uTempTex: { value: this.tempTex },
+                        uBoxHalf: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
+                        uBoxCenter: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
+                        uCameraPos: { value: new THREE.Vector3() },
+                        uLightDir: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+                        uLightColor: { value: new THREE.Color(0.9, 0.85, 0.75) },
+                        uAmbientColor: { value: new THREE.Color(0.12, 0.12, 0.15) },
+                        uAbsorption: { value: 8.0 },
+                        uScattering: { value: 2.0 },
+                        uStepSize: { value: 0.5 },
+                        uMaxSteps: { value: 96 },
+                        uDensityThreshold: { value: 0.02 },
+                        uTime: { value: 0 }
+                    },
+                    transparent: true,
+                    side: THREE.BackSide,
+                    depthWrite: false,
+                    depthTest: false,
+                    blending: THREE.NormalBlending
+                });
+
+                this.mesh = new THREE.Mesh(geo, this.material);
+                this.mesh.frustumCulled = false;
+                this.mesh.renderOrder = 2;
+                this.scene.add(this.mesh);
+            } else {
+                this.smokeTex.image.data.set(smokeArr);
+                this.smokeTex.needsUpdate = true;
+                this.tempTex.image.data.set(tempArr);
+                this.tempTex.needsUpdate = true;
+            }
+        }
+
+        updateFrame(camera, time) {
+            if (!this.material) return;
+            this.material.uniforms.uCameraPos.value.copy(camera.position);
+            this.material.uniforms.uTime.value = time;
+        }
+
+        setVisible(v) {
+            if (this.mesh) this.mesh.visible = v;
+        }
+
+        dispose() {
+            if (this.mesh) {
+                this.scene.remove(this.mesh);
+                this.mesh.geometry.dispose();
+                this.material.dispose();
+                if (this.smokeTex) this.smokeTex.dispose();
+                if (this.tempTex) this.tempTex.dispose();
+                this.mesh = null;
+            }
+        }
+    }
+
+    // ================================================================
     // 6. 3D 场景初始化
     // ================================================================
     function init3D() {
@@ -774,7 +993,9 @@
         loadingTip.style.display = 'none';
         addLog('3D 引擎加载完毕，按住左键可旋转视角', 'info');
         fireParticles = new FireParticleSystem(scene, 3000);
-        smokeParticles = new SmokeParticleSystem(scene, 6000);
+        // ★ 体积烟雾接管: 粒子烟雾停用
+        // smokeParticles = new SmokeParticleSystem(scene, 6000);
+        volumeSmoke = new VolumeSmoke(scene);
         animate();
     }
 
@@ -783,7 +1004,8 @@
         const dt = clock.getDelta();
         const time = clock.getElapsedTime();
         if (fireParticles) fireParticles.update(dt, time, camera);
-        if (smokeParticles) smokeParticles.update(dt, time, camera);
+        // if (smokeParticles) smokeParticles.update(dt, time, camera);
+        if (volumeSmoke) volumeSmoke.updateFrame(camera, time);
         controls.update();
         renderer.render(scene, camera);
     }
@@ -1123,6 +1345,19 @@
     setTimeout(resizeCanvas, 100);
     init3D();
     setInterval(fetchState, 1000);
+
+    // ★ 体积烟雾: 独立低频轮询 /smokeVolume (服务器按时间缓存, 开销小)
+    async function fetchSmokeVolume() {
+        try {
+            const resp = await fetch('/smokeVolume');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (volumeSmoke) volumeSmoke.update(data, dx, dz);
+        } catch (e) {
+            // 静默失败, 不影响主循环
+        }
+    }
+    setInterval(fetchSmokeVolume, 500);
     fetchState();
     addLog('3D 物理真实版加载完成，按住左键可旋转视角', 'info');
 </script>
