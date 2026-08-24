@@ -50,6 +50,7 @@ public class FireEscapeHttpServer {
         server.createContext("/", new IndexHandler());
         server.createContext("/ifc_output", new StaticFileHandler("ifc_output"));
         server.createContext("/state", new StateHandler());
+        server.createContext("/smokeVolume", new SmokeVolumeHandler());
         server.createContext("/command", new CommandHandler());
         server.createContext("/listMaps", new ListMapsHandler());
         server.createContext("/loadMap", new LoadMapHandler());
@@ -371,6 +372,94 @@ public class FireEscapeHttpServer {
     private static void respondOk(HttpExchange exchange) throws IOException {
         exchange.sendResponseHeaders(200, 0);
         exchange.getResponseBody().close();
+    }
+
+    // ===== /smokeVolume: 输出扁平化3D浓度场+温度场 (供前端体积渲染) =====
+    // 2x2x2 降采样取 max + 按模拟时间缓存 + gzip, 避免大载荷拖垮轮询
+    static class SmokeVolumeHandler implements HttpHandler {
+        private static double cachedTime = -1;
+        private static byte[] cachedBody = null;
+
+        @Override public void handle(HttpExchange exchange) throws IOException {
+            double t = model.currentTime;
+            if (cachedBody == null || cachedTime != t) {
+                cachedBody = buildSmokeVolumeJson().getBytes(StandardCharsets.UTF_8);
+                cachedTime = t;
+            }
+            byte[] bytes = cachedBody;
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            String ae = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+            if (ae != null && ae.toLowerCase().contains("gzip")) {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream(bytes.length / 3);
+                try (GZIPOutputStream gz = new GZIPOutputStream(bos)) { gz.write(bytes); }
+                byte[] gzBytes = bos.toByteArray();
+                if (gzBytes.length < bytes.length) {
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                    exchange.sendResponseHeaders(200, gzBytes.length);
+                    try (OutputStream os = exchange.getResponseBody()) { os.write(gzBytes); }
+                    return;
+                }
+            }
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
+        }
+
+        private static String buildSmokeVolumeJson() {
+            int w = model.gridWidth, h = model.gridHeight, d = model.gridDepth;
+            int stride = 2;
+            int dw = (w + stride - 1) / stride;
+            int dh = (h + stride - 1) / stride;
+            int dd = (d + stride - 1) / stride;
+            double[][][] C = model.smokeGrid.field;
+            double[][][] T = model.fireGrid.field;
+            int[][][] inside = model.insideGrid.field;
+            float[] smoke = new float[dw * dh * dd];
+            float[] temp = new float[dw * dh * dd];
+            int idx = 0;
+            for (int z = 0; z < d; z += stride) {
+                for (int y = 0; y < h; y += stride) {
+                    for (int x = 0; x < w; x += stride) {
+                        float sMax = 0f, tMax = (float) FireEscape.T_AMBIENT;
+                        boolean anyInside = false;
+                        for (int k = 0; k < stride && z + k < d; k++) {
+                            int zz = z + k;
+                            for (int j = 0; j < stride && y + j < h; j++) {
+                                int yy = y + j;
+                                double[] cx = C[x][yy];
+                                double[] tx = T[x][yy];
+                                int[] ix = inside[x][yy];
+                                for (int i = 0; i < stride && x + i < w; i++) {
+                                    if (ix[zz] == 1) anyInside = true;
+                                    double s = cx[zz];
+                                    double t2 = tx[zz];
+                                    if (s > sMax) sMax = (float) s;
+                                    if (t2 > tMax) tMax = (float) t2;
+                                }
+                            }
+                        }
+                        if (!anyInside) { sMax = 0f; tMax = (float) FireEscape.T_AMBIENT; }
+                        smoke[idx] = sMax;
+                        temp[idx] = tMax;
+                        idx++;
+                    }
+                }
+            }
+            StringBuilder sb = new StringBuilder(200 + idx * 24);
+            sb.append("{\"width\":").append(w).append(",\"height\":").append(h).append(",\"depth\":").append(d)
+              .append(",\"stride\":").append(stride)
+              .append(",\"smoke\":[");
+            for (int i = 0; i < idx; i++) {
+                if (i > 0) sb.append(',');
+                sb.append(Math.round(smoke[i] * 100.0) / 100.0);
+            }
+            sb.append("],\"temp\":[");
+            for (int i = 0; i < idx; i++) {
+                if (i > 0) sb.append(',');
+                sb.append(Math.round(temp[i] * 10.0) / 10.0);
+            }
+            sb.append("]}");
+            return sb.toString();
+        }
     }
 
     static class CommandHandler implements HttpHandler {
