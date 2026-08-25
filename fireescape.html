@@ -3128,18 +3128,20 @@
                     const temp = data.fire[z]?.[x]?.[y] || T_AMB;
                     const smoke = data.smoke[z]?.[x]?.[y] || 0;
 
-                    // ★ 跳过实体墙体！因为如果 glTF 加载成功，墙体由精细模型负责。
-                    // 如果没有 glTF，obs===1 也不会显示（保留火烟供用户看）
-                    if (obs !== undefined && obs === 1) continue;
-
                     let color = null;
                     let draw = false;
 
+                    // ★ 墙体: 有glTF精细模型时跳过, 否则用体素立方体渲染(简单房间模式)
+                    if (obs !== undefined && obs === 1) {
+                        if (buildingGroup) continue;
+                        color = new THREE.Color(0.55, 0.55, 0.60);
+                        draw = true;
+                    }
                     // 渲染火源: 火焰已由 GPU 粒子系统渲染, 此处跳过立方体
-                    if (temp > T_AMB + 1.0) {
+                    else if (temp > T_AMB + 1.0) {
                         draw = false;
                     }
-                    // 渲染烟雾: 烟雾已由 GPU 粒子系统渲染, 此处跳过立方体
+                    // 渲染烟雾: 烟雾已由体积渲染, 此处跳过立方体
                     else if (smoke > 0.1) {
                         draw = false;
                     }
