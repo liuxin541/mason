@@ -361,7 +361,7 @@ public class FireEscape extends SimState {
 
     // ★ 简单矩形房间 (单层, 一个出口, 用于观察烟和火焰算法)
     public void loadSimpleRectRoom() {
-        int w = 20, h = 14, d = 8;
+        int w = 30, h = 20, d = 10;
         createGrids(w, h, d);
         exits.clear();
 
