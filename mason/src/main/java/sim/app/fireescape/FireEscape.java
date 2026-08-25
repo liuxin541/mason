@@ -49,14 +49,14 @@ public class FireEscape extends SimState {
 
     // ---- 物理参数（与原版保持一致） ----
     public static final double T_AMBIENT = 293.15;
-    public static final double T_FLAME = 1173.0;
+    public static final double T_FLAME = 873.0;
     public static final double T_IGNITION = 573.0;
     public static final double T_DEATH = 473.0;
-    public static final double T_MAX = 1273.0;
+    public static final double T_MAX = 823.0;
 
     public double alpha_air = 2.0e-5;
     public double conductionBoost = 50.0;
-    public double coolingRate = 0.02;
+    public double coolingRate = 0.06;
     public double rhoAir = 1.2;
     public double cpAir = 1005;
     public double h_conv = 15.0;
@@ -64,7 +64,7 @@ public class FireEscape extends SimState {
     public double Cd = 0.65;
     public double g = 9.81;
     public double t2FireGrowth = 0.0117;
-    public double Q_steady = 500.0;
+    public double Q_steady = 150.0;
     public int maxSourceRadius = 3;
     public double radiationRadius = 6.0;
     public double fuelRadiationRadius = 4.0;
