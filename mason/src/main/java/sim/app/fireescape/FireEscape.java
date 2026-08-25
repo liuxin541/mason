@@ -19,6 +19,7 @@ public class FireEscape extends SimState {
     public int gridHeight = 0;
     public int gridDepth = 0;
     public int personCount = 50;
+    public boolean simpleRoomMode = false;  // 简单矩形房间模式(观察算法用)
 
     // ---- 核心 3D 数据容器 ----
     public DoubleGrid3D fireGrid;
@@ -355,22 +356,81 @@ public class FireEscape extends SimState {
         this.groundFloorMaxZ = 7;  // fallback 中一楼是 z=0~7
     }
 
+    // ★ 地图模式: "building" (默认, 加载voxel) | "simple" (简单矩形房间)
+    public String mapMode = "building";
+
+    // ★ 简单矩形房间 (单层, 一个出口, 用于观察烟和火焰算法)
+    public void loadSimpleRectRoom() {
+        int w = 20, h = 14, d = 8;
+        createGrids(w, h, d);
+        exits.clear();
+
+        // 1. 四面墙
+        for (int z = 0; z < d; z++) {
+            for (int x = 0; x < w; x++) {
+                obstacleGrid.set(x, 0, z, TYPE_WALL);
+                obstacleGrid.set(x, h - 1, z, TYPE_WALL);
+            }
+            for (int y = 0; y < h; y++) {
+                obstacleGrid.set(0, y, z, TYPE_WALL);
+                obstacleGrid.set(w - 1, y, z, TYPE_WALL);
+            }
+        }
+        // 2. 地板(z=0)和天花板(z=d-1)
+        for (int x = 0; x < w; x++)
+            for (int y = 0; y < h; y++) {
+                obstacleGrid.set(x, y, 0, TYPE_WALL);
+                obstacleGrid.set(x, y, d - 1, TYPE_WALL);
+            }
+        // 3. 出口: 在右侧墙(x=w-1)中间开一个门 (z=1~2)
+        int exitY = h / 2;
+        obstacleGrid.set(w - 1, exitY, 1, TYPE_EXIT);
+        obstacleGrid.set(w - 1, exitY, 2, TYPE_EXIT);
+        exits.add(new int[]{w - 1, exitY, 1});
+
+        // 4. 同步 insideGrid / fuelGrid
+        for (int x = 0; x < w; x++)
+            for (int y = 0; y < h; y++)
+                for (int z = 0; z < d; z++) {
+                    if (obstacleGrid.get(x, y, z) == TYPE_WALL) {
+                        insideGrid.set(x, y, z, 0);
+                        fuelGrid.set(x, y, z, 0);
+                    } else {
+                        insideGrid.set(x, y, z, 1);
+                    }
+                }
+
+        // 5. 坐标参数
+        deltaX = 0.5;
+        deltaZ = 0.5;
+        this.semanticInfo = new SemanticInfo();
+        this.groundFloorMinZ = 1;
+        this.groundFloorMaxZ = d - 2;
+        System.out.println("[Simple] 已加载简单矩形房间 " + w + "x" + h + "x" + d
+                + " (出口: x=" + (w-1) + ",y=" + exitY + ",z=1)");
+    }
+
     // ★ 重写核心启动流程：默认加载一号办公楼所在的 ifc_output，失败则回退
     public void start() {
         super.start();
 
-        // 1. 尝试加载真实体素
-        // ★ 默认指向 ifc_output（一号办公楼）；若想临时切换，可用 -Dfireescape.voxel=新路径 覆盖
-        String voxelPath = System.getProperty("fireescape.voxel", "./ifc_output/voxel_grid.voxel");
-        String semanticPath = System.getProperty("fireescape.semantic", "./ifc_output/semantic_info.json");
+        // ★ 根据 mapMode 选择地图
+        if ("simple".equals(mapMode)) {
+            loadSimpleRectRoom();
+        } else {
+            // 1. 尝试加载真实体素
+            // ★ 默认指向 ifc_output（一号办公楼）；若想临时切换，可用 -Dfireescape.voxel=新路径 覆盖
+            String voxelPath = System.getProperty("fireescape.voxel", "./ifc_output/voxel_grid.voxel");
+            String semanticPath = System.getProperty("fireescape.semantic", "./ifc_output/semantic_info.json");
 
-        System.out.println("[Init] 默认加载路径: " + voxelPath);
-        boolean loaded = loadFromVoxel(voxelPath, semanticPath);
+            System.out.println("[Init] 默认加载路径: " + voxelPath);
+            boolean loaded = loadFromVoxel(voxelPath, semanticPath);
 
-        // 2. 如果加载失败，自动回退到内建测试地图
-        if (!loaded) {
-            System.out.println("[Init] 回退至内建测试地图！");
-            fallbackInitRealisticObstacles();
+            // 2. 如果加载失败，自动回退到内建测试地图
+            if (!loaded) {
+                System.out.println("[Init] 回退至内建测试地图！");
+                fallbackInitRealisticObstacles();
+            }
         }
 
         // 3. 重置状态与火源

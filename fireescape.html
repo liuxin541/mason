@@ -430,8 +430,11 @@
 <body>
 <div class="container">
     <div class="top-bar">
-        <select id="modelSelect"><option value="FireEscape">🔥 BIM 模型渲染版</option></select>
-        <div class="model-name">📌 当前模型: <span id="currentModel">FireEscape</span></div>
+        <select id="modelSelect">
+            <option value="building">🏢 BIM 大楼模型</option>
+            <option value="simple">🏠 简单矩形房间</option>
+        </select>
+        <div class="model-name">📌 当前模型: <span id="currentModel">BIM大楼模型</span></div>
     </div>
     <div class="middle-area">
         <div class="canvas-container">
@@ -1371,7 +1374,8 @@
         precision highp float;
         uniform highp sampler2D uSmokeTex;
         uniform highp sampler2D uTempTex;
-        uniform float uLayerCount;    // 高度层数 (3D场打包进2D图集)
+        uniform float uLayerCount;    // 深度层数 dd
+        uniform float uLayerHeight;   // 每层高度方向体素数 dh
         uniform vec3 uBoxHalf;        // 建筑半尺寸 (米)
         uniform vec3 uBoxCenter;      // 建筑中心世界坐标
         uniform vec3 uCameraPos;
@@ -1404,7 +1408,9 @@
             return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
         }
 
-        // 3D采样: uvw=(X, 深度, 高度) → 2D图集坐标
+        // 3D采样: uvw=(X归一化, 水平深度y归一化, 垂直楼层z归一化) → 2D图集
+        // 数据布局: i = z_idx*(dh*dw) + y_idx*dw + x_idx, atlasW=dw, atlasH=dh*dd
+        // v = (z_idx*dh + y_idx)/(dh*dd) = (uvw.z*dd + uvw.y)/dd
         float sampleField(sampler2D tex, vec3 uvw) {
             vec2 auv = vec2(uvw.x, (uvw.z * uLayerCount + uvw.y) / uLayerCount);
             return texture(tex, auv).r;
@@ -1434,15 +1440,15 @@
                 // 建筑坐标 → 3D场坐标: uvw=(X, 深度, 高度)
                 vec3 uvw = vec3(p.x, p.z, p.y) * 0.5 + 0.5;
 
-                float density = sampleField(uSmokeTex, uvw) / 255.0;
+                float density = sampleField(uSmokeTex, uvw);
                 if (density < uDensityThreshold) continue;
 
-                float temp = 293.15 + sampleField(uTempTex, uvw) / 255.0 * 880.0;
+                float temp = 293.15 + sampleField(uTempTex, uvw) * 880.0;
                 float excessT = max(0.0, temp - 293.15);
 
-                // === 颜色: 深灰浓烟 (可见性好), 高温区偏灰亮 ===
-                vec3 smokeColor = mix(vec3(0.08), vec3(0.25), density);
-                smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
+                // === 深黑色浓烟 (密度越高越黑, 参考FDS体积烟雾) ===
+                vec3 smokeColor = mix(vec3(0.12, 0.12, 0.13), vec3(0.04, 0.04, 0.05), density);
+                smokeColor += vec3(0.03) * smoothstep(300.0, 800.0, excessT);
 
                 // === 光照散射 ===
                 float lightTrans = exp(-density * uAbsorption * 0.8);
@@ -1535,6 +1541,7 @@
                         uSmokeTex: { value: this.smokeTex },
                         uTempTex: { value: this.tempTex },
                         uLayerCount: { value: dd },
+                        uLayerHeight: { value: dh },
                         uBoxHalf: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
                         uBoxCenter: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
                         uCameraPos: { value: new THREE.Vector3() },
@@ -3207,6 +3214,23 @@
         this.textContent = this.textContent.includes('隐藏') ? '👤 显示人员' : '👤 隐藏人员';
     };
 
+    // ★ 地图切换下拉菜单
+    document.getElementById('modelSelect').addEventListener('change', function() {
+        const mode = this.value;
+        if (mode === 'simple') {
+            sendCommand('map_simple');
+            document.getElementById('currentModel').textContent = '简单矩形房间';
+            addLog('🏠 切换到简单矩形房间 (20x14x8)', 'info');
+        } else {
+            sendCommand('map_building');
+            document.getElementById('currentModel').textContent = 'BIM大楼模型';
+            addLog('🏢 切换到BIM大楼模型', 'info');
+        }
+        // 清除旧的3D建筑模型，等待新数据重建
+        if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+    });
+
     // ★ 无火模式：只观察人员行为，不点火
     let noFireActive = false;
     document.getElementById('noFireBtn').onclick = function() {
@@ -3430,9 +3454,7 @@
             if (!resp.ok) return;
             const data = await resp.json();
             if (volumeSmoke) volumeSmoke.update(data, dx, dz);
-        } catch (e) {
-            // 静默失败, 不影响主循环
-        }
+        } catch (e) { /* 静默失败 */ }
     }
     setInterval(fetchSmokeVolume, 500);
     fetchState();

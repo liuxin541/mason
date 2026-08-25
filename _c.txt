@@ -1,0 +1,54 @@
+﻿mvn : WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+At line:1 char:13425
++ ... ntinue; cd "E:\xuexi\MASON\mason"; mvn compile -pl mason 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING: A term...has been called:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+WARNING: sun.misc.Unsafe::staticFieldBase has been called by com.google.inject.internal.aop.HiddenClassDefiner (file:/D
+:/Jar/apache-maven-3.9.11-bin/apache-maven-3.9.11/lib/guice-5.1.0-classes.jar)
+WARNING: Please consider reporting this to the maintainers of class com.google.inject.internal.aop.HiddenClassDefiner
+WARNING: sun.misc.Unsafe::staticFieldBase will be removed in a future release
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -----------------------< cs.gmu.edu.eclab:mason >-----------------------
+[INFO] Building mason 20
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[WARNING] The artifact itext:itext:jar:1.2.3 has been relocated to com.lowagie:itext:jar:1.2.3
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ mason ---
+[WARNING] Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!
+[INFO] Copying 309 resources from src\main\java to target\classes
+[INFO] Copying 210 resources from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ mason ---
+[INFO] Recompiling the module because of changed source code.
+[WARNING] File encoding has not been set, using platform encoding UTF-8, i.e. build is platform dependent!
+[INFO] Compiling 306 source files with javac [debug target 1.8] to target\classes
+[WARNING] δ�� -source 8 һ������������·��
+  ������������·�����ܻᵼ�����ļ��޷��� JDK 8 ������
+    ����ʹ�� --release 8 ������ -source 8 -target 1.8����Ϊ�����Զ�����������·��
+[WARNING] Դֵ 8 �ѹ�ʱ������δ�����а���ɾ��
+[WARNING] Ŀ��ֵ 8 �ѹ�ʱ������δ�����а���ɾ��
+[WARNING] Ҫ�����й��ѹ�ʱѡ��ľ���, ��ʹ�� -Xlint:-options��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display3d/Display3D.java:[2101,33] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display3d/Display3D.java:[2180,33] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Console.java:[1194,29] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Console.java:[1273,29] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Console.java:[1292,29] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Console.java:[1336,29] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Console.java:[1367,29] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Display2D.java:[253,33] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/Display2D.java:[298,33] java.security �е� java.security.AccessControlException �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[WARNING] /E:/xuexi/MASON/mason/mason/src/main/java/sim/display/SimApplet.java:[20,32] java.applet �е� java.applet.Applet �ѹ�ʱ, �ұ��Ϊ��ɾ��
+[INFO] /E:/xuexi/MASON/mason/mason/src/main/java/ec/util/ParameterDatabase.java: ĳЩ�����ļ�ʹ�û򸲸����ѹ�ʱ�� API��
+[INFO] /E:/xuexi/MASON/mason/mason/src/main/java/ec/util/ParameterDatabase.java: �й���ϸ��Ϣ, ��ʹ�� -Xlint:deprecation ���±��롣
+[INFO] /E:/xuexi/MASON/mason/mason/src/main/java/ec/util/ParameterDatabase.java: ĳЩ�����ļ�ʹ����δ�����򲻰�ȫ�Ĳ�����
+[INFO] /E:/xuexi/MASON/mason/mason/src/main/java/ec/util/ParameterDatabase.java: �й���ϸ��Ϣ, ��ʹ�� -Xlint:unchecked ���±��롣
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  5.776 s
+[INFO] Finished at: 2026-08-20T20:56:41+08:00
+[INFO] ------------------------------------------------------------------------

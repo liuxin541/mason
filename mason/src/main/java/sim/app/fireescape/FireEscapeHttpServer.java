@@ -155,7 +155,8 @@ public class FireEscapeHttpServer {
                 customInside = auto;
             }
         }
-        syncInsideGridWithObstacles();
+        // ★ 仅2D自定义地图模式需要同步（voxel模型和简单房间已有正确的3D insideGrid）
+        if (customObstacles != null) syncInsideGridWithObstacles();
 
         if (noFireMode) {
             // ★ 无火模式：清空火源，火场保持环境温度
@@ -476,6 +477,16 @@ public class FireEscapeHttpServer {
                         case "step": stopAutoStep(); model.schedule.step(model); break;
                         case "reset": noFireMode = false; resetModel(); break;
                         case "togglePersons": model.showPersons = !model.showPersons; break;
+                        case "map_simple":
+                            model.mapMode = "simple";
+                            resetModel();
+                            System.out.println("[Map] 切换到简单矩形房间");
+                            break;
+                        case "map_building":
+                            model.mapMode = "building";
+                            resetModel();
+                            System.out.println("[Map] 切换到BIM大楼模型");
+                            break;
                         case "noFire":
                             noFireMode = true;
                             boolean wasRunning = autoStepRunning;
