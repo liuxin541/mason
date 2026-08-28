@@ -1554,10 +1554,13 @@
                 vec3 color = smokeColor * totalLight + emissive * (0.6 + flameCore * 0.4);  // 火焰发光叠加
 
                 // === Beer-Lambert 累积 ===
-                // ★ 羽流增强: 中低层(z<0.7)且有一定浓度的烟雾, 增强不透明度, 让从窗户冒出的羽流更明显
+                // ★ 浓烟羽流增强: 中低层(z<0.75)烟雾大幅增强不透明度, 让从窗户冒出的浓烟柱状更明显
                 float plumeBoost = 1.0;
-                if (uvw.z < 0.7 && density > 0.05) {
-                    plumeBoost = 1.0 + 0.5 * (1.0 - uvw.z / 0.7) * smoothstep(0.05, 0.3, density);
+                if (uvw.z < 0.75 && density > 0.03) {
+                    // 离建筑边缘越近(羽流区), 增强越多; 浓度越高增强越多
+                    float edgeDist = min(min(uvw.x, 1.0-uvw.x), min(uvw.y, 1.0-uvw.y));
+                    float edgeFactor = smoothstep(0.0, 0.3, edgeDist);  // 边缘0, 中心1
+                    plumeBoost = 1.0 + 1.2 * (1.0 - uvw.z / 0.75) * (0.5 + 0.5 * density) * (1.0 - edgeFactor * 0.5);
                 }
                 float absorp = density * uAbsorption * uStepSize * plumeBoost;
                 float alpha = 1.0 - exp(-absorp);
