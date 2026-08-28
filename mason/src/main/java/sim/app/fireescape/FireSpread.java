@@ -759,25 +759,37 @@ public class FireSpread implements Steppable {
                             }
                         }
                     }
-                    // ★ 羽流上升: 窗户外侧(水平方向2-3体素外)上方体素, 增强向上浮力转移
-                    // 找到窗户的"外侧"方向(远离建筑中心的方向), 在该方向上方形成羽流
-                    for (int hz = 1; hz <= 4; hz++) {
-                        int uz = z + hz;
-                        if (uz >= d) break;
-                        if (obstacle[x][y][uz] == TYPE_WALL) break;
-                        if (inside[x][y][uz] == 0) continue;
-                        // 从窗户向上转移烟雾和热量(浮力驱动)
-                        double cBelow = nextC[x][y][z];
-                        double cAbove = nextC[x][y][uz];
-                        if (cBelow > cAbove + 0.005) {
-                            double upTransfer = (cBelow - cAbove) * 0.15 * DT_FINAL / hz;
-                            nextC[x][y][z] -= upTransfer;
-                            nextC[x][y][uz] += upTransfer;
-                            // 热量跟随上升
-                            if (nextT[x][y][z] > nextT[x][y][uz]) {
-                                double tUp = (nextT[x][y][z] - nextT[x][y][uz]) * 0.12 * DT_FINAL / hz;
-                                nextT[x][y][z] -= tUp;
-                                nextT[x][y][uz] += tUp;
+                    // ★ 羽流上升: 窗户外侧(水平方向1-4体素)区域增强向上浮力, 形成向外再向上的柱状羽流
+                    // 真实火灾烟雾从窗户水平喷出, 受浮力影响向上弯曲形成J形羽流
+                    for (int hx = -4; hx <= 4; hx++) {
+                        for (int hy = -4; hy <= 4; hy++) {
+                            if (hx == 0 && hy == 0) continue;
+                            int horizDist = Math.abs(hx) + Math.abs(hy);
+                            if (horizDist > 4) continue;
+                            int px = x + hx, py = y + hy;
+                            if (px<0||px>=w||py<0||py>=h) continue;
+                            // 在窗户外侧区域, 从下层向上层转移烟雾(浮力驱动)
+                            for (int uz = z + 1; uz <= Math.min(z + 5, d - 1); uz++) {
+                                if (obstacle[px][py][uz] == TYPE_WALL) break;
+                                if (inside[px][py][uz] == 0) continue;
+                                int belowZ = uz - 1;
+                                if (belowZ < 0 || obstacle[px][py][belowZ] == TYPE_WALL) continue;
+                                if (inside[px][py][belowZ] == 0) continue;
+                                double cBelow = nextC[px][py][belowZ];
+                                double cAbove = nextC[px][py][uz];
+                                // 浮力转移系数: 离窗户越近越强, 越高越弱
+                                double buoyFactor = 0.2 * (1.0 - horizDist / 5.0) * (1.0 - (uz - z) / 6.0);
+                                if (buoyFactor > 0.01 && cBelow > cAbove + 0.003) {
+                                    double upTransfer = (cBelow - cAbove) * buoyFactor * DT_FINAL;
+                                    nextC[px][py][belowZ] -= upTransfer;
+                                    nextC[px][py][uz] += upTransfer;
+                                    // 热量跟随上升
+                                    if (nextT[px][py][belowZ] > nextT[px][py][uz] + 5) {
+                                        double tUp = (nextT[px][py][belowZ] - nextT[px][py][uz]) * buoyFactor * 0.8 * DT_FINAL;
+                                        nextT[px][py][belowZ] -= tUp;
+                                        nextT[px][py][uz] += tUp;
+                                    }
+                                }
                             }
                         }
                     }
