@@ -618,6 +618,7 @@
     // ★ 漫游模式相关（已改为飞行模式）
     let pointerLockControls = null;     // PointerLockControls 实例
     let walkMode = false;               // 是否处于飞行模式
+    let clipMode = false;               // 剖面模式(隐藏前墙观察内部烟雾)
     const moveKeys = { w: false, a: false, s: false, d: false, space: false, shift: false };  // 键盘按下状态
     const moveVelocity = new THREE.Vector3();
     const moveDirection = new THREE.Vector3();
@@ -1445,9 +1446,9 @@
                 float temp = 293.15 + sampleField(uTempTex, uvw) * 880.0;
                 float excessT = max(0.0, temp - 293.15);
 
-                // === 深黑色浓烟 (密度越高越黑, 参考FDS体积烟雾) ===
-                vec3 smokeColor = mix(vec3(0.12, 0.12, 0.13), vec3(0.04, 0.04, 0.05), density);
-                smokeColor += vec3(0.03) * smoothstep(300.0, 800.0, excessT);
+                // === 深灰色体积烟雾 (低密度浅灰, 高密度深黑, 参考FDS Smokeview) ===
+                vec3 smokeColor = mix(vec3(0.28, 0.27, 0.29), vec3(0.06, 0.06, 0.07), density);
+                smokeColor += vec3(0.04) * smoothstep(300.0, 800.0, excessT);
 
                 // === 光照散射 ===
                 float lightTrans = exp(-density * uAbsorption * 0.8);
@@ -3073,6 +3074,13 @@
             else exitWalkMode();
             return;
         }
+        if (key === 'c') {
+            e.preventDefault();
+            clipMode = !clipMode;
+            if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+            addLog(clipMode ? '🔪 剖面模式：前墙已隐藏，可观察内部烟雾' : '🏠 剖面模式关闭', 'info');
+            return;
+        }
         if (!walkMode) return;
         switch (key) {
             case 'w': moveKeys.w = true; break;
@@ -3134,6 +3142,8 @@
                     // ★ 墙体: 有glTF精细模型时跳过, 否则用体素立方体渲染(简单房间模式)
                     if (obs !== undefined && obs === 1) {
                         if (buildingGroup) continue;
+                        // 剖面模式: 隐藏前墙(y=0), 便于观察内部烟雾
+                        if (clipMode && y === 0) continue;
                         color = new THREE.Color(0.55, 0.55, 0.60);
                         draw = true;
                     }
@@ -3162,10 +3172,12 @@
             if (!voxelMesh || matrices.length !== voxelMesh.count) {
                 if (voxelMesh) scene.remove(voxelMesh);
                 const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
+                // 简单房间模式(无glTF): 墙体半透明便于观察内部烟雾; BIM模式: 不透明
+                const wallOpacity = buildingGroup ? 0.8 : 0.22;
                 const material = new THREE.MeshLambertMaterial({
                     vertexColors: false,
                     transparent: true,
-                    opacity: 0.8,
+                    opacity: wallOpacity,
                     depthWrite: false
                 });
                 voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
