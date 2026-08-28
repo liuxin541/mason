@@ -431,10 +431,10 @@
 <div class="container">
     <div class="top-bar">
         <select id="modelSelect">
+            <option value="simple" selected>🏠 简单矩形房间</option>
             <option value="building">🏢 BIM 大楼模型</option>
-            <option value="simple">🏠 简单矩形房间</option>
         </select>
-        <div class="model-name">📌 当前模型: <span id="currentModel">BIM大楼模型</span></div>
+        <div class="model-name">📌 当前模型: <span id="currentModel">简单矩形房间</span></div>
     </div>
     <div class="middle-area">
         <div class="canvas-container">
@@ -760,6 +760,7 @@
     let minimapReady = false;
     let lastMinimapSize = { w: 0, h: 0, gridW: 0, gridH: 0 };
     let cameraFramed = false;
+    let lastGridKey = null;  // 记录上次网格尺寸, 切换地图后自动重置相机
 
     function fetchState() {
         fetch('/state')
@@ -774,7 +775,13 @@
                 updateFireLights(d);
                 // ★ 平面图：首次有数据时自适应画布 + 自动 fit 居中
                 ensurePlanViewReady(d);
-                // ★ 首次有数据时自动框住整个建筑（含火/烟区域）
+                // ★ 首次或网格尺寸变化时自动框住整个建筑
+                //   记录上次网格尺寸, 切换地图后自动重置相机
+                const gridKey = d.width + 'x' + d.height + 'x' + d.depth;
+                if (lastGridKey !== gridKey) {
+                    lastGridKey = gridKey;
+                    cameraFramed = false;
+                }
                 if (!cameraFramed && d.width && d.depth && controls && camera) {
                     cameraFramed = true;
                     const cx = d.width * dx / 2, cy = d.depth * dz / 2, cz = d.height * dx / 2;
@@ -1680,8 +1687,8 @@
         volumeSmoke = new VolumeSmoke(scene);
         animate();
 
-        // ★ 尝试加载真实的 IFC 转 glTF 模型
-        loadBuildingModel();
+        // ★ 默认简单房间模式不加载BIM模型, 仅在切换到building模式时加载
+        // loadBuildingModel();
     }
 
     function loadBuildingModel() {
@@ -3136,12 +3143,9 @@
 
     // ================================================================
     // 6. 核心渲染函数 (墙体被 glTF 替代，仅保留火、烟等特效)
-    // ★ 性能优化: 墙体只在首次/换图时构建, 人员Mesh复用只更新位置, 避免内存泄漏
+    // ★ 每次重建但添加 dispose, 避免内存泄漏; 确保渲染正确
     // ================================================================
     let lastWallGridKey = null;
-    let personMeshes = [];
-    const personSphereGeo = new THREE.SphereGeometry(1, 8, 8);
-    const personSphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
 
     function update3DWorld(data) {
         if (!data) return;
@@ -3150,20 +3154,14 @@
         const w = (data.obstacle && data.obstacle[0]) ? data.obstacle[0].length : Math.ceil(data.width / st);
         const h = (data.obstacle && data.obstacle[0] && data.obstacle[0][0]) ? data.obstacle[0][0].length : Math.ceil(data.height / st);
 
-        // ★ 墙体: 只在网格尺寸/障碍物变化时重建(简单房间墙体固定, 不需要每秒重建)
-        const wallKey = data.width + 'x' + data.height + 'x' + data.depth + '_' + (buildingGroup ? 'gltf' : 'voxel') + '_' + (clipMode ? 'clip' : 'full');
-        if (wallKey !== lastWallGridKey) {
-            lastWallGridKey = wallKey;
-            rebuildWalls(data, depth, st, w, h);
+        // 重建人员 group (先清理旧的)
+        if (personGroup) {
+            scene.remove(personGroup);
+            personGroup.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+            });
         }
-
-        // ★ 人员: 复用Mesh, 只更新位置(避免每秒创建销毁50个Mesh导致内存泄漏)
-        updatePersons(data);
-    }
-
-    function rebuildWalls(data, depth, st, w, h) {
-        // 清理旧墙体
-        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+        personGroup = new THREE.Group();
 
         const matrices = [];
         const colors = [];
@@ -3176,56 +3174,67 @@
                 for (let y = 0; y < h; y++) {
                     const zPos = y * dx * st + dx * st / 2;
                     const obs = data.obstacle[z]?.[x]?.[y];
+                    const temp = data.fire[z]?.[x]?.[y] || T_AMB;
+                    const smoke = data.smoke[z]?.[x]?.[y] || 0;
+
+                    let color = null;
+                    let draw = false;
+
                     if (obs !== undefined && obs === 1) {
                         if (buildingGroup) continue;
                         if (clipMode && y === 0) continue;
+                        color = new THREE.Color(0.55, 0.55, 0.60);
+                        draw = true;
+                    }
+                    else if (temp > T_AMB + 1.0) {
+                        draw = false;
+                    }
+                    else if (smoke > 0.1) {
+                        draw = false;
+                    }
+
+                    if (draw && color) {
                         dummy.position.set(xPos, yPos, zPos);
                         dummy.updateMatrix();
                         matrices.push(dummy.matrix.clone());
-                        colors.push(new THREE.Color(0.55, 0.55, 0.60));
+                        colors.push(color);
                     }
                 }
             }
         }
 
+        // 生成墙体实例
         if (matrices.length > 0) {
-            const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
-            const wallOpacity = buildingGroup ? 0.8 : 0.22;
-            const material = new THREE.MeshLambertMaterial({
-                vertexColors: true, transparent: true, opacity: wallOpacity, depthWrite: false
-            });
-            voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
+            if (!voxelMesh || matrices.length !== voxelMesh.count) {
+                if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); }
+                const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
+                const wallOpacity = buildingGroup ? 0.8 : 0.22;
+                const material = new THREE.MeshLambertMaterial({
+                    vertexColors: true, transparent: true, opacity: wallOpacity, depthWrite: false
+                });
+                voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
+                scene.add(voxelMesh);
+            }
             for (let i = 0; i < matrices.length; i++) {
                 voxelMesh.setMatrixAt(i, matrices[i]);
                 voxelMesh.setColorAt(i, colors[i]);
             }
             voxelMesh.instanceMatrix.needsUpdate = true;
             voxelMesh.instanceColor.needsUpdate = true;
-            scene.add(voxelMesh);
+        } else if (voxelMesh) {
+            scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null;
         }
-    }
 
-    function updatePersons(data) {
-        if (!data.persons) { data.persons = []; }
-        const persons = data.persons;
-        // 确保 personGroup 存在
-        if (!personGroup) { personGroup = new THREE.Group(); scene.add(personGroup); }
-        // 复用或创建 Mesh
-        while (personMeshes.length < persons.length) {
-            const m = new THREE.Mesh(personSphereGeo, personSphereMat);
-            m.scale.set(dx * 0.35, dx * 0.35, dx * 0.35);
-            personGroup.add(m);
-            personMeshes.push(m);
-        }
-        // 隐藏多余的 Mesh
-        for (let i = persons.length; i < personMeshes.length; i++) {
-            personMeshes[i].visible = false;
-        }
-        // 更新位置
-        for (let i = 0; i < persons.length; i++) {
-            const p = persons[i];
-            personMeshes[i].visible = true;
-            personMeshes[i].position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
+        // 人员生成
+        if (data.persons && data.persons.length > 0) {
+            const sphereGeo = new THREE.SphereGeometry(dx * 0.35, 8, 8);
+            const sphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            for (let p of data.persons) {
+                const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+                sphere.position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
+                personGroup.add(sphere);
+            }
+            scene.add(personGroup);
         }
     }
 
@@ -3259,11 +3268,13 @@
             sendCommand('map_building');
             document.getElementById('currentModel').textContent = 'BIM大楼模型';
             addLog('🏢 切换到BIM大楼模型', 'info');
+            loadBuildingModel();  // 切换到BIM模式时才加载glTF
         }
         // 清除旧的3D建筑模型，等待新数据重建
         if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
         if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
         lastWallGridKey = null;  // 重置墙体缓存, 强制重建
+        cameraFramed = false;    // 重置相机框住状态, 确保新地图重新定位相机
     });
 
     // ★ 无火模式：只观察人员行为，不点火
@@ -3514,6 +3525,24 @@
         });
     }
     pollSmokeVolume();
+
+    // ★ 默认加载简单矩形房间(用户核心需求: 观察烟和火焰模型)
+    if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
+    if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+    lastWallGridKey = null;
+    cameraFramed = false;
+    lastGridKey = null;
+    fetch('/command', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=map_simple' });
+
+    // ★ 强制设置相机位置: 延迟2秒确保数据加载完成, 简单房间(15x10x5m)全貌可见
+    setTimeout(() => {
+        if (camera && controls) {
+            controls.target.set(7.5, 2.5, 5);
+            camera.position.set(20, 16, 20);
+            controls.update();
+            cameraFramed = true;  // 禁止后续自动调整覆盖
+        }
+    }, 2000);
 
     addLog('3D BIM 模型渲染版加载完成，按住左键可旋转视角', 'info');
 </script>
