@@ -1726,8 +1726,19 @@
             buildingGroup = gltf.scene;
             // 将 glTF 模型平移，使其原点与体素网格原点对齐（Y-Z 互换后）
             buildingGroup.position.set(-originOffset[0], -originOffset[2], -originOffset[1]);
+            // ★ 建筑外壳半透明: 外部视角也能看到内部烟雾, 无需剖面模式
+            buildingGroup.traverse((obj) => {
+                if (obj.isMesh && obj.material) {
+                    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+                    mats.forEach((m) => {
+                        m.transparent = true;
+                        m.opacity = 0.35;
+                        m.depthWrite = false;  // 避免半透明排序问题
+                    });
+                }
+            });
             scene.add(buildingGroup);
-            addLog('✅ 真实建筑模型 (glTF) 加载成功！', 'info');
+            addLog('✅ 真实建筑模型 (glTF) 加载成功！(半透明, 可透视内部烟雾)', 'info');
         }, undefined, function (error) {
             addLog('[WARN] 未找到真实建筑模型，回退到方块渲染模式', 'error');
             console.error(error);
