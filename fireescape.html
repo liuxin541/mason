@@ -918,13 +918,20 @@
         varying float vLife;
         varying float vSeed;
 
-        // 简化 curl noise (用 sin 模拟湍流)
+        // 简化 curl noise (用 sin 模拟湍流) - 增强: 更多频率叠加, 更真实的翻滚
         vec3 noise3(vec3 p) {
-            return vec3(
+            vec3 n = vec3(
                 sin(p.y*3.0 + p.z*2.0 + uTime*2.0),
                 sin(p.x*3.0 + p.z*2.5 + uTime*1.8),
                 sin(p.x*2.5 + p.y*3.0 + uTime*2.2)
             ) * 0.5;
+            // 高频细节叠加
+            n += vec3(
+                sin(p.y*7.0 + p.x*5.0 + uTime*4.0),
+                sin(p.z*6.0 + p.x*4.0 + uTime*3.5),
+                sin(p.x*5.0 + p.y*6.0 + uTime*4.5)
+            ) * 0.25;
+            return n;
         }
 
         void main() {
@@ -934,17 +941,19 @@
             // 向上运动, 高度受火焰高度控制
             vec3 pos = position;
             pos.y += t * uFlameHeight;
-            // 湍流偏移 (底部小, 顶部大)
-            vec3 turb = noise3(pos * 2.0 + aSeed * 10.0) * t * 0.4;
+            // 湍流偏移 (底部小, 顶部大) - 增强翻滚
+            vec3 turb = noise3(pos * 2.0 + aSeed * 10.0) * t * 0.6;
             pos.xz += turb.xz;
+            // 顶部扩散 (火焰顶端冒烟: 顶部粒子向外扩散变大)
+            pos.xz *= 0.5 + t * 0.8;
             // 底部收缩 (火焰根部窄)
             float radiusScale = 0.3 + t * 0.7;
             pos.xz *= radiusScale;
 
             vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-            // 粒子大小: 底部大, 顶部小, 轻微闪烁
+            // 粒子大小: 底部小, 顶部大(烟状扩散), 带轻微闪烁
             float flicker = 0.95 + 0.05 * sin(uTime * 8.0 + aSeed * 50.0);
-            gl_PointSize = aSize * (1.0 - t * 0.5) * flicker * (200.0 / -mvPosition.z);
+            gl_PointSize = aSize * (0.6 + t * 0.9) * flicker * (200.0 / -mvPosition.z);
             gl_Position = projectionMatrix * mvPosition;
         }
     `;
@@ -959,12 +968,23 @@
             float dist = length(uv);
             if (dist > 0.5) discard;
             float alpha = smoothstep(0.5, 0.1, dist);
-            // 颜色渐变: 底部橙黄 → 橙红 → 顶部暗红透明
+            // t=1-生命: 0=出生(底), 1=死亡(顶)
             float t = 1.0 - vLife;
             vec3 col;
-            if (t < 0.5)      col = mix(vec3(1.0, 0.55, 0.08), vec3(0.9, 0.25, 0.0), t/0.5);
-            else              col = mix(vec3(0.9, 0.25, 0.0), vec3(0.4, 0.05, 0.0), (t-0.5)/0.5);
-            alpha *= (1.0 - t * 0.7);
+            if (t < 0.35) {
+                // 底部: 橙黄火焰
+                col = mix(vec3(1.0, 0.62, 0.1), vec3(0.95, 0.3, 0.0), t/0.35);
+                alpha *= (1.0 - t * 0.5);
+            } else if (t < 0.65) {
+                // 中部: 橙红
+                col = mix(vec3(0.95, 0.3, 0.0), vec3(0.5, 0.08, 0.02), (t-0.35)/0.3);
+                alpha *= (1.0 - (t-0.35) * 0.8);
+            } else {
+                // 顶部: 火焰转烟 (深灰黑烟)
+                float st = (t - 0.65) / 0.35;
+                col = mix(vec3(0.35, 0.1, 0.03), vec3(0.12, 0.12, 0.13), st);
+                alpha *= (1.0 - st * 0.5) * 0.9;
+            }
             // 浓烟遮挡火焰
             alpha *= (1.0 - uSmokeDensity * 0.8);
             gl_FragColor = vec4(col, alpha);
@@ -1447,17 +1467,26 @@
                 float excessT = max(0.0, temp - 293.15);
 
                 // === 深灰色体积烟雾 (低密度浅灰, 高密度深黑, 参考FDS Smokeview) ===
-                vec3 smokeColor = mix(vec3(0.28, 0.27, 0.29), vec3(0.06, 0.06, 0.07), density);
-                smokeColor += vec3(0.04) * smoothstep(300.0, 800.0, excessT);
+                vec3 smokeColor = mix(vec3(0.30, 0.29, 0.31), vec3(0.05, 0.05, 0.06), density);
+                smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
 
-                // === 光照散射 ===
-                float lightTrans = exp(-density * uAbsorption * 0.8);
+                // === 光照: 主方向光散射 (Henyey-Greenstein) ===
+                float lightTrans = exp(-density * uAbsorption * 0.7);
                 float cosT = dot(rd, uLightDir);
                 float phase = hgPhase(cosT, 0.55);
+                // 各向同性项(背光柔和)
+                float phaseIso = 0.05 + 0.1 * density;
 
-                vec3 scatterL = uLightColor * lightTrans * phase * uScattering;
-                vec3 ambientL = uAmbientColor * uScattering * 0.25;
-                vec3 emissive = vec3(1.0, 0.4, 0.1) * smoothstep(400.0, 900.0, excessT) * density * 0.3;
+                vec3 scatterL = uLightColor * lightTrans * (phase * uScattering + phaseIso);
+
+                // === 多层散射近似: 内部烟雾被周围高温照亮, 增加体积光感 ===
+                // 用当前密度+温度做自发光增强, 模拟多次散射造成的"内亮外暗"
+                float multiScatter = density * (1.0 - lightTrans) * 0.8;
+                vec3 ambientL = uAmbientColor * (0.2 + multiScatter) * uScattering;
+
+                // === 火焰发光 (高温区强烈自发光) ===
+                float flameGlow = smoothstep(400.0, 950.0, excessT);
+                vec3 emissive = vec3(1.0, 0.45, 0.12) * flameGlow * (0.25 + density * 0.6);
 
                 vec3 totalLight = scatterL + ambientL + emissive;
                 vec3 color = smokeColor * totalLight;
@@ -3461,9 +3490,18 @@
     setInterval(fetchState, 1000);
 
     // ★ 体积烟雾: 独立低频轮询 /smokeVolume (服务器按时间缓存, 开销小)
+    //   根据网格体素数自适应 stride: 小房间(≤2万体素)用1全分辨率, 大楼用2/4
+    function pickSmokeStride() {
+        if (!currentData) return 2;
+        const cells = (currentData.width || 0) * (currentData.height || 0) * (currentData.depth || 0);
+        if (cells <= 20000) return 1;
+        if (cells <= 100000) return 2;
+        return 4;
+    }
     async function fetchSmokeVolume() {
         try {
-            const resp = await fetch('/smokeVolume');
+            const stride = pickSmokeStride();
+            const resp = await fetch('/smokeVolume?stride=' + stride);
             if (!resp.ok) return;
             const data = await resp.json();
             if (volumeSmoke) volumeSmoke.update(data, dx, dz);

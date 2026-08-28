@@ -376,16 +376,29 @@ public class FireEscapeHttpServer {
     }
 
     // ===== /smokeVolume: 输出扁平化3D浓度场+温度场 (供前端体积渲染) =====
-    // 2x2x2 降采样取 max + 按模拟时间缓存 + gzip, 避免大载荷拖垮轮询
+    // 降采样取 max + 按模拟时间缓存 + gzip, 避免大载荷拖垮轮询
+    // 支持 ?stride=N 参数: 简单房间用1(全分辨率), 大楼用2/4(控制载荷)
     static class SmokeVolumeHandler implements HttpHandler {
         private static double cachedTime = -1;
+        private static int cachedStride = -1;
         private static byte[] cachedBody = null;
 
         @Override public void handle(HttpExchange exchange) throws IOException {
+            // 解析 stride 参数
+            String query = exchange.getRequestURI().getQuery();
+            int stride = 2;
+            if (query != null && query.contains("stride=")) {
+                try {
+                    stride = Integer.parseInt(query.substring(query.indexOf("stride=") + 7).split("&")[0]);
+                    if (stride < 1) stride = 1;
+                    if (stride > 8) stride = 8;
+                } catch (Exception e) { /* 默认2 */ }
+            }
             double t = model.currentTime;
-            if (cachedBody == null || cachedTime != t) {
-                cachedBody = buildSmokeVolumeJson().getBytes(StandardCharsets.UTF_8);
+            if (cachedBody == null || cachedTime != t || cachedStride != stride) {
+                cachedBody = buildSmokeVolumeJson(stride).getBytes(StandardCharsets.UTF_8);
                 cachedTime = t;
+                cachedStride = stride;
             }
             byte[] bytes = cachedBody;
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -405,9 +418,8 @@ public class FireEscapeHttpServer {
             try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
         }
 
-        private static String buildSmokeVolumeJson() {
+        private static String buildSmokeVolumeJson(int stride) {
             int w = model.gridWidth, h = model.gridHeight, d = model.gridDepth;
-            int stride = 2;
             int dw = (w + stride - 1) / stride;
             int dh = (h + stride - 1) / stride;
             int dd = (d + stride - 1) / stride;
