@@ -3106,7 +3106,8 @@
         if (key === 'c') {
             e.preventDefault();
             clipMode = !clipMode;
-            if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+            if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+            lastWallGridKey = null;  // 重置墙体缓存, 强制重建
             addLog(clipMode ? '🔪 剖面模式：前墙已隐藏，可观察内部烟雾' : '🏠 剖面模式关闭', 'info');
             return;
         }
@@ -3135,7 +3136,13 @@
 
     // ================================================================
     // 6. 核心渲染函数 (墙体被 glTF 替代，仅保留火、烟等特效)
+    // ★ 性能优化: 墙体只在首次/换图时构建, 人员Mesh复用只更新位置, 避免内存泄漏
     // ================================================================
+    let lastWallGridKey = null;
+    let personMeshes = [];
+    const personSphereGeo = new THREE.SphereGeometry(1, 8, 8);
+    const personSphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+
     function update3DWorld(data) {
         if (!data) return;
         const depth = data.depth || 8;
@@ -3143,98 +3150,82 @@
         const w = (data.obstacle && data.obstacle[0]) ? data.obstacle[0].length : Math.ceil(data.width / st);
         const h = (data.obstacle && data.obstacle[0] && data.obstacle[0][0]) ? data.obstacle[0][0].length : Math.ceil(data.height / st);
 
-        scene.remove(personGroup);
-        personGroup = new THREE.Group();
+        // ★ 墙体: 只在网格尺寸/障碍物变化时重建(简单房间墙体固定, 不需要每秒重建)
+        const wallKey = data.width + 'x' + data.height + 'x' + data.depth + '_' + (buildingGroup ? 'gltf' : 'voxel') + '_' + (clipMode ? 'clip' : 'full');
+        if (wallKey !== lastWallGridKey) {
+            lastWallGridKey = wallKey;
+            rebuildWalls(data, depth, st, w, h);
+        }
+
+        // ★ 人员: 复用Mesh, 只更新位置(避免每秒创建销毁50个Mesh导致内存泄漏)
+        updatePersons(data);
+    }
+
+    function rebuildWalls(data, depth, st, w, h) {
+        // 清理旧墙体
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
 
         const matrices = [];
         const colors = [];
         const dummy = new THREE.Object3D();
 
-        // ★ 遍历 3D 体素数据，仅仅提取火焰/烟雾部分
-        // 坐标系约定：体素网格 (x, y, z) 中 z 为垂直方向(对应 IFC Z)，
-        //   Three.js 中 Y 为垂直方向。因此渲染时需 Y-Z 互换：
-        //   体素 (x, y, z) → Three.js (x, z, y)
         for (let z = 0; z < depth; z++) {
-            const yPos = z * dz + dz / 2;   // 体素 z(垂直) → Three.js y(垂直) (z 未降采样)
+            const yPos = z * dz + dz / 2;
             for (let x = 0; x < w; x++) {
                 const xPos = x * dx * st + dx * st / 2;
                 for (let y = 0; y < h; y++) {
-                    const zPos = y * dx * st + dx * st / 2;   // 体素 y(水平) → Three.js z(水平)
-
+                    const zPos = y * dx * st + dx * st / 2;
                     const obs = data.obstacle[z]?.[x]?.[y];
-                    const temp = data.fire[z]?.[x]?.[y] || T_AMB;
-                    const smoke = data.smoke[z]?.[x]?.[y] || 0;
-
-                    let color = null;
-                    let draw = false;
-
-                    // ★ 墙体: 有glTF精细模型时跳过, 否则用体素立方体渲染(简单房间模式)
                     if (obs !== undefined && obs === 1) {
                         if (buildingGroup) continue;
-                        // 剖面模式: 隐藏前墙(y=0), 便于观察内部烟雾
                         if (clipMode && y === 0) continue;
-                        color = new THREE.Color(0.55, 0.55, 0.60);
-                        draw = true;
-                    }
-                    // 渲染火源: 火焰已由 GPU 粒子系统渲染, 此处跳过立方体
-                    else if (temp > T_AMB + 1.0) {
-                        draw = false;
-                    }
-                    // 渲染烟雾: 烟雾已由体积渲染, 此处跳过立方体
-                    else if (smoke > 0.1) {
-                        draw = false;
-                    }
-
-                    if (draw && color) {
-                        dummy.position.set(xPos, yPos, zPos);  // Three.js (x, y垂直, z水平)
+                        dummy.position.set(xPos, yPos, zPos);
                         dummy.updateMatrix();
                         matrices.push(dummy.matrix.clone());
-                        colors.push(color);
+                        colors.push(new THREE.Color(0.55, 0.55, 0.60));
                     }
                 }
             }
         }
 
-        // 生成半透明火焰/烟雾实例
-        // 几何体尺寸也按 Y-Z 互换后的语义：Three.js (x=dx, y垂直=dz, z水平=dx)
         if (matrices.length > 0) {
-            if (!voxelMesh || matrices.length !== voxelMesh.count) {
-                if (voxelMesh) scene.remove(voxelMesh);
-                const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
-                // 简单房间模式(无glTF): 墙体半透明便于观察内部烟雾; BIM模式: 不透明
-                const wallOpacity = buildingGroup ? 0.8 : 0.22;
-                const material = new THREE.MeshLambertMaterial({
-                    vertexColors: false,
-                    transparent: true,
-                    opacity: wallOpacity,
-                    depthWrite: false
-                });
-                voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
-                scene.add(voxelMesh);
-            }
+            const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
+            const wallOpacity = buildingGroup ? 0.8 : 0.22;
+            const material = new THREE.MeshLambertMaterial({
+                vertexColors: true, transparent: true, opacity: wallOpacity, depthWrite: false
+            });
+            voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
             for (let i = 0; i < matrices.length; i++) {
                 voxelMesh.setMatrixAt(i, matrices[i]);
                 voxelMesh.setColorAt(i, colors[i]);
             }
             voxelMesh.instanceMatrix.needsUpdate = true;
             voxelMesh.instanceColor.needsUpdate = true;
-        } else if (voxelMesh) {
-            scene.remove(voxelMesh);
-            voxelMesh = null;
+            scene.add(voxelMesh);
         }
+    }
 
-        // ★ 人员生成 (无论是否加载了 glTF，坐标与体素网络完全对齐)
-        // 人员数据 p = [px, py, pz] 为体素坐标 (pz 为垂直方向)
-        // Y-Z 互换后: Three.js (x, y垂直, z水平) = (px*dx, pz*dz, py*dx)
-        if (data.persons && data.persons.length > 0) {
-            const sphereGeo = new THREE.SphereGeometry(dx * 0.35, 8, 8);
-            const sphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-            for (let p of data.persons) {
-                const sphere = new THREE.Mesh(sphereGeo, sphereMat);
-                sphere.position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
-                personGroup.add(sphere);
-            }
-            scene.add(personGroup);
+    function updatePersons(data) {
+        if (!data.persons) { data.persons = []; }
+        const persons = data.persons;
+        // 确保 personGroup 存在
+        if (!personGroup) { personGroup = new THREE.Group(); scene.add(personGroup); }
+        // 复用或创建 Mesh
+        while (personMeshes.length < persons.length) {
+            const m = new THREE.Mesh(personSphereGeo, personSphereMat);
+            m.scale.set(dx * 0.35, dx * 0.35, dx * 0.35);
+            personGroup.add(m);
+            personMeshes.push(m);
+        }
+        // 隐藏多余的 Mesh
+        for (let i = persons.length; i < personMeshes.length; i++) {
+            personMeshes[i].visible = false;
+        }
+        // 更新位置
+        for (let i = 0; i < persons.length; i++) {
+            const p = persons[i];
+            personMeshes[i].visible = true;
+            personMeshes[i].position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
         }
     }
 
@@ -3246,8 +3237,9 @@
     document.getElementById('resumeBtn').onclick = () => sendCommand('resume');
     document.getElementById('stepBtn').onclick = () => sendCommand('step');
     document.getElementById('resetBtn').onclick = () => {
-        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
         if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; loadBuildingModel(); }
+        lastWallGridKey = null;  // 重置墙体缓存
         sendCommand('reset');
     };
 
@@ -3270,7 +3262,8 @@
         }
         // 清除旧的3D建筑模型，等待新数据重建
         if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
-        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+        lastWallGridKey = null;  // 重置墙体缓存, 强制重建
     });
 
     // ★ 无火模式：只观察人员行为，不点火
@@ -3487,7 +3480,14 @@
     // ================================================================
     setTimeout(resizeCanvas, 100);
     init3D();
-    setInterval(fetchState, 1000);
+
+    // ★ 用递归 setTimeout 替代 setInterval, 避免请求堆积导致页面卡死
+    //   上一个请求完成后才发起下一个, 间隔1s
+    function pollState() {
+        fetchState();
+        setTimeout(pollState, 1000);
+    }
+    pollState();
 
     // ★ 体积烟雾: 独立低频轮询 /smokeVolume (服务器按时间缓存, 开销小)
     //   根据网格体素数自适应 stride: 小房间(≤2万体素)用1全分辨率, 大楼用2/4
@@ -3507,8 +3507,14 @@
             if (volumeSmoke) volumeSmoke.update(data, dx, dz);
         } catch (e) { /* 静默失败 */ }
     }
-    setInterval(fetchSmokeVolume, 500);
-    fetchState();
+    // ★ 递归 setTimeout, 上一个请求完成后再等500ms发起下一个
+    function pollSmokeVolume() {
+        fetchSmokeVolume().finally(() => {
+            setTimeout(pollSmokeVolume, 500);
+        });
+    }
+    pollSmokeVolume();
+
     addLog('3D BIM 模型渲染版加载完成，按住左键可旋转视角', 'info');
 </script>
 </body>
