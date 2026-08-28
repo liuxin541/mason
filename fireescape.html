@@ -614,6 +614,8 @@
     let smokeParticles = null;
     let volumeSmoke = null;
     let fireLights = [];
+    let fireGlows = [];        // ★ 火焰发光光晕精灵 (真实火焰在周围形成明亮光晕)
+    let fireGlowTexture = null;
 
     // ★ 漫游模式相关（已改为飞行模式）
     let pointerLockControls = null;     // PointerLockControls 实例
@@ -879,8 +881,26 @@
     }
 
     // ================================================================
-    // 4b. 动态火源点光源 + 烟雾遮挡火焰
+    // 4b. 动态火源点光源 + 火焰发光光晕 + 烟雾遮挡火焰
     // ================================================================
+
+    // ★ 火焰光晕径向渐变纹理 (白黄核心 → 橙 → 透明边缘)
+    function makeGlowTexture() {
+        if (fireGlowTexture) return fireGlowTexture;
+        const c = document.createElement('canvas');
+        c.width = c.height = 128;
+        const g = c.getContext('2d');
+        const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+        grad.addColorStop(0.00, 'rgba(255, 220, 150, 1.0)');
+        grad.addColorStop(0.25, 'rgba(255, 160, 60, 0.60)');
+        grad.addColorStop(0.55, 'rgba(255, 90, 25, 0.22)');
+        grad.addColorStop(1.00, 'rgba(255, 40, 10, 0.0)');
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 128, 128);
+        fireGlowTexture = new THREE.CanvasTexture(c);
+        return fireGlowTexture;
+    }
+
     function updateFireLights(d) {
         const srcs = d.fireSources || [];
         while (fireLights.length < srcs.length) {
@@ -892,12 +912,38 @@
             const l = fireLights.pop();
             scene.remove(l);
         }
+        // ★ 火焰发光光晕: 与光源同步维护, 每个火源一个发光精灵
+        const glowTex = makeGlowTexture();
+        while (fireGlows.length < srcs.length) {
+            const mat = new THREE.SpriteMaterial({
+                map: glowTex, color: 0xff8833, transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false, depthTest: false
+            });
+            const sp = new THREE.Sprite(mat);
+            sp.renderOrder = 1;
+            scene.add(sp);
+            fireGlows.push(sp);
+        }
+        while (fireGlows.length > srcs.length) {
+            const sp = fireGlows.pop();
+            scene.remove(sp);
+            sp.material.dispose();
+        }
         srcs.forEach((f, i) => {
             const l = fireLights[i];
             const fh = f.flameHeight || 2.0;
             // 光源位于火焰中部
             l.position.set(f.x * dx + dx/2, f.z * dz + dz/2 + fh * 0.5, f.y * dx + dx/2);
-            l.intensity = Math.min(3.0, 0.6 + (f.heatRelease || 0) / 400.0);
+            // ★ 记录基准强度, 供逐帧火焰闪烁调制 (animate 中乘 flicker)
+            l.baseIntensity = Math.min(3.0, 0.6 + (f.heatRelease || 0) / 400.0);
+            l.intensity = l.baseIntensity;
+            // ★ 光晕精灵: 位于火焰中下部, 大小随火势
+            const sp = fireGlows[i];
+            sp.position.set(f.x * dx + dx/2, f.z * dz + dz/2 + fh * 0.35, f.y * dx + dx/2);
+            const gs = fh * 2.4;
+            sp.scale.set(gs, gs, 1);
+            sp.material.opacity = 0.9;
         });
         // 烟雾遮挡: 火源上方烟浓度 → 火焰透明度衰减
         if (fireParticles && srcs.length > 0 && d.smoke && d.depth) {
@@ -925,42 +971,49 @@
         varying float vLife;
         varying float vSeed;
 
-        // 简化 curl noise (用 sin 模拟湍流) - 增强: 更多频率叠加, 更真实的翻滚
+        // 增强湍流噪声: 三层 sin 叠加, 模拟火焰摇曳翻滚 (低频摇摆+高频抖动)
         vec3 noise3(vec3 p) {
             vec3 n = vec3(
-                sin(p.y*3.0 + p.z*2.0 + uTime*2.0),
-                sin(p.x*3.0 + p.z*2.5 + uTime*1.8),
-                sin(p.x*2.5 + p.y*3.0 + uTime*2.2)
-            ) * 0.5;
-            // 高频细节叠加
+                sin(p.y*3.0 + p.z*2.0 + uTime*2.5),
+                sin(p.x*3.1 + p.z*2.6 + uTime*2.1),
+                sin(p.x*2.4 + p.y*3.2 + uTime*2.8)
+            ) * 0.55;
             n += vec3(
-                sin(p.y*7.0 + p.x*5.0 + uTime*4.0),
-                sin(p.z*6.0 + p.x*4.0 + uTime*3.5),
-                sin(p.x*5.0 + p.y*6.0 + uTime*4.5)
-            ) * 0.25;
+                sin(p.y*6.5 + p.x*5.0 + uTime*4.2),
+                sin(p.z*6.2 + p.x*4.5 + uTime*3.8),
+                sin(p.x*5.6 + p.y*6.4 + uTime*4.6)
+            ) * 0.28;
+            n += vec3(
+                sin(p.y*12.0 + p.z*9.0 + uTime*7.0),
+                sin(p.x*11.0 + p.z*10.0 + uTime*6.2),
+                sin(p.x*10.0 + p.y*12.5 + uTime*7.5)
+            ) * 0.14;
             return n;
         }
 
         void main() {
             vLife = aLife;
             vSeed = aSeed;
-            float t = 1.0 - aLife;  // 0=出生, 1=死亡
-            // 向上运动, 高度受火焰高度控制
+            float t = 1.0 - aLife;  // 0=出生(底), 1=死亡(顶)
+            // 垂直上升: 底部加速上升, 顶部略微减速, 形成火舌
+            float h = t * uFlameHeight * (1.0 - 0.10 * t);
             vec3 pos = position;
-            pos.y += t * uFlameHeight;
-            // 湍流偏移 (底部小, 顶部大) - 增强翻滚
-            vec3 turb = noise3(pos * 2.0 + aSeed * 10.0) * t * 0.6;
-            pos.xz += turb.xz;
-            // 顶部扩散 (火焰顶端冒烟: 顶部粒子向外扩散变大)
-            pos.xz *= 0.5 + t * 0.8;
-            // 底部收缩 (火焰根部窄)
-            float radiusScale = 0.3 + t * 0.7;
-            pos.xz *= radiusScale;
+            pos.y += h;
+            // 湍流偏移: 底部小顶部大 (火舌摇曳), 时间+种子驱动
+            vec3 turb = noise3(pos * 1.8 + aSeed * 13.0) * (0.15 + t * 0.85);
+            pos.xz += turb.xz * 0.45;
+            // 火焰形状: 根部窄, 中上部略微膨胀, 尖端收拢 (真实火舌轮廓)
+            float shape = 0.35 + t * 0.62;
+            pos.xz *= shape;
+            float tip = smoothstep(0.60, 1.0, t);
+            pos.xz *= 1.0 - tip * 0.38;
 
             vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-            // 粒子大小: 底部小, 顶部大(烟状扩散), 带轻微闪烁
-            float flicker = 0.95 + 0.05 * sin(uTime * 8.0 + aSeed * 50.0);
-            gl_PointSize = aSize * (0.6 + t * 0.9) * flicker * (200.0 / -mvPosition.z);
+            // 粒子尺寸: 底部小, 中部最大, 顶部收小; 双频强闪烁
+            float sizeCurve = 0.65 + 0.75 * sin(t * 3.14159);
+            float flicker = 0.82 + 0.16 * sin(uTime * 13.0 + aSeed * 60.0)
+                                  + 0.10 * sin(uTime * 27.0 + aSeed * 31.0);
+            gl_PointSize = aSize * sizeCurve * flicker * (200.0 / -mvPosition.z);
             gl_Position = projectionMatrix * mvPosition;
         }
     `;
@@ -970,30 +1023,35 @@
         varying float vLife;
         varying float vSeed;
         void main() {
-            // 圆形软边
             vec2 uv = gl_PointCoord - 0.5;
             float dist = length(uv);
             if (dist > 0.5) discard;
-            float alpha = smoothstep(0.5, 0.1, dist);
-            // t=1-生命: 0=出生(底), 1=死亡(顶)
+            // 径向软边: 中心亮, 边缘渐隐 (火焰发光感)
+            float radial = smoothstep(0.5, 0.08, dist);
+            // t = 1-生命: 0=底部出生, 1=顶部
             float t = 1.0 - vLife;
+            // ★ 真实火焰颜色: 底部白黄高温内核 → 橙黄 → 橙红 → 顶部暗红熄灭
+            vec3 core   = vec3(1.00, 0.96, 0.80);
+            vec3 orange = vec3(1.00, 0.60, 0.18);
+            vec3 red    = vec3(0.92, 0.30, 0.06);
+            vec3 dark   = vec3(0.48, 0.11, 0.02);
             vec3 col;
-            if (t < 0.35) {
-                // 底部: 橙黄火焰
-                col = mix(vec3(1.0, 0.62, 0.1), vec3(0.95, 0.3, 0.0), t/0.35);
-                alpha *= (1.0 - t * 0.5);
-            } else if (t < 0.65) {
-                // 中部: 橙红
-                col = mix(vec3(0.95, 0.3, 0.0), vec3(0.5, 0.08, 0.02), (t-0.35)/0.3);
-                alpha *= (1.0 - (t-0.35) * 0.8);
+            if (t < 0.28) {
+                col = mix(core, orange, t / 0.28);
+            } else if (t < 0.62) {
+                col = mix(orange, red, (t - 0.28) / 0.34);
             } else {
-                // 顶部: 火焰转烟 (深灰黑烟)
-                float st = (t - 0.65) / 0.35;
-                col = mix(vec3(0.35, 0.1, 0.03), vec3(0.12, 0.12, 0.13), st);
-                alpha *= (1.0 - st * 0.5) * 0.9;
+                col = mix(red, dark, (t - 0.62) / 0.38);
             }
+            // 顶部渐隐: 火舌尖端熄灭, 而非变成灰烟 (烟雾交给体积渲染)
+            float topFade = 1.0 - smoothstep(0.68, 1.0, t);
+            // 边缘比中心暗, 增强火苗立体感
+            float edgeDark = mix(1.0, 0.5, smoothstep(0.0, 0.4, dist));
+            // 中心内核更亮 (高温发光)
+            col *= (1.0 + smoothstep(0.16, 0.0, dist) * 0.35);
+            float alpha = radial * topFade * edgeDark;
             // 浓烟遮挡火焰
-            alpha *= (1.0 - uSmokeDensity * 0.8);
+            alpha *= (1.0 - uSmokeDensity * 0.85);
             gl_FragColor = vec4(col, alpha);
         }
     `;
@@ -1821,6 +1879,23 @@
         if (fireParticles) fireParticles.update(dt, ptime, camera);
         // if (smokeParticles) smokeParticles.update(dt, ptime, camera);
         if (volumeSmoke) volumeSmoke.updateFrame(camera, ptime);
+
+        // ★ 动态火光: 火焰光源逐帧闪烁脉动, 照亮周围墙壁/地面 (真实火焰光照)
+        for (let i = 0; i < fireLights.length; i++) {
+            const l = fireLights[i];
+            if (l.baseIntensity === undefined) continue;
+            const flick = 0.78 + 0.22 * Math.sin(ptime * 12.7 + i * 1.7)
+                                * Math.sin(ptime * 8.3 + i * 2.3)
+                                + 0.08 * Math.sin(ptime * 31.0 + i * 5.1);
+            l.intensity = Math.max(0.1, l.baseIntensity * flick);
+        }
+        // ★ 火焰光晕逐帧脉动: 让光晕随火焰一起呼吸闪烁
+        for (let i = 0; i < fireGlows.length; i++) {
+            const sp = fireGlows[i];
+            const gf = 0.72 + 0.28 * Math.sin(ptime * 9.5 + i * 2.1)
+                             * Math.sin(ptime * 6.1 + i * 4.3);
+            sp.material.opacity = Math.max(0.28, Math.min(1.0, 0.9 * gf));
+        }
 
         // ★ 飞行模式：根据按键状态更新相机位置（无重力，可悬停）
         if (walkMode && pointerLockControls && pointerLockControls.isLocked) {
@@ -3354,6 +3429,8 @@
             addLog('🏠 切换到简单矩形房间 (20x14x8)', 'info');
             renderer.setClearColor(0xffffff, 1);
             scene.background = new THREE.Color(0xffffff);
+            // ★ 白底用普通混合, 火焰颜色饱和清晰
+            if (fireParticles) { fireParticles.material.blending = THREE.NormalBlending; fireParticles.material.needsUpdate = true; }
         } else {
             sendCommand('map_building');
             document.getElementById('currentModel').textContent = 'BIM大楼模型';
@@ -3361,6 +3438,8 @@
             loadBuildingModel();
             renderer.setClearColor(0x111122, 1);
             scene.background = new THREE.Color(0x111122);
+            // ★ 深色背景用发光叠加混合, 火焰呈现自发光真实感
+            if (fireParticles) { fireParticles.material.blending = THREE.AdditiveBlending; fireParticles.material.needsUpdate = true; }
         }
         // 清除旧的3D建筑模型，等待新数据重建
         if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
