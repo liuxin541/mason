@@ -225,6 +225,24 @@ public class FireEscape extends SimState {
                 }
             }
             System.out.println("[BIM] 射线扫描完成: 墙体/楼梯翻转次数 = " + wallFlipCount);
+            // ★ 强制将所有开口(门/楼梯/窗)标记为建筑内部, 确保烟雾能通过开口蔓延
+            //   射线扫描法只在遇到墙体时翻转inside状态, 门/窗/楼梯不是墙体会被错误标记为outside
+            int fixedOpenings = 0;
+            for (int x = 0; x < width; x++) {
+                for (int y = 0; y < height; y++) {
+                    for (int z = 0; z < depth; z++) {
+                        int type = obstacleGrid.get(x, y, z);
+                        if (type == TYPE_DOOR || type == TYPE_STAIR || type == 6 /* TYPE_WINDOW */) {
+                            if (insideGrid.get(x, y, z) == 0) {
+                                insideGrid.set(x, y, z, 1);
+                                fuelGrid.set(x, y, z, 0);
+                                fixedOpenings++;
+                            }
+                        }
+                    }
+                }
+            }
+            System.out.println("[BIM] 开口修复: 门/楼梯/窗标记为inside共 " + fixedOpenings + " 个体素");
             // 强制将所有楼梯格标记为建筑内部（垂直通道，可通行）
             for (int[] pos : semantic.stairPositions) {
                 int sx = pos[0], sy = pos[1];
@@ -235,6 +253,30 @@ public class FireEscape extends SimState {
                     }
                 }
             }
+            // ★ 洪水填充: 从所有已知inside点出发, 填充所有连通的非墙体区域为inside
+            //   射线扫描法对复杂建筑结构不准确, 大量房间内部被错误标记为outside
+            java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
+            for (int x = 0; x < width; x++)
+                for (int y = 0; y < height; y++)
+                    for (int z = 0; z < depth; z++)
+                        if (insideGrid.get(x, y, z) == 1) queue.add(new int[]{x, y, z});
+            int floodFilled = 0;
+            int[][] dirs6 = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+            while (!queue.isEmpty()) {
+                int[] cur = queue.poll();
+                for (int[] d : dirs6) {
+                    int nx = cur[0]+d[0], ny = cur[1]+d[1], nz = cur[2]+d[2];
+                    if (nx<0||nx>=width||ny<0||ny>=height||nz<0||nz>=depth) continue;
+                    if (insideGrid.get(nx, ny, nz) == 1) continue;
+                    int obs = obstacleGrid.get(nx, ny, nz);
+                    if (obs == TYPE_WALL) continue;  // 只跳过墙体, 门/窗/楼梯/空气都可通行
+                    insideGrid.set(nx, ny, nz, 1);
+                    fuelGrid.set(nx, ny, nz, 0);
+                    queue.add(new int[]{nx, ny, nz});
+                    floodFilled++;
+                }
+            }
+            System.out.println("[BIM] 洪水填充: 新增inside体素 " + floodFilled + " 个");
             // 计算底层 z 范围（最低的连续室内区域）
             groundFloorMinZ = -1;
             groundFloorMaxZ = -1;
