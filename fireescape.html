@@ -1474,8 +1474,11 @@
                 float excessT = max(0.0, temp - 293.15);
 
                 // === 深灰色体积烟雾 (低密度浅灰, 高密度深黑, 参考FDS Smokeview) ===
-                vec3 smokeColor = mix(vec3(0.30, 0.29, 0.31), vec3(0.05, 0.05, 0.06), density);
-                smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
+                // 颜色渐变: 极淡(0.45) → 淡灰(0.25) → 深灰(0.10) → 近黑(0.03)
+                vec3 smokeColor = mix(vec3(0.42, 0.41, 0.43), vec3(0.03, 0.03, 0.04), smoothstep(0.0, 0.6, density));
+                // 高温烟雾带橙红色(被火焰照亮/自身高温)
+                float heatGlow = smoothstep(350.0, 700.0, excessT);
+                smokeColor = mix(smokeColor, vec3(0.55, 0.25, 0.08), heatGlow * 0.6);
 
                 // === 光照: 主方向光散射 (Henyey-Greenstein) ===
                 float lightTrans = exp(-density * uAbsorption * 0.7);
@@ -1491,12 +1494,14 @@
                 float multiScatter = density * (1.0 - lightTrans) * 0.8;
                 vec3 ambientL = uAmbientColor * (0.2 + multiScatter) * uScattering;
 
-                // === 火焰发光 (高温区强烈自发光) ===
-                float flameGlow = smoothstep(400.0, 950.0, excessT);
-                vec3 emissive = vec3(1.0, 0.45, 0.12) * flameGlow * (0.25 + density * 0.6);
+                // === 火焰发光 (高温区强烈自发光, 照亮周围烟雾) ===
+                float flameGlow = smoothstep(350.0, 900.0, excessT);
+                vec3 emissive = vec3(1.0, 0.5, 0.15) * flameGlow * (0.4 + density * 0.8);
+                // 火焰对周围烟雾的照亮(距离衰减近似)
+                float fireLight = flameGlow * (1.0 - density * 0.3) * 0.5;
 
-                vec3 totalLight = scatterL + ambientL + emissive;
-                vec3 color = smokeColor * totalLight;
+                vec3 totalLight = scatterL + ambientL + emissive + vec3(1.0, 0.4, 0.1) * fireLight;
+                vec3 color = smokeColor * totalLight + emissive * 0.5;  // 火焰发光叠加
 
                 // === Beer-Lambert 累积 ===
                 float absorp = density * uAbsorption * uStepSize;
@@ -1586,17 +1591,17 @@
                         uLightDir: { value: new THREE.Vector3(0.3, 0.9, 0.2).normalize() },
                         uLightColor: { value: new THREE.Color(0.95, 0.90, 0.80) },
                         uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
-                        uAbsorption: { value: 14.0 },
-                        uScattering: { value: 3.0 },
-                        uStepSize: { value: 0.2 },
-                        uMaxSteps: { value: 256 },
-                        uDensityThreshold: { value: 0.008 },
+                        uAbsorption: { value: 22.0 },
+                        uScattering: { value: 4.5 },
+                        uStepSize: { value: 0.15 },
+                        uMaxSteps: { value: 320 },
+                        uDensityThreshold: { value: 0.003 },
                         uTime: { value: 0 }
                     },
                     transparent: true,
                     side: THREE.BackSide,
                     depthWrite: false,
-                    depthTest: true,
+                    depthTest: false,  // 禁用深度测试, 确保烟雾不被建筑阻挡
                     blending: THREE.NormalBlending
                 });
 
@@ -1732,9 +1737,11 @@
                     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
                     mats.forEach((m) => {
                         m.transparent = true;
-                        m.opacity = 0.35;
-                        m.depthWrite = false;  // 避免半透明排序问题
+                        m.opacity = 0.3;
+                        m.depthWrite = false;
+                        m.side = THREE.DoubleSide;
                     });
+                    obj.renderOrder = 1;  // 建筑在体积烟雾之前渲染
                 }
             });
             scene.add(buildingGroup);
