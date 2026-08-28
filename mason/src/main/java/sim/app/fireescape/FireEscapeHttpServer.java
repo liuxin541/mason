@@ -28,7 +28,7 @@ public class FireEscapeHttpServer {
     private static String htmlContent;
     private static ScheduledExecutorService stepScheduler;
     private static volatile boolean autoStepRunning = false;
-    private static int stepIntervalMs = 150;
+    private static int stepIntervalMs = 500;  // 1x速度=1倍实时(每步0.5s, 每秒2步)
     private static volatile int speedMultiplier = 1;
 
     private static FireSpread fireSpread;
@@ -64,10 +64,11 @@ public class FireEscapeHttpServer {
     }
 
     // ---- 原版速度控制 ----
+    // 基础间隔500ms: 每步0.5s物理时间, 1x速度=1倍实时(每秒2步=1s物理时间)
     private static void setSpeed(int multiplier) {
         if (multiplier < 1) multiplier = 1;
         speedMultiplier = multiplier;
-        int newInterval = 150 / multiplier;
+        int newInterval = 500 / multiplier;
         if (newInterval < 10) newInterval = 10;
         boolean wasRunning = autoStepRunning;
         if (wasRunning) stopAutoStep();
