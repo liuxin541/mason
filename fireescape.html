@@ -1564,11 +1564,10 @@
                 this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
                 this.tempTex.needsUpdate = true;
 
-                // 容器: 尺寸 = 全分辨率建筑体积(降采样尺寸 × stride), 与voxelMesh对齐
-                const strideVol = data.stride || 1;
-                const boxW = data.width * strideVol * dx;
-                const boxH = data.depth * strideVol * dz;
-                const boxD = data.height * strideVol * dx;
+                // 容器: 尺寸 = 原始网格尺寸 × 体素尺寸 (data.width是原始尺寸, 非降采样)
+                const boxW = data.width * dx;
+                const boxH = data.depth * dz;
+                const boxD = data.height * dx;
                 const geo = new THREE.BoxGeometry(boxW, boxH, boxD);
                 geo.translate(boxW / 2, boxH / 2, boxD / 2);
 
