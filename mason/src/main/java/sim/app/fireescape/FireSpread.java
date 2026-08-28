@@ -26,7 +26,7 @@ public class FireSpread implements Steppable {
     private static final double SMOKE_FLOOR            = 0.002;
     private static final double SMOKE_CEIL             = 1.0;
     // ===== 方案1:火源烟气注入速率(单位浓度/秒),控制产烟强度 =====
-    private static final double SMOKE_SOURCE_RATE      = 5.0;
+    private static final double SMOKE_SOURCE_RATE      = 2.0;
     private static final int    EXIT_RADIUS            = 2;
     private static final double KILOWATT_TO_WATT       = 1000.0;
     private static final double CONV_RADIUS_METERS     = 1.0;
