@@ -735,6 +735,34 @@ public class FireSpread implements Steppable {
                     if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0;
                 }
 
+        // ★ 窗户挤出效果: 烟雾从窗户内侧向外侧转移, 模拟从窗户涌出
+        for (int x = 0; x < w; x++) {
+            for (int y = 0; y < h; y++) {
+                for (int z = 0; z < d; z++) {
+                    if (obstacle[x][y][z] != 6) continue;
+                    int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+                    for (int[] dir : dirs) {
+                        int nx = x+dir[0], ny = y+dir[1], nz = z+dir[2];
+                        if (nx<0||nx>=w||ny<0||ny>=h||nz<0||nz>=d) continue;
+                        if (obstacle[nx][ny][nz] == TYPE_WALL) continue;
+                        if (inside[nx][ny][nz] == 0) continue;
+                        double diff = nextC[x][y][z] - nextC[nx][ny][nz];
+                        if (diff > 0.01) {
+                            double transfer = diff * 0.25 * DT_FINAL;
+                            nextC[x][y][z] -= transfer;
+                            nextC[nx][ny][nz] += transfer;
+                            double tDiff = nextT[x][y][z] - nextT[nx][ny][nz];
+                            if (tDiff > 0) {
+                                double tTransfer = tDiff * 0.2 * DT_FINAL;
+                                nextT[x][y][z] -= tTransfer;
+                                nextT[nx][ny][nz] += tTransfer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         swapBuffers(fire, nextT, nextC);
     }
 

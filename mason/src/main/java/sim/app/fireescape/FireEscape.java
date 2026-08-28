@@ -277,15 +277,16 @@ public class FireEscape extends SimState {
                 }
             }
             System.out.println("[BIM] 洪水填充: 新增inside体素 " + floodFilled + " 个");
-            // ★ 窗户外部溢出: 将窗户(type=6)周围2体素范围内的外部空气标记为inside, 让烟雾能从窗户冒出
+            // ★ 窗户外部溢出: 将窗户(type=6)周围大范围外部空气标记为inside, 让烟雾从窗户冒出形成羽状
             int windowOverflow = 0;
             for (int x = 0; x < width; x++) {
                 for (int y = 0; y < height; y++) {
                     for (int z = 0; z < depth; z++) {
                         if (obstacleGrid.get(x, y, z) != 6) continue;  // 只处理窗户
-                        for (int dx2 = -2; dx2 <= 2; dx2++) {
-                            for (int dy2 = -2; dy2 <= 2; dy2++) {
-                                for (int dz2 = -1; dz2 <= 1; dz2++) {
+                        // 水平方向4体素, 垂直方向5体素(向上更多, 模拟羽状上升)
+                        for (int dx2 = -4; dx2 <= 4; dx2++) {
+                            for (int dy2 = -4; dy2 <= 4; dy2++) {
+                                for (int dz2 = -1; dz2 <= 5; dz2++) {
                                     int nx = x+dx2, ny = y+dy2, nz = z+dz2;
                                     if (nx<0||nx>=width||ny<0||ny>=height||nz<0||nz>=depth) continue;
                                     if (insideGrid.get(nx, ny, nz) == 1) continue;
