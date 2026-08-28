@@ -277,6 +277,17 @@ public class FireEscape extends SimState {
                 }
             }
             System.out.println("[BIM] 洪水填充: 新增inside体素 " + floodFilled + " 个");
+            // ★ 统计窗户数量和分布(调试)
+            int windowCount = 0;
+            int[] windowByZ = new int[depth];
+            for (int x = 0; x < width; x++)
+                for (int y = 0; y < height; y++)
+                    for (int z = 0; z < depth; z++)
+                        if (obstacleGrid.get(x, y, z) == 6) { windowCount++; windowByZ[z]++; }
+            System.out.println("[BIM] 窗户统计: 总数=" + windowCount + " 个体素");
+            StringBuilder wsb = new StringBuilder("[BIM] 窗户楼层分布: ");
+            for (int z = 0; z < depth; z++) if (windowByZ[z] > 0) wsb.append("z").append(z).append("=").append(windowByZ[z]).append(" ");
+            System.out.println(wsb.toString());
             // ★ 窗户外部溢出: 将窗户(type=6)周围大范围外部空气标记为inside, 让烟雾从窗户冒出形成羽状
             int windowOverflow = 0;
             for (int x = 0; x < width; x++) {

@@ -735,69 +735,48 @@ public class FireSpread implements Steppable {
                     if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0;
                 }
 
-        // ★ 浓烟从窗户涌出+柱状上升羽流 (大幅增强)
+        // ★ 烟雾从窗户涌出: 先在建筑内扩散, 浓度足够高时才从窗户挤出, 然后柱状上升
         for (int x = 0; x < w; x++) {
             for (int y = 0; y < h; y++) {
                 for (int z = 0; z < d; z++) {
                     if (obstacle[x][y][z] != 6) continue;
                     int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
 
-                    // === 1. 浓烟从窗户挤出: 高浓度侧向低浓度侧大量转移 ===
-                    for (int[] dir : dirs) {
-                        int nx = x+dir[0], ny = y+dir[1], nz = z+dir[2];
-                        if (nx<0||nx>=w||ny<0||ny>=h||nz<0||nz>=d) continue;
-                        if (obstacle[nx][ny][nz] == TYPE_WALL) continue;
-                        if (inside[nx][ny][nz] == 0) continue;
-                        double diff = nextC[x][y][z] - nextC[nx][ny][nz];
-                        if (diff > 0.005) {
-                            // 挤出系数大幅增强: 水平方向0.7, 垂直方向0.3
-                            double coeff = (dir[2] == 0) ? 0.7 : 0.3;
-                            double transfer = diff * coeff * DT_FINAL;
-                            nextC[x][y][z] -= transfer;
-                            nextC[nx][ny][nz] += transfer;
-                            double tDiff = nextT[x][y][z] - nextT[nx][ny][nz];
-                            if (tDiff > 0) {
-                                double tTransfer = tDiff * 0.5 * DT_FINAL;
-                                nextT[x][y][z] -= tTransfer;
-                                nextT[nx][ny][nz] += tTransfer;
-                            }
-                        }
-                    }
-
-                    // === 2. 窗户外侧直接注入浓烟: 模拟浓烟从窗户喷涌而出 ===
-                    // 当窗户内侧浓度>0.1时, 向外侧水平1-3体素注入浓烟
-                    if (nextC[x][y][z] > 0.1) {
+                    // === 1. 窗户挤出: 只有当窗户内侧浓度足够高(>0.15)时才向外侧挤出 ===
+                    // 真实火灾: 烟雾先充满房间, 内部压力/浓度足够高时才从窗户涌出
+                    if (nextC[x][y][z] > 0.15) {
                         for (int[] dir : dirs) {
-                            if (dir[2] != 0) continue;  // 只水平方向
-                            for (int dist = 1; dist <= 3; dist++) {
-                                int nx = x+dir[0]*dist, ny = y+dir[1]*dist;
-                                if (nx<0||nx>=w||ny<0||ny>=h) break;
-                                if (obstacle[nx][ny][z] == TYPE_WALL) break;
-                                if (inside[nx][ny][z] == 0) continue;
-                                // 注入量随距离衰减
-                                double inject = nextC[x][y][z] * 0.15 / dist * DT_FINAL;
-                                if (inject > 0.001) {
-                                    nextC[nx][ny][z] = Math.min(SMOKE_CEIL, nextC[nx][ny][z] + inject);
-                                    // 热量跟随注入
-                                    if (nextT[x][y][z] > 350) {
-                                        double tInject = (nextT[x][y][z] - T_AMB) * 0.1 / dist * DT_FINAL;
-                                        nextT[nx][ny][z] = Math.min(T_MAX, nextT[nx][ny][z] + tInject);
-                                    }
+                            int nx = x+dir[0], ny = y+dir[1], nz = z+dir[2];
+                            if (nx<0||nx>=w||ny<0||ny>=h||nz<0||nz>=d) continue;
+                            if (obstacle[nx][ny][nz] == TYPE_WALL) continue;
+                            if (inside[nx][ny][nz] == 0) continue;
+                            double diff = nextC[x][y][z] - nextC[nx][ny][nz];
+                            if (diff > 0.02) {
+                                // 挤出系数: 水平方向0.45(比之前0.7降低), 垂直0.2
+                                double coeff = (dir[2] == 0) ? 0.45 : 0.2;
+                                double transfer = diff * coeff * DT_FINAL;
+                                nextC[x][y][z] -= transfer;
+                                nextC[nx][ny][nz] += transfer;
+                                double tDiff = nextT[x][y][z] - nextT[nx][ny][nz];
+                                if (tDiff > 0) {
+                                    double tTransfer = tDiff * 0.35 * DT_FINAL;
+                                    nextT[x][y][z] -= tTransfer;
+                                    nextT[nx][ny][nz] += tTransfer;
                                 }
                             }
                         }
                     }
 
-                    // === 3. 柱状上升: 窗户外侧±6体素区域, 大幅增强向上浮力 ===
-                    for (int hx = -6; hx <= 6; hx++) {
-                        for (int hy = -6; hy <= 6; hy++) {
+                    // === 2. 柱状上升: 窗户外侧±5体素区域, 增强向上浮力(只有当该区域有烟雾时) ===
+                    for (int hx = -5; hx <= 5; hx++) {
+                        for (int hy = -5; hy <= 5; hy++) {
                             if (hx == 0 && hy == 0) continue;
                             int horizDist = Math.abs(hx) + Math.abs(hy);
-                            if (horizDist > 6) continue;
+                            if (horizDist > 5) continue;
                             int px = x + hx, py = y + hy;
                             if (px<0||px>=w||py<0||py>=h) continue;
-                            // 向上8层, 浮力驱动柱状上升
-                            for (int uz = z + 1; uz <= Math.min(z + 8, d - 1); uz++) {
+                            // 向上7层, 浮力驱动柱状上升
+                            for (int uz = z + 1; uz <= Math.min(z + 7, d - 1); uz++) {
                                 if (obstacle[px][py][uz] == TYPE_WALL) break;
                                 if (inside[px][py][uz] == 0) continue;
                                 int belowZ = uz - 1;
@@ -805,15 +784,14 @@ public class FireSpread implements Steppable {
                                 if (inside[px][py][belowZ] == 0) continue;
                                 double cBelow = nextC[px][py][belowZ];
                                 double cAbove = nextC[px][py][uz];
-                                // 浮力系数大幅增强: 离窗越近越强, 越高越弱
-                                double buoyFactor = 0.55 * (1.0 - horizDist / 7.0) * (1.0 - (uz - z) / 9.0);
+                                // 浮力系数: 离窗越近越强, 越高越弱
+                                double buoyFactor = 0.4 * (1.0 - horizDist / 6.0) * (1.0 - (uz - z) / 8.0);
                                 if (buoyFactor > 0.02 && cBelow > cAbove + 0.002) {
                                     double upTransfer = (cBelow - cAbove) * buoyFactor * DT_FINAL;
                                     nextC[px][py][belowZ] -= upTransfer;
                                     nextC[px][py][uz] += upTransfer;
-                                    // 热量跟随上升
                                     if (nextT[px][py][belowZ] > nextT[px][py][uz] + 3) {
-                                        double tUp = (nextT[px][py][belowZ] - nextT[px][py][uz]) * buoyFactor * 0.9 * DT_FINAL;
+                                        double tUp = (nextT[px][py][belowZ] - nextT[px][py][uz]) * buoyFactor * 0.7 * DT_FINAL;
                                         nextT[px][py][belowZ] -= tUp;
                                         nextT[px][py][uz] += tUp;
                                     }
@@ -822,8 +800,8 @@ public class FireSpread implements Steppable {
                         }
                     }
 
-                    // === 4. 火焰探出窗户: 温度>500K时向外侧注入高温火焰 ===
-                    if (nextT[x][y][z] > 500.0) {
+                    // === 3. 火焰探出窗户: 温度>550K时向外侧注入高温火焰(火势足够大才探出) ===
+                    if (nextT[x][y][z] > 550.0) {
                         for (int[] dir : dirs) {
                             if (dir[2] != 0) continue;
                             for (int dist = 1; dist <= 2; dist++) {
@@ -831,10 +809,10 @@ public class FireSpread implements Steppable {
                                 if (nx<0||nx>=w||ny<0||ny>=h) break;
                                 if (obstacle[nx][ny][z] == TYPE_WALL) break;
                                 if (inside[nx][ny][z] == 0) continue;
-                                double flameInject = (nextT[x][y][z] - 450.0) * 0.12 / dist * DT_FINAL;
+                                double flameInject = (nextT[x][y][z] - 500.0) * 0.1 / dist * DT_FINAL;
                                 if (flameInject > 0) {
                                     nextT[nx][ny][z] = Math.min(T_MAX, nextT[nx][ny][z] + flameInject);
-                                    nextC[nx][ny][z] = Math.min(SMOKE_CEIL, nextC[nx][ny][z] + 0.005 / dist * DT_FINAL);
+                                    nextC[nx][ny][z] = Math.min(SMOKE_CEIL, nextC[nx][ny][z] + 0.003 / dist * DT_FINAL);
                                 }
                             }
                         }
