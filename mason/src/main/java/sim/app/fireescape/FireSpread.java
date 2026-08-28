@@ -735,7 +735,7 @@ public class FireSpread implements Steppable {
                     if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0;
                 }
 
-        // ★ 窗户挤出效果: 烟雾从窗户内侧向外侧转移, 模拟从窗户涌出
+        // ★ 窗户挤出+羽流效果: 烟雾从窗户内侧向外侧转移, 外侧上方增强浮力形成羽状上升
         for (int x = 0; x < w; x++) {
             for (int y = 0; y < h; y++) {
                 for (int z = 0; z < d; z++) {
@@ -748,14 +748,53 @@ public class FireSpread implements Steppable {
                         if (inside[nx][ny][nz] == 0) continue;
                         double diff = nextC[x][y][z] - nextC[nx][ny][nz];
                         if (diff > 0.01) {
-                            double transfer = diff * 0.25 * DT_FINAL;
+                            double transfer = diff * 0.3 * DT_FINAL;
                             nextC[x][y][z] -= transfer;
                             nextC[nx][ny][nz] += transfer;
                             double tDiff = nextT[x][y][z] - nextT[nx][ny][nz];
                             if (tDiff > 0) {
-                                double tTransfer = tDiff * 0.2 * DT_FINAL;
+                                double tTransfer = tDiff * 0.25 * DT_FINAL;
                                 nextT[x][y][z] -= tTransfer;
                                 nextT[nx][ny][nz] += tTransfer;
+                            }
+                        }
+                    }
+                    // ★ 羽流上升: 窗户外侧(水平方向2-3体素外)上方体素, 增强向上浮力转移
+                    // 找到窗户的"外侧"方向(远离建筑中心的方向), 在该方向上方形成羽流
+                    for (int hz = 1; hz <= 4; hz++) {
+                        int uz = z + hz;
+                        if (uz >= d) break;
+                        if (obstacle[x][y][uz] == TYPE_WALL) break;
+                        if (inside[x][y][uz] == 0) continue;
+                        // 从窗户向上转移烟雾和热量(浮力驱动)
+                        double cBelow = nextC[x][y][z];
+                        double cAbove = nextC[x][y][uz];
+                        if (cBelow > cAbove + 0.005) {
+                            double upTransfer = (cBelow - cAbove) * 0.15 * DT_FINAL / hz;
+                            nextC[x][y][z] -= upTransfer;
+                            nextC[x][y][uz] += upTransfer;
+                            // 热量跟随上升
+                            if (nextT[x][y][z] > nextT[x][y][uz]) {
+                                double tUp = (nextT[x][y][z] - nextT[x][y][uz]) * 0.12 * DT_FINAL / hz;
+                                nextT[x][y][z] -= tUp;
+                                nextT[x][y][uz] += tUp;
+                            }
+                        }
+                    }
+                    // ★ 火焰探出窗户: 当窗户内侧温度极高(>500K)时, 向外侧1-2体素注入高温火焰
+                    if (nextT[x][y][z] > 550.0) {
+                        for (int[] dir : dirs) {
+                            int nx = x+dir[0], ny = y+dir[1], nz = z+dir[2];
+                            if (nx<0||nx>=w||ny<0||ny>=h||nz<0||nz>=d) continue;
+                            if (obstacle[nx][ny][nz] == TYPE_WALL) continue;
+                            if (inside[nx][ny][nz] == 0) continue;
+                            // 只向水平方向(非上下)探出火焰
+                            if (dir[2] != 0) continue;
+                            double flameInject = (nextT[x][y][z] - 500.0) * 0.08 * DT_FINAL;
+                            if (flameInject > 0 && nextT[nx][ny][nz] < nextT[x][y][z] * 0.7) {
+                                nextT[nx][ny][nz] = Math.min(T_MAX, nextT[nx][ny][nz] + flameInject);
+                                // 火焰处也注入少量烟雾
+                                nextC[nx][ny][nz] = Math.min(SMOKE_CEIL, nextC[nx][ny][nz] + 0.002 * DT_FINAL);
                             }
                         }
                     }

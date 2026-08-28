@@ -1443,6 +1443,41 @@
             return texture(tex, auv).r;
         }
 
+        // ★ 3D Value Noise: 用于烟雾湍流扰动, 产生翻滚/脉动效果
+        float hash31(vec3 p) {
+            p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+            p += dot(p, p.yxz + 19.19);
+            return fract((p.x + p.y) * p.z);
+        }
+        float vnoise(vec3 p) {
+            vec3 i = floor(p);
+            vec3 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);  // smoothstep
+            float n000 = hash31(i);
+            float n100 = hash31(i + vec3(1,0,0));
+            float n010 = hash31(i + vec3(0,1,0));
+            float n110 = hash31(i + vec3(1,1,0));
+            float n001 = hash31(i + vec3(0,0,1));
+            float n101 = hash31(i + vec3(1,0,1));
+            float n011 = hash31(i + vec3(0,1,1));
+            float n111 = hash31(i + vec3(1,1,1));
+            return mix(
+                mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+                mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+                f.z
+            );
+        }
+        float fbm(vec3 p) {
+            float v = 0.0;
+            float a = 0.5;
+            for (int i = 0; i < 4; i++) {
+                v += a * vnoise(p);
+                p *= 2.0;
+                a *= 0.5;
+            }
+            return v;
+        }
+
         void main() {
             vec3 ro = vWorldPos - uBoxCenter;
             // ★ 光线方向: 从远面朝相机方向步进 (BackSide 远面 → 穿过体积 → 相机)
@@ -1467,7 +1502,19 @@
                 // 建筑坐标 → 3D场坐标: uvw=(X, 深度, 高度)
                 vec3 uvw = vec3(p.x, p.z, p.y) * 0.5 + 0.5;
 
-                float density = sampleField(uSmokeTex, uvw);
+                // ★ 湍流扰动: 用FBM噪声扰动采样坐标, 产生烟雾翻滚/脉动效果
+                // 扰动强度随高度增加(上部烟雾更弥散), 随时间脉动
+                float heightFactor = smoothstep(0.0, 1.0, uvw.z);  // 越高扰动越大
+                float pulse = 0.7 + 0.3 * sin(uTime * 1.5 + uvw.y * 6.28);  // 脉动
+                vec3 noiseCoord = uvw * vec3(8.0, 8.0, 6.0) + vec3(0.0, 0.0, uTime * 0.3);
+                float turb = fbm(noiseCoord) - 0.5;  // [-0.5, 0.5]
+                vec3 uvwDistorted = uvw + turb * 0.04 * (0.5 + heightFactor) * pulse;
+                uvwDistorted = clamp(uvwDistorted, 0.0, 1.0);
+
+                float density = sampleField(uSmokeTex, uvwDistorted);
+                // ★ 噪声调制密度: 让烟雾有浓淡不均的湍流纹理
+                float densityNoise = fbm(uvw * vec3(12.0, 12.0, 8.0) + vec3(uTime * 0.2));
+                density *= (0.6 + 0.4 * densityNoise);
                 if (density < uDensityThreshold) continue;
 
                 float temp = 293.15 + sampleField(uTempTex, uvw) * 880.0;
@@ -1494,14 +1541,17 @@
                 float multiScatter = density * (1.0 - lightTrans) * 0.8;
                 vec3 ambientL = uAmbientColor * (0.2 + multiScatter) * uScattering;
 
-                // === 火焰发光 (高温区强烈自发光, 照亮周围烟雾) ===
-                float flameGlow = smoothstep(350.0, 900.0, excessT);
-                vec3 emissive = vec3(1.0, 0.5, 0.15) * flameGlow * (0.4 + density * 0.8);
+                // === 火焰发光 (高温区强烈自发光, 照亮周围烟雾, 探出窗户的火焰更亮) ===
+                float flameGlow = smoothstep(350.0, 800.0, excessT);
+                float flameCore = smoothstep(600.0, 1000.0, excessT);
+                // 火焰颜色: 外焰橙红, 内焰黄白
+                vec3 flameColor = mix(vec3(1.0, 0.45, 0.1), vec3(1.0, 0.85, 0.3), flameCore);
+                vec3 emissive = flameColor * flameGlow * (0.5 + density * 0.6 + flameCore * 0.8);
                 // 火焰对周围烟雾的照亮(距离衰减近似)
-                float fireLight = flameGlow * (1.0 - density * 0.3) * 0.5;
+                float fireLight = flameGlow * (1.0 - density * 0.2) * 0.7;
 
                 vec3 totalLight = scatterL + ambientL + emissive + vec3(1.0, 0.4, 0.1) * fireLight;
-                vec3 color = smokeColor * totalLight + emissive * 0.5;  // 火焰发光叠加
+                vec3 color = smokeColor * totalLight + emissive * (0.6 + flameCore * 0.4);  // 火焰发光叠加
 
                 // === Beer-Lambert 累积 ===
                 float absorp = density * uAbsorption * uStepSize;
