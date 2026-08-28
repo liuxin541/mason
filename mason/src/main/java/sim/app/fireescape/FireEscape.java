@@ -547,8 +547,9 @@ public class FireEscape extends SimState {
     public void generateRandomFireSources() {
         fireSourcePositions.clear();
         if (gridWidth > 0 && gridHeight > 0 && gridDepth > 0) {
-            // 收集所有可燃地面体素（inside=1，非墙/非出口，优先取楼层中间层）
+            // 收集所有可燃地面体素（inside=1，非墙/非出口）
             java.util.List<int[]> candidates = new java.util.ArrayList<>();
+            int minZ = gridDepth;
             for (int z = 0; z < gridDepth; z++) {
                 for (int x = 0; x < gridWidth; x++) {
                     for (int y = 0; y < gridHeight; y++) {
@@ -556,10 +557,17 @@ public class FireEscape extends SimState {
                                 && obstacleGrid.get(x, y, z) != TYPE_WALL
                                 && obstacleGrid.get(x, y, z) != TYPE_EXIT) {
                             candidates.add(new int[]{x, y, z});
+                            if (z < minZ) minZ = z;
                         }
                     }
                 }
             }
+            // ★ 火源只在最低室内层（地板上方第一层）生成，避免火源飘在空中
+            java.util.List<int[]> floorCandidates = new java.util.ArrayList<>();
+            for (int[] c : candidates) {
+                if (c[2] == minZ) floorCandidates.add(c);
+            }
+            if (!floorCandidates.isEmpty()) candidates = floorCandidates;
             if (!candidates.isEmpty()) {
                 // Fisher-Yates 洗牌，取前 2~5 个
                 for (int i = candidates.size() - 1; i > 0; i--) {

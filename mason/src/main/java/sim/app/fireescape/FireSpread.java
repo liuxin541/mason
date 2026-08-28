@@ -265,12 +265,13 @@ public class FireSpread implements Steppable {
 
         // ===== 火焰物理参数输出（Heskestad 火焰高度公式）=====
         double Q_per_src = Q_total / Math.max(1, nSources);
-        double flameDiameter = 2.0 * srcRadius * dx;  // 火源等效直径(m)
+        // 火源等效直径: 体素直径乘以0.6(实际燃烧区小于体素网格), 避免小火源火焰被压得过低
+        double flameDiameter = 2.0 * srcRadius * dx * 0.6;
         for (int idx = 0; idx < nSources; idx++) {
             fire.fireSourceHeatRelease[idx] = Q_per_src;
             // Heskestad: L = 0.235 * Q^(2/5) - 1.02 * D  (Q in kW, L in m)
             double L_flame = 0.235 * Math.pow(Q_per_src, 0.4) - 1.02 * flameDiameter;
-            if (L_flame < 0.3) L_flame = 0.3;  // 最小火焰高度
+            if (L_flame < 0.8) L_flame = 0.8;  // 最小火焰高度(展示用, 避免看不见)
             fire.fireSourceFlameHeight[idx] = L_flame;
             // 羽流半径: 近似随高度线性扩展 (McCaffrey)
             fire.fireSourcePlumeRadius[idx] = 0.5 * flameDiameter + 0.18 * L_flame;
