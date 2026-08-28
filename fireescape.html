@@ -1564,8 +1564,11 @@
                 this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
                 this.tempTex.needsUpdate = true;
 
-                // 容器: 尺寸 = 全分辨率建筑体积, 中心在 (w*dx/2, d*dz/2, h*dx/2)
-                const boxW = data.width * dx, boxH = data.depth * dz, boxD = data.height * dx;
+                // 容器: 尺寸 = 全分辨率建筑体积(降采样尺寸 × stride), 与voxelMesh对齐
+                const strideVol = data.stride || 1;
+                const boxW = data.width * strideVol * dx;
+                const boxH = data.depth * strideVol * dz;
+                const boxD = data.height * strideVol * dx;
                 const geo = new THREE.BoxGeometry(boxW, boxH, boxD);
                 geo.translate(boxW / 2, boxH / 2, boxD / 2);
 
@@ -3114,6 +3117,7 @@
             e.preventDefault();
             clipMode = !clipMode;
             if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+            if (buildingGroup) buildingGroup.visible = !clipMode;  // 剖面模式下隐藏glTF建筑外壳
             lastWallGridKey = null;  // 重置墙体缓存, 强制重建
             addLog(clipMode ? '🔪 剖面模式：前墙已隐藏，可观察内部烟雾' : '🏠 剖面模式关闭', 'info');
             return;
@@ -3532,6 +3536,11 @@
     lastWallGridKey = null;
     cameraFramed = false;
     lastGridKey = null;
+    // 同步UI: 下拉框选中简单房间, 标签更新
+    const ms = document.getElementById('modelSelect');
+    if (ms) ms.value = 'simple';
+    const cm = document.getElementById('currentModel');
+    if (cm) cm.textContent = '简单矩形房间';
     fetch('/command', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=map_simple' });
 
     // ★ 强制设置相机位置: 延迟2秒确保数据加载完成, 简单房间(15x10x5m)全貌可见
