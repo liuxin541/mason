@@ -239,7 +239,11 @@ public class FireEscape extends SimState {
         super.start();
 
         // 1. 尝试动态加载真实体素
-        boolean loaded = loadFromVoxel("./test_output/voxel_grid.voxel", "./test_output/semantic_info.json");
+        // 1.1 优先加载真实 BIM 体素（ifc_output），找不到再退测试数据（test_output）
+        boolean loaded = loadFromVoxel("./ifc_output/voxel_grid.voxel", "./ifc_output/semantic_info.json");
+        if (!loaded) {
+            loaded = loadFromVoxel("./test_output/voxel_grid.voxel", "./test_output/semantic_info.json");
+        }
         if (!loaded) {
             fallbackInitRealisticObstacles();
         }
