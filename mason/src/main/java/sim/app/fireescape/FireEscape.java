@@ -45,6 +45,9 @@ public class FireEscape extends SimState {
     public static final int TYPE_DOOR = 3;
     public static final int TYPE_EXIT = 4;
     public static final int TYPE_STAIR = 5;
+    public static final int TYPE_COLUMN = 6;
+    // 窗保留独立类型：参与建筑围护，但不属于人员可通行的门。
+    public static final int TYPE_WINDOW = 7;
 
     // ---- 物理参数（与原版保持一致） ----
     public static final double T_AMBIENT = 293.15;
@@ -152,101 +155,9 @@ public class FireEscape extends SimState {
                 }
             }
 
-            // 5. ★ 2D 射线扫描法 (Sweep Line / Even-Odd Rule) 精确判定建筑内部。
-            //    原理：对每一列 (x,y) 从下往上扫描，每遇到墙体/楼板就翻转 inside 状态。
-            //    改进：先找到"有效楼层范围" [zGround, zRoof]，在此范围外用射线扫描，
-            //    在此范围外（架空底层、屋顶以上）直接标记为 outside。
-            //    这样可以避免楼板开口（楼梯/电梯井）导致射线穿透到屋顶以上。
-            //    要求：Python 端已将楼板/屋顶 slab 体素化为 WALL。
-
-            // 5a. 找到有效楼层的 z 范围（检测"大面积楼板"层）
-            int zGround = -1, zRoof = -1;
-            for (int z = 0; z < depth; z++) {
-                int wallCount = 0;
-                for (int x = 0; x < width; x++) {
-                    for (int y = 0; y < height; y++) {
-                        if (obstacleGrid.get(x, y, z) == TYPE_WALL) wallCount++;
-                    }
-                }
-                // "大面积楼板"：该层墙体素数 > 总列数的 40%
-                if (wallCount > width * height * 0.4) {
-                    if (zGround == -1) zGround = z;
-                    zRoof = z; // 持续更新，取最高的楼板层
-                }
-            }
-            // 如果找不到大面积楼板，回退到全范围扫描
-            if (zGround == -1) { zGround = 0; zRoof = depth - 1; }
-            System.out.println("[BIM] 有效楼层范围: zGround=" + zGround + " (world_z=" + fmt(zGround * deltaZ + semantic.originOffset[2])
-                    + "m), zRoof=" + zRoof + " (world_z=" + fmt(zRoof * deltaZ + semantic.originOffset[2]) + "m)");
-
-            // 5b. 先将所有体素标记为 outside
-            for (int x = 0; x < width; x++) {
-                for (int y = 0; y < height; y++) {
-                    for (int z = 0; z < depth; z++) {
-                        insideGrid.set(x, y, z, 0);
-                        fuelGrid.set(x, y, z, 0);
-                    }
-                }
-            }
-
-            // 5c. 在 [zGround, zRoof] 范围内执行射线扫描
-            int wallFlipCount = 0;
-            for (int x = 0; x < width; x++) {
-                for (int y = 0; y < height; y++) {
-                    boolean inside = false;
-                    for (int z = zGround; z <= zRoof; z++) {
-                        int type = obstacleGrid.get(x, y, z);
-                        if (type == TYPE_WALL ) {
-                            insideGrid.set(x, y, z, 0);
-                            fuelGrid.set(x, y, z, 0);
-                            inside = !inside;
-                            wallFlipCount++;
-                        } else {
-                            if (inside) {
-                                insideGrid.set(x, y, z, 1);
-                                if (type == TYPE_FUEL) {
-                                    fuelGrid.set(x, y, z, fuelCapacity);
-                                } else {
-                                    fuelGrid.set(x, y, z, 0);
-                                }
-                                if (type == TYPE_EXIT) {
-                                    exits.add(new int[]{x, y, z});
-                                }
-                            }
-                            // else: 保持 outside (已在 5b 中初始化)
-                        }
-                    }
-                }
-            }
-            System.out.println("[BIM] 射线扫描完成: 墙体/楼梯翻转次数 = " + wallFlipCount);
-            // 强制将所有楼梯格标记为建筑内部（垂直通道，可通行）
-            for (int[] pos : semantic.stairPositions) {
-                int sx = pos[0], sy = pos[1];
-                for (int z = 0; z < depth; z++) {
-                    if (obstacleGrid.get(sx, sy, z) == TYPE_STAIR) {
-                        insideGrid.set(sx, sy, z, 1);
-                        fuelGrid.set(sx, sy, z, 0);
-                    }
-                }
-            }
-            // 计算底层 z 范围（最低的连续室内区域）
-            groundFloorMinZ = -1;
-            groundFloorMaxZ = -1;
-            for (int z = 0; z < depth; z++) {
-                boolean hasInside = false;
-                for (int x = 0; x < width && !hasInside; x++) {
-                    for (int y = 0; y < height && !hasInside; y++) {
-                        if (insideGrid.get(x, y, z) == 1) hasInside = true;
-                    }
-                }
-                if (hasInside) {
-                    if (groundFloorMinZ == -1) groundFloorMinZ = z;
-                    groundFloorMaxZ = z;
-                } else if (groundFloorMinZ != -1) {
-                    break;
-                }
-            }
-            if (groundFloorMinZ == -1) { groundFloorMinZ = 0; groundFloorMaxZ = 0; }
+            // 5. 从网格边界洪水填充室外空间。门、出口和楼梯在此阶段临时封闭，
+            //    防止室外区域从正常开口或竖向通道灌入建筑内部。
+            rebuildInsideGridFromExterior();
 
 
             // 5. ★ 坐标系统统一：从 semantic_info.json 读取 voxel_size / origin_offset，
@@ -272,6 +183,185 @@ public class FireEscape extends SimState {
         } catch (Exception e) {
             System.err.println("[BIM] 加载体素失败: " + e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * 从六个网格边界标记所有可达空气为室外，剩余封闭空气为室内。
+     * 门、出口和楼梯只在室内掩码生成期间作为封闭体，完成后恢复为可通行区域。
+     */
+    public void rebuildInsideGridFromExterior() {
+        int width = gridWidth;
+        int height = gridHeight;
+        int depth = gridDepth;
+        int totalCells = width * height * depth;
+        boolean[] outside = new boolean[totalCells];
+        int[] queue = new int[totalCells];
+        int head = 0;
+        int tail = 0;
+        int[][] directions = {
+                {1, 0, 0}, {-1, 0, 0},
+                {0, 1, 0}, {0, -1, 0},
+                {0, 0, 1}, {0, 0, -1}
+        };
+
+        for (int z = 0; z < depth; z++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    if (x != 0 && x != width - 1 &&
+                            y != 0 && y != height - 1 &&
+                            z != 0 && z != depth - 1) {
+                        continue;
+                    }
+                    int index = voxelIndex(x, y, z);
+                    if (!isEnclosureBarrier(obstacleGrid.get(x, y, z)) && !outside[index]) {
+                        outside[index] = true;
+                        queue[tail++] = index;
+                    }
+                }
+            }
+        }
+
+        while (head < tail) {
+            int index = queue[head++];
+            int x = index % width;
+            int yz = index / width;
+            int y = yz % height;
+            int z = yz / height;
+
+            for (int[] direction : directions) {
+                int nx = x + direction[0];
+                int ny = y + direction[1];
+                int nz = z + direction[2];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height || nz < 0 || nz >= depth) continue;
+
+                int nextIndex = voxelIndex(nx, ny, nz);
+                if (!outside[nextIndex] && !isEnclosureBarrier(obstacleGrid.get(nx, ny, nz))) {
+                    outside[nextIndex] = true;
+                    queue[tail++] = nextIndex;
+                }
+            }
+        }
+
+        int outsideCount = 0;
+        int insideCount = 0;
+        for (int z = 0; z < depth; z++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int type = obstacleGrid.get(x, y, z);
+                    boolean interior = !isEnclosureBarrier(type) && !outside[voxelIndex(x, y, z)];
+                    insideGrid.set(x, y, z, interior ? 1 : 0);
+                    fuelGrid.set(x, y, z, interior && type == TYPE_FUEL ? fuelCapacity : 0);
+                    if (interior) insideCount++;
+                    else if (outside[voxelIndex(x, y, z)]) outsideCount++;
+                }
+            }
+        }
+
+        // 将与室内相邻的门、出口和楼梯连通块恢复为室内可通行区域。
+        head = 0;
+        tail = 0;
+        for (int z = 0; z < depth; z++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    if (isInteriorTransition(obstacleGrid.get(x, y, z)) && hasInteriorNeighbor(x, y, z)) {
+                        int index = voxelIndex(x, y, z);
+                        insideGrid.set(x, y, z, 1);
+                        queue[tail++] = index;
+                    }
+                }
+            }
+        }
+
+        while (head < tail) {
+            int index = queue[head++];
+            int x = index % width;
+            int yz = index / width;
+            int y = yz % height;
+            int z = yz / height;
+
+            for (int[] direction : directions) {
+                int nx = x + direction[0];
+                int ny = y + direction[1];
+                int nz = z + direction[2];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height || nz < 0 || nz >= depth) continue;
+                if (insideGrid.get(nx, ny, nz) == 0 &&
+                        isInteriorTransition(obstacleGrid.get(nx, ny, nz))) {
+                    insideGrid.set(nx, ny, nz, 1);
+                    queue[tail++] = voxelIndex(nx, ny, nz);
+                }
+            }
+        }
+
+        exits.clear();
+        for (int z = 0; z < depth; z++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    if (insideGrid.get(x, y, z) == 1 &&
+                            obstacleGrid.get(x, y, z) == TYPE_EXIT) {
+                        exits.add(new int[]{x, y, z});
+                    }
+                }
+            }
+        }
+
+        updateGroundFloorRange();
+        System.out.println("[BIM] 室内外洪水填充完成: outside=" + outsideCount +
+                ", inside=" + insideCount + ", exits=" + exits.size());
+    }
+
+    private boolean isEnclosureBarrier(int type) {
+        // 所有非空气体素均阻断室外洪水；WINDOW 因而封闭外墙洞口，
+        // DOOR/EXIT/STAIR 会在洪水结束后由 isInteriorTransition 单独恢复。
+        return type != TYPE_EMPTY && type != TYPE_FUEL;
+    }
+
+    private boolean isInteriorTransition(int type) {
+        return type == TYPE_DOOR || type == TYPE_EXIT || type == TYPE_STAIR;
+    }
+
+    private boolean hasInteriorNeighbor(int x, int y, int z) {
+        int[][] directions = {
+                {1, 0, 0}, {-1, 0, 0},
+                {0, 1, 0}, {0, -1, 0},
+                {0, 0, 1}, {0, 0, -1}
+        };
+        for (int[] direction : directions) {
+            int nx = x + direction[0];
+            int ny = y + direction[1];
+            int nz = z + direction[2];
+            if (nx >= 0 && nx < gridWidth && ny >= 0 && ny < gridHeight &&
+                    nz >= 0 && nz < gridDepth && insideGrid.get(nx, ny, nz) == 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int voxelIndex(int x, int y, int z) {
+        return (z * gridHeight + y) * gridWidth + x;
+    }
+
+    private void updateGroundFloorRange() {
+        groundFloorMinZ = -1;
+        groundFloorMaxZ = -1;
+        for (int z = 0; z < gridDepth; z++) {
+            boolean hasInside = false;
+            for (int x = 0; x < gridWidth && !hasInside; x++) {
+                for (int y = 0; y < gridHeight && !hasInside; y++) {
+                    if (insideGrid.get(x, y, z) == 1) hasInside = true;
+                }
+            }
+            if (hasInside) {
+                if (groundFloorMinZ == -1) groundFloorMinZ = z;
+                groundFloorMaxZ = z;
+            } else if (groundFloorMinZ != -1) {
+                break;
+            }
+        }
+        if (groundFloorMinZ == -1) {
+            groundFloorMinZ = 0;
+            groundFloorMaxZ = 0;
         }
     }
 
@@ -377,72 +467,8 @@ public class FireEscape extends SimState {
         initMultipleFireSources();
         initExits();
 
-        // 4. 根据最终网格尺寸生成全 3D 随机人员（按楼层均匀分布，不再全部下落到底层）
-        persons = new Person[personCount];
-        Steppable[] agents = new Steppable[personCount];
-        // ★ 收集所有楼层的楼板 z（obstacle 覆盖率 > 40% 的切片），用于"落到当前楼层楼板上方"
-        java.util.List<Integer> floorSlabZs = new java.util.ArrayList<>();
-        for (int z = 0; z < gridDepth; z++) {
-            int wallCount = 0;
-            for (int xi = 0; xi < gridWidth; xi++)
-                for (int yi = 0; yi < gridHeight; yi++)
-                    if (obstacleGrid.get(xi, yi, z) == TYPE_WALL) wallCount++;
-            if (wallCount > gridWidth * gridHeight * 0.4) floorSlabZs.add(z);
-        }
-        // 兜底：如果没有检测到楼板，用 groundFloorMinZ
-        if (floorSlabZs.isEmpty() && groundFloorMinZ >= 0) floorSlabZs.add(groundFloorMinZ);
-
-        for (int i = 0; i < personCount; i++) {
-            int x, y, z;
-            int attempts = 0;
-            do {
-                x = random.nextInt(gridWidth);
-                y = random.nextInt(gridHeight);
-                z = random.nextInt(gridDepth);
-                attempts++;
-                if (attempts > 500) break;
-            } while (!(insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) == 0) || fireGrid.get(x, y, z) > T_AMBIENT + 50);
-
-            // ★ 楼层感知下落：只落到当前 z 所在楼层的楼板上方，不穿越楼板下落到更低的楼层。
-            //   找到 <= 当前 z 的最大楼板 z（slabZ），然后从当前 z 向下落到 slabZ+1 即停。
-            //   这样人员会分布在多个楼层，而不是全部堆在底层。
-            int slabBelow = -1;
-            for (int sz : floorSlabZs) {
-                if (sz <= z && sz > slabBelow) slabBelow = sz;
-            }
-            if (slabBelow >= 0) {
-                // 目标落脚点 = slabBelow + 1（楼板上方一格），但需确认该位置在建筑内部且非障碍
-                int targetZ = Math.min(gridDepth - 1, slabBelow + 1);
-                if (insideGrid.get(x, y, targetZ) == 1 && obstacleGrid.get(x, y, targetZ) == 0) {
-                    z = targetZ;
-                } else {
-                    // 楼板上方不可站立，则在该楼层范围内找最近的可站立 z
-                    int nextSlab = gridDepth;
-                    for (int sz : floorSlabZs) {
-                        if (sz > slabBelow) { nextSlab = sz; break; }
-                    }
-                    boolean placed = false;
-                    for (int zz = slabBelow + 1; zz < nextSlab && zz < gridDepth; zz++) {
-                        if (insideGrid.get(x, y, zz) == 1 && obstacleGrid.get(x, y, zz) == 0) {
-                            z = zz; placed = true; break;
-                        }
-                    }
-                    if (!placed) z = targetZ; // 实在找不到就放楼板上方
-                }
-            } else {
-                // 没有楼板信息，退回原重力下落逻辑
-                while (z > 0) {
-                    int below = obstacleGrid.get(x, y, z - 1);
-                    if (below == TYPE_WALL || below == TYPE_STAIR) break;
-                    if (insideGrid.get(x, y, z - 1) != 1) break;
-                    z--;
-                }
-            }
-
-            persons[i] = new Person(this, x, y, z);
-            personGrid.setObjectLocation(persons[i], x, y, z);
-            agents[i] = persons[i];
-        }
+        // 4. 人员出生规则统一由 Person 维护。
+        Person.spawnPopulation(this);
     }
 
     public void initMultipleFireSources() {
@@ -525,9 +551,7 @@ public class FireEscape extends SimState {
         return insideGrid.get(x, y, z) == 1;
     }
     public boolean isPassable(int x, int y, int z) {
-        if (!isInsideBuilding(x, y, z)) return false;
-        int v = obstacleGrid.get(x, y, z);
-        return v == TYPE_EMPTY || v == TYPE_DOOR || v == TYPE_EXIT || v == TYPE_STAIR;
+        return Person.canOccupy(this, x, y, z);
     }
     private static String fmt(double v) { return String.format("%.4f", v); }
     private static String voxelSizeToString(double v) { return String.format("%.4f", v); }

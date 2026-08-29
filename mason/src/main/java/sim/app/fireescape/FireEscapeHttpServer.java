@@ -122,10 +122,16 @@ public class FireEscapeHttpServer {
     }
 
     private static void syncInsideGridWithObstacles() {
-        for (int i=0; i<model.gridWidth; i++) for (int j=0; j<model.gridHeight; j++) {
-            if (model.obstacleGrid.get(i,j,0)==1)
-                for (int z=0; z<model.gridDepth; z++) model.insideGrid.set(i,j,z,0);
-        }
+        for (int i=0; i<model.gridWidth; i++)
+            for (int j=0; j<model.gridHeight; j++)
+                for (int z=0; z<model.gridDepth; z++) {
+                    int type = model.obstacleGrid.get(i,j,z);
+                    // 墙、柱、窗都是实体障碍；窗只参与围护，不能像门一样恢复为室内通道。
+                    if (type == FireEscape.TYPE_WALL ||
+                            type == FireEscape.TYPE_COLUMN ||
+                            type == FireEscape.TYPE_WINDOW)
+                        model.insideGrid.set(i,j,z,0);
+                }
     }
 
     private static void initModel() {
@@ -179,27 +185,8 @@ public class FireEscapeHttpServer {
         model.deadByFire = 0;
         model.deadBySmoke = 0;
         model.schedule.clear();
-        Steppable[] agents = new Steppable[model.personCount];
-        for (int i=0; i<model.personCount; i++) {
-            int x,y,z;
-            do {
-                x = model.random.nextInt(model.gridWidth);
-                y = model.random.nextInt(model.gridHeight);
-                z = model.random.nextInt(model.gridDepth);
-            } while (!(model.insideGrid.get(x,y,z)==1 && model.obstacleGrid.get(x,y,z)==0) ||
-                    model.fireGrid.get(x,y,z) > FireEscape.T_AMBIENT + 50);
-            // ★ 重力下落：降到脚下有支撑，且不离开建筑内部
-            while (z > 0) {
-                int below = model.obstacleGrid.get(x, y, z - 1);
-                if (below == FireEscape.TYPE_WALL || below == FireEscape.TYPE_STAIR) break;
-                if (model.insideGrid.get(x, y, z - 1) != 1) break;
-                z--;
-            }
-            model.persons[i] = new Person(model, x, y, z);
-            model.personGrid.setObjectLocation(model.persons[i], x, y, z);
-            agents[i] = model.persons[i];
-        }
-        model.schedule.scheduleRepeating(new RandomSequence(agents));
+        Steppable[] agents = Person.spawnPopulation(model);
+        if (agents.length > 0) model.schedule.scheduleRepeating(new RandomSequence(agents));
         fireSpread = new FireSpread();
         model.schedule.scheduleRepeating(Schedule.EPOCH, 1, fireSpread, 1);
     }

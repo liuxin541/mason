@@ -437,6 +437,25 @@
     // ================================================================
     // 3. 辅助函数
     // ================================================================
+    function voxelYToSceneZ(y, centered = true) {
+        const centerOffset = centered ? 0.5 : 0;
+        const ifcY = originOffset[1] + (y + centerOffset) * dx;
+        return -ifcY - originOffset[1];
+    }
+
+    function sceneZToVoxelY(sceneZ) {
+        return (-sceneZ - 2 * originOffset[1]) / dx;
+    }
+
+    function voxelToScene(x, y, z, centered = true) {
+        const centerOffset = centered ? 0.5 : 0;
+        return new THREE.Vector3(
+            (x + centerOffset) * dx,
+            (z + centerOffset) * dz,
+            voxelYToSceneZ(y, centered)
+        );
+    }
+
     function addLog(msg, type) {
         const t = new Date().toLocaleTimeString();
         // 用户要求移除事件日志区块：全部落到控制台，避免 DOM 操作抛错
@@ -1326,13 +1345,12 @@
         const cell = Math.min(canvasW / gridW, canvasH / gridH);
         if (walkMode && pointerLockControls) {
             const camPos = pointerLockControls.getObject().position;
-            // Three.js (x, y垂直, z水平) = 体素 (x, z垂直, y水平) * voxelSize
             camX = (camPos.x / dx) * cell;  // 体素 x → 平面图 x
-            camY = (camPos.z / dx) * cell;  // 体素 y (水平) → Three.z → 平面图 y (canvas 向下)
+            camY = sceneZToVoxelY(camPos.z) * cell;
             yaw = camera.rotation.y;
         } else {
             camX = (camera.position.x / dx) * cell;
-            camY = (camera.position.z / dx) * cell;
+            camY = sceneZToVoxelY(camera.position.z) * cell;
             yaw = camera.rotation.y;
         }
         const sx = camX * minimapView.scale + minimapView.offsetX;
@@ -1404,17 +1422,17 @@
     // 点击小地图定位主视图相机
     function focusMainView(vx, vy) {
         if (!camera || !controls) return;
-        // 体素 → Three.js 世界坐标（建筑已平移到原点，体素(x,y) → Three.js(x, *, z) 直接乘 voxelSize）
-        const targetX = vx * dx;
-        const targetZ = vy * dx;
-        const targetY = currentFloorZ * dx + 2;  // 当前楼层上方 2m
+        const target = voxelToScene(vx, vy, currentFloorZ);
+        const targetX = target.x;
+        const targetZ = target.z;
+        const targetY = target.y + 2;  // 当前楼层上方 2m
         if (walkMode && pointerLockControls) {
             pointerLockControls.getObject().position.set(targetX, targetY, targetZ);
             addLog(`🎯 飞行至 (${targetX.toFixed(1)}, ${targetY.toFixed(1)}, ${targetZ.toFixed(1)})`, 'info');
         } else {
             // 观察模式：OrbitControls 聚焦
-            controls.target.set(targetX, currentFloorZ * dx, targetZ);
-            camera.position.set(targetX + 15, currentFloorZ * dx + 15, targetZ + 15);
+            controls.target.copy(target);
+            camera.position.set(targetX + 15, target.y + 15, targetZ + 15);
             controls.update();
             addLog(`🎯 主视图聚焦到体素 (${vx}, ${vy}, z=${currentFloorZ})`, 'info');
         }
@@ -1650,15 +1668,13 @@
         const dummy = new THREE.Object3D();
 
         // ★ 遍历 3D 体素数据，仅仅提取火焰/烟雾部分
-        // 坐标系约定：体素网格 (x, y, z) 中 z 为垂直方向(对应 IFC Z)，
-        //   Three.js 中 Y 为垂直方向。因此渲染时需 Y-Z 互换：
-        //   体素 (x, y, z) → Three.js (x, z, y)
+        // 动态体素使用与当前 glTF 建筑完全相同的 IFC-Y → Three.js -Z 映射。
         for (let z = 0; z < depth; z++) {
             const yPos = z * dz + dz / 2;   // 体素 z(垂直) → Three.js y(垂直)
             for (let x = 0; x < w; x++) {
                 const xPos = x * dx + dx / 2;
                 for (let y = 0; y < h; y++) {
-                    const zPos = y * dx + dx / 2;   // 体素 y(水平) → Three.js z(水平)
+                    const zPos = voxelYToSceneZ(y);
 
                     const obs = data.obstacle[z]?.[x]?.[y];
                     const temp = data.fire[z]?.[x]?.[y] || T_AMB;
@@ -1715,15 +1731,14 @@
             voxelMesh.instanceColor.needsUpdate = true;
         }
 
-        // ★ 人员生成 (无论是否加载了 glTF，坐标与体素网络完全对齐)
+        // ★ 人员生成（使用与火、烟相同的统一坐标转换）
         // 人员数据 p = [px, py, pz] 为体素坐标 (pz 为垂直方向)
-        // Y-Z 互换后: Three.js (x, y垂直, z水平) = (px*dx, pz*dz, py*dx)
         if (data.persons && data.persons.length > 0) {
             const sphereGeo = new THREE.SphereGeometry(dx * 0.35, 8, 8);
             const sphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
             for (let p of data.persons) {
                 const sphere = new THREE.Mesh(sphereGeo, sphereMat);
-                sphere.position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
+                sphere.position.copy(voxelToScene(p[0], p[1], p[2]));
                 personGroup.add(sphere);
             }
             scene.add(personGroup);

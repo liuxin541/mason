@@ -3,7 +3,7 @@ import ifcopenshell.geom
 import numpy as np
 
 # IFC 类型 -> (分类键, 体素类型常量名) 映射
-# 体素类型: WALL=1, COLUMN=6, DOOR=3, STAIR=5（与 VoxelGrid 保持一致）
+# 体素类型: WALL=1, DOOR=3, STAIR=5, COLUMN=6, WINDOW=7（与 VoxelGrid 保持一致）
 TYPE_MAP = {
     'IfcWall':              ('walls',        'WALL'),
     'IfcWallStandardCase':  ('walls',        'WALL'),
@@ -17,7 +17,8 @@ TYPE_MAP = {
     'IfcStair':             ('stairs',       'STAIR'),
     'IfcStairFlight':       ('stairs',       'STAIR'),
     'IfcDoor':              ('doors',        'DOOR'),
-    'IfcWindow':            ('windows',      'DOOR'),
+    # 窗保留独立语义；后端将其作为围护实体，但不会允许人员通行。
+    'IfcWindow':            ('windows',      'WINDOW'),
 }
 
 

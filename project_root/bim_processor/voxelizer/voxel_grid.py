@@ -2,7 +2,8 @@ import numpy as np
 
 class VoxelGrid:
     # 定义体素类型常量
-    EMPTY, WALL, FUEL, DOOR, EXIT, STAIR, COLUMN = range(7)
+    # WINDOW 单独保留语义：它与墙一样封闭建筑边界，但不能被当作门通行。
+    EMPTY, WALL, FUEL, DOOR, EXIT, STAIR, COLUMN, WINDOW = range(8)
     
     def __init__(self, width, height, depth, voxel_size):
         self.width = int(width)
