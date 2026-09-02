@@ -1121,9 +1121,10 @@
         floorRanges = [];
         detectedFloors = [];
 
-        // 1) 收集楼板 slabZ
+        // 1) 收集楼板 slabZ（在最前面补 0 作为地面，确保 1F 不被忽略）
         if (currentData.floorSlabs && currentData.floorSlabs.length > 0) {
             for (const z of currentData.floorSlabs) slabs.push(Number(z) | 0);
+            if (slabs.length === 0 || slabs[0] > 0) slabs.unshift(0);
         } else {
             for (let z = 0; z < depth; z++) {
                 let wallCount = 0;

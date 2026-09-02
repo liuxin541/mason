@@ -46,59 +46,29 @@ public class VoxelLoader {
                         expectedWidth, expectedHeight, expectedDepth, width, height, depth));
             }
 
-            // 2. 解析体素数据 (z -> y -> x)，先填充 obstacleGrid
+            // 2. 解析体素数据 (z -> y -> x)
             for (int z = 0; z < depth; z++) {
                 for (int y = 0; y < height; y++) {
                     for (int x = 0; x < width; x++) {
                         int type = buffer.get() & 0xFF; // 无符号 byte 转为 int
+
                         obstacleGrid.set(x, y, z, type);
-                    }
-                }
-            }
 
-            // 3. ★ 采用 2D 射线扫描法 (Sweep Line / Even-Odd Rule) 精确判定建筑内部。
-            //    原理：对每一列 (x,y) 从下往上 (z=0..depth) 扫描，
-            //    每遇到一个墙体/楼梯就翻转一次 inside 状态。
-            //    这样能正确处理 L 形、U 形等不规则轮廓的建筑，避免 AABB 包围盒法
-            //    将建筑“空缺处”（如天井、缺角）误判为室内。
-            //    注意：此方法要求 Python 端已将楼板/屋顶 slab 也体素化为 WALL，
-            //    否则楼层间无分隔会导致穿透判定错误。
-            int wallCount = 0;
-
-            // 4. 计算 insideGrid / fuelGrid / exits
-            for (int x = 0; x < width; x++) {
-                for (int y = 0; y < height; y++) {
-                    boolean inside = false;
-                    for (int z = 0; z < depth; z++) {
-                        int type = obstacleGrid.get(x, y, z);
-                        if (type == FireEscape.TYPE_WALL) {
+                        if (type == FireEscape.TYPE_WALL || type == FireEscape.TYPE_STAIR) {
                             insideGrid.set(x, y, z, 0);
                             fuelGrid.set(x, y, z, 0);
-                            inside = !inside;
-                            wallCount++;
-                        } else if (type == FireEscape.TYPE_STAIR) {
-                            insideGrid.set(x, y, z, 1);
-                            fuelGrid.set(x, y, z, 0);
                         } else {
-                            if (inside) {
-                                insideGrid.set(x, y, z, 1);
-                                if (type == FireEscape.TYPE_FUEL) {
-                                    fuelGrid.set(x, y, z, 80);
-                                } else {
-                                    fuelGrid.set(x, y, z, 0);
-                                }
-                                if (type == FireEscape.TYPE_EXIT) {
-                                    exits.add(new int[]{x, y, z});
-                                }
-                            } else {
-                                insideGrid.set(x, y, z, 0);
-                                fuelGrid.set(x, y, z, 0);
+                            insideGrid.set(x, y, z, 1);
+                            if (type == FireEscape.TYPE_FUEL) {
+                                fuelGrid.set(x, y, z, 80); // 默认燃料量
+                            } else if (type == FireEscape.TYPE_EXIT) {
+                                // 将出口坐标存入列表
+                                exits.add(new int[]{x, y, z});
                             }
                         }
                     }
                 }
             }
-            System.out.println("[VoxelLoader] 射线扫描完成: 墙体/楼梯翻转次数 = " + wallCount);
         }
     }
 }

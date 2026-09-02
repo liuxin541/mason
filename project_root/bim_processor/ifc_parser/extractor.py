@@ -22,15 +22,24 @@ TYPE_MAP = {
 }
 
 
-def _world_bbox(shape):
+def _world_bbox(shape, use_world_coords):
     """从 ifcopenshell 几何形状计算世界坐标 AABB。
-    shape.transformation.matrix 为 4x4 行优先矩阵（行向量约定 world = local · M）。
+
+    当 settings.USE_WORLD_COORDS=True 时，verts 已是世界坐标，直接取极值；
+    否则回退到手动矩阵变换（行向量约定 world = local · M，M 为 4x4 行优先）。
     返回 [xmin, ymin, zmin, xmax, ymax, zmax] 或 None。
     """
     verts = shape.geometry.verts
     if not verts:
         return None
 
+    if use_world_coords:
+        xs = verts[0::3]
+        ys = verts[1::3]
+        zs = verts[2::3]
+        return [min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)]
+
+    # 回退：手动变换（仅当 USE_WORLD_COORDS 不可用时）
     xs = verts[0::3]
     ys = verts[1::3]
     zs = verts[2::3]
@@ -50,10 +59,11 @@ def _world_bbox(shape):
     return [min(wxs), min(wys), min(wzs), max(wxs), max(wys), max(wzs)]
 
 
-def _extract_mesh(shape):
+def _extract_mesh(shape, use_world_coords):
     """从 ifcopenshell shape 提取世界坐标三角网格。
 
     create_shape 默认应用 IfcOpeningElement，墙几何已自动减去洞口。
+    当 USE_WORLD_COORDS=True 时 verts 已是世界坐标；否则手动变换。
     返回 (verts_world: np.array[N,3], faces: np.array[M,3]) 或 None。
     """
     geo = shape.geometry
@@ -61,16 +71,19 @@ def _extract_mesh(shape):
     if not verts_local or len(verts_local) < 9:
         return None
 
-    m = shape.transformation.matrix
     n = len(verts_local) // 3
     arr = np.asarray(verts_local[:n * 3], dtype=np.float64).reshape(-1, 3)
 
-    # 行向量约定: world = local · M （M 为 4x4 行优先）
-    verts_world = np.column_stack([
-        arr[:, 0] * m[0] + arr[:, 1] * m[4] + arr[:, 2] * m[8]  + m[12],
-        arr[:, 0] * m[1] + arr[:, 1] * m[5] + arr[:, 2] * m[9]  + m[13],
-        arr[:, 0] * m[2] + arr[:, 1] * m[6] + arr[:, 2] * m[10] + m[14],
-    ])
+    if use_world_coords:
+        verts_world = arr
+    else:
+        # 回退：行向量约定 world = local · M （M 为 4x4 行优先）
+        m = shape.transformation.matrix
+        verts_world = np.column_stack([
+            arr[:, 0] * m[0] + arr[:, 1] * m[4] + arr[:, 2] * m[8]  + m[12],
+            arr[:, 0] * m[1] + arr[:, 1] * m[5] + arr[:, 2] * m[9]  + m[13],
+            arr[:, 0] * m[2] + arr[:, 1] * m[6] + arr[:, 2] * m[10] + m[14],
+        ])
 
     # 面索引：ifcopenshell 的 faces 为扁平化三角形索引 [i0,i1,i2, ...]
     faces_raw = getattr(geo, 'faces', None)
@@ -90,6 +103,25 @@ def _extract_mesh(shape):
     return verts_world, faces
 
 
+def _get_opening_bbox(ent, settings, use_world_coords):
+    """获取门/窗对应的洞口(IfcOpeningElement)的 bbox。
+    洞口在墙上的位置才是真正需要开洞的位置，门板/窗板本身可能偏移到墙的一侧。
+    """
+    # IFC2X3: IfcDoor/IfcWindow.FillsVoids -> IfcRelFillsElement -> RelatingOpeningElement
+    if hasattr(ent, 'FillsVoids') and ent.FillsVoids:
+        for rel in ent.FillsVoids:
+            opening = rel.RelatingOpeningElement
+            try:
+                shape = ifcopenshell.geom.create_shape(settings, opening)
+                if shape:
+                    bbox = _world_bbox(shape, use_world_coords)
+                    if bbox:
+                        return bbox
+            except Exception:
+                continue
+    return None
+
+
 def extract_elements(ifc_file):
     """从 IFC 文件提取全部建筑构件的三角网格与包围盒。
 
@@ -99,6 +131,18 @@ def extract_elements(ifc_file):
     """
     elements = {key: [] for key in set(v[0] for v in TYPE_MAP.values())}
     settings = ifcopenshell.geom.settings()
+
+    # ★ 精度改进：直接输出世界坐标，避免手动矩阵变换引入的浮点误差
+    #   同时确保洞口减除（默认开启）、缝合壳体（提升水密性，利于内部填充）
+    use_world_coords = True
+    try:
+        settings.set(settings.USE_WORLD_COORDS, True)
+    except Exception:
+        use_world_coords = False
+    try:
+        settings.set(settings.SEW_SHELLS, True)
+    except Exception:
+        pass
 
     stats = {}
     for ifc_type, (category, voxel_type) in TYPE_MAP.items():
@@ -111,10 +155,16 @@ def extract_elements(ifc_file):
                 shape = ifcopenshell.geom.create_shape(settings, ent)
                 if not shape:
                     continue
-                bbox = _world_bbox(shape)
+                bbox = _world_bbox(shape, use_world_coords)
                 if not bbox:
                     continue
-                mesh = _extract_mesh(shape)
+                # ★ 精度改进：门/窗用洞口(IfcOpeningElement)的 bbox，
+                #   确保开洞位置在墙上，而不是偏移到房间一侧的门板位置
+                if ifc_type in ('IfcDoor', 'IfcWindow'):
+                    opening_bbox = _get_opening_bbox(ent, settings, use_world_coords)
+                    if opening_bbox:
+                        bbox = opening_bbox
+                mesh = _extract_mesh(shape, use_world_coords)
                 if mesh is not None:
                     verts, faces = mesh
                     elements[category].append({

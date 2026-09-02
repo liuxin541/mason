@@ -10,6 +10,7 @@ import java.util.regex.Pattern;
 
 public class SemanticInfo {
     public int floorCount;
+    public List<Integer> floorSlabs = new ArrayList<>();
     public List<int[]> stairPositions = new ArrayList<>();
 
     public static SemanticInfo loadFromJson(String filePath) throws IOException {
@@ -23,12 +24,25 @@ public class SemanticInfo {
             info.floorCount = Integer.parseInt(fm.group(1));
         }
 
+        // 提取楼板层 z 坐标
+        Pattern slabPattern = Pattern.compile("\"floor_slabs\"\\s*:\\s*\\[([^\\]]*)\\]");
+        Matcher sm = slabPattern.matcher(content);
+        if (sm.find()) {
+            String[] nums = sm.group(1).split(",");
+            for (String num : nums) {
+                num = num.trim();
+                if (!num.isEmpty()) {
+                    info.floorSlabs.add(Integer.parseInt(num));
+                }
+            }
+        }
+
         // 提取所有楼梯坐标
         Pattern stairPattern = Pattern.compile("\\[(\\d+),(\\d+)\\]");
-        Matcher sm = stairPattern.matcher(content);
-        while (sm.find()) {
-            int x = Integer.parseInt(sm.group(1));
-            int y = Integer.parseInt(sm.group(2));
+        Matcher stm = stairPattern.matcher(content);
+        while (stm.find()) {
+            int x = Integer.parseInt(stm.group(1));
+            int y = Integer.parseInt(stm.group(2));
             info.stairPositions.add(new int[]{x, y});
         }
 

@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import math
+import numpy as np
 import shutil
 import subprocess
 import importlib.util
@@ -11,7 +12,7 @@ import importlib.util
 from ifc_parser.loader import load_ifc
 from ifc_parser.extractor import extract_elements
 from voxelizer.voxel_grid import VoxelGrid
-from voxelizer.builder import build_from_elements, build_test_map
+from voxelizer.builder import build_from_elements, build_test_map, seal_exterior, fix_stair_vertical_connectivity, clip_penetrating_elements, fix_room_connectivity, fill_slab_gaps, seal_isolated_air, post_process_cleanup
 from exporter.voxel_writer import write_voxel
 from exporter.debug_vis import generate_debug_slice
 
@@ -94,6 +95,23 @@ def main():
             logger.close()
             return
 
+        # 提取楼层信息（IfcBuildingStorey），失败不影响主流程
+        floor_count = 1
+        floor_elevations = [0.0]
+        try:
+            storeys = ifc_file.by_type('IfcBuildingStorey')
+            floor_count = len(storeys)
+            floor_elevations = []
+            for s in storeys:
+                elev = getattr(s, 'Elevation', None)
+                if elev is not None:
+                    floor_elevations.append(float(elev) / 1000.0 if abs(elev) > 100 else float(elev))
+                else:
+                    floor_elevations.append(0.0)
+            logger.log(f'[INFO] 识别到 {floor_count} 个楼层')
+        except Exception as e:
+            logger.log(f'[WARN] 楼层提取失败，使用默认值: {e}')
+
         logger.log("[INFO] IFC 加载成功，正在提取建筑元素...")
         elements = extract_elements(ifc_file)
         total_elements = sum(len(v) for v in elements.values())
@@ -133,10 +151,69 @@ def main():
 
         grid = VoxelGrid(width=int(width), height=int(height), depth=int(depth), voxel_size=args.voxel_size)
         build_from_elements(grid, elements, origin_shift)
+        fix_stair_vertical_connectivity(grid)
+        clip_penetrating_elements(grid)  # 清除穿透楼板的墙和窗，防止人员在屋顶生成
+        seal_exterior(grid)  # 封闭外部空气，防止人员在楼外生成
+        seal_isolated_air(grid)  # 封闭被墙包围的孤立空气区域（无门/出口/楼梯）
+        fill_slab_gaps(grid)  # 填充楼板层空气缺口（楼梯井除外）
+        fix_room_connectivity(grid)  # 打通小房间，修复连通性
+        post_process_cleanup(grid)  # 后处理：清除楼板层孤立门，验证出口连通性
         # 坐标系统统一元数据：所有端 (Python/Java/前端) 都以本字段为权威来源
+        # 从体素数据提取楼梯位置（去重 x,y 坐标）
+        stair_coords = set()
+        stair_indices = np.argwhere(grid.data == VoxelGrid.STAIR)
+        for z, y, x in stair_indices:
+            stair_coords.add((int(x), int(y)))
+        stair_positions = [list(p) for p in sorted(stair_coords)]
+        logger.log(f'[INFO] 提取到 {len(stair_positions)} 个楼梯水平位置')
+
+        # 检测楼板层：非空气体素占比在 80%~95% 之间的层视为楼板
+        # 排除 >95% 的全墙层（seal_exterior 封闭的屋顶以上区域）
+        # 合并连续的楼板层（如双层楼板），只保留每层的起始 z
+        raw_slabs = []
+        for z in range(grid.depth):
+            layer = grid.data[z]
+            non_empty = int(np.sum(layer != VoxelGrid.EMPTY))
+            ratio = non_empty / (grid.width * grid.height)
+            if 0.80 < ratio < 0.95:
+                raw_slabs.append(z)
+        # 合并连续的楼板层，只保留每组的第一个
+        merged_slabs = []
+        prev = -10
+        for z in raw_slabs:
+            if z - prev > 1:
+                merged_slabs.append(z)
+            prev = z
+        # 过滤：只保留上方有真正活动楼层（非楼板层）且有门的楼板
+        # 屋顶楼板上方是全墙层，不应作为独立楼层显示
+        floor_slabs = []
+        for i, slab_z in enumerate(merged_slabs):
+            # 找到当前楼板组的最后一层（连续楼板）
+            slab_end = slab_z
+            while slab_end + 1 < grid.depth:
+                ratio = np.sum(grid.data[slab_end + 1] != VoxelGrid.EMPTY) / (grid.width * grid.height)
+                if ratio > 0.80:
+                    slab_end += 1
+                else:
+                    break
+            # 检查楼板组上方是否有活动楼层（非空气占比 < 80%）且有门
+            next_slab = merged_slabs[i + 1] if i + 1 < len(merged_slabs) else grid.depth
+            has_active_floor_with_door = False
+            for z in range(slab_end + 1, next_slab):
+                layer = grid.data[z]
+                ratio = np.sum(layer != VoxelGrid.EMPTY) / (grid.width * grid.height)
+                if ratio < 0.80 and int(np.sum(layer == 3)) > 0:
+                    has_active_floor_with_door = True
+                    break
+            if has_active_floor_with_door:
+                floor_slabs.append(slab_z)
+        logger.log(f'[INFO] 检测到 {len(floor_slabs)} 个楼板层: z={floor_slabs} (合并后 {len(merged_slabs)} 层, 原始 {len(raw_slabs)} 层)')
+
         semantic_info = {
-            "floors": 1,
-            "stair_positions": [],
+            "floors": len(floor_slabs) + 1,  # 活动楼层数 = 楼板数 + 1
+            "floor_elevations": floor_elevations,
+            "floor_slabs": floor_slabs,
+            "stair_positions": stair_positions,
             # 体素网格尺寸（整数索引上限 +1）
             "grid_dims": [int(grid.width), int(grid.height), int(grid.depth)],
             # 建筑在世界坐标中的轴对齐包围盒 (xmin, ymin, zmin, xmax, ymax, zmax)

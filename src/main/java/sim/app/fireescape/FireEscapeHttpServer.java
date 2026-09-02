@@ -538,7 +538,13 @@ public class FireEscapeHttpServer {
         sb.append("\"width\":").append(model.gridWidth).append(",");
         sb.append("\"height\":").append(model.gridHeight).append(",");
         sb.append("\"depth\":").append(model.gridDepth).append(",");
-        sb.append("\"floorSlabs\":[0,17,34,51],");
+        // 从语义信息读取真实楼板层位置，不再硬编码
+        sb.append("\"floorSlabs\":[");
+        for (int i = 0; i < model.floorSlabs.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(model.floorSlabs.get(i));
+        }
+        sb.append("],");
 
         sb.append("\"fire\":[");
         for (int z=0; z<model.gridDepth; z++) {

@@ -34,7 +34,6 @@ public class FireEscapeHttpServer {
     private static int[][] customObstacles = null;
     private static int[][] customInside = null;
     private static List<int[]> customFireSources = null;
-    private static boolean noFireMode = false;  // ★ 无火模式：只观察人员行为，不点火
 
     // ---- 一键启动配置参数 ----
     private static int serverPort = 8080;
@@ -47,7 +46,6 @@ public class FireEscapeHttpServer {
         initModel();
         server = HttpServer.create(new InetSocketAddress(serverPort), 0);
         server.createContext("/", new IndexHandler());
-        server.createContext("/ifc_output", new StaticFileHandler("ifc_output"));
         server.createContext("/state", new StateHandler());
         server.createContext("/command", new CommandHandler());
         server.createContext("/listMaps", new ListMapsHandler());
@@ -56,6 +54,9 @@ public class FireEscapeHttpServer {
         server.createContext("/uploadMapImage", new UploadMapImageHandler());
         server.createContext("/setBoundary", new SetBoundaryHandler());
         server.createContext("/setFireSources", new SetFireSourcesHandler());
+        // 静态文件服务：ifc_output/ 和 test_output/ 目录
+        server.createContext("/ifc_output/", new StaticFileHandler("ifc_output"));
+        server.createContext("/test_output/", new StaticFileHandler("test_output"));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
         System.out.println("Web 界面已启动: http://localhost:" + serverPort);
@@ -122,16 +123,10 @@ public class FireEscapeHttpServer {
     }
 
     private static void syncInsideGridWithObstacles() {
-        for (int i=0; i<model.gridWidth; i++)
-            for (int j=0; j<model.gridHeight; j++)
-                for (int z=0; z<model.gridDepth; z++) {
-                    int type = model.obstacleGrid.get(i,j,z);
-                    // 墙、柱、窗都是实体障碍；窗只参与围护，不能像门一样恢复为室内通道。
-                    if (type == FireEscape.TYPE_WALL ||
-                            type == FireEscape.TYPE_COLUMN ||
-                            type == FireEscape.TYPE_WINDOW)
-                        model.insideGrid.set(i,j,z,0);
-                }
+        for (int i=0; i<model.gridWidth; i++) for (int j=0; j<model.gridHeight; j++) {
+            if (model.obstacleGrid.get(i,j,0)==1)
+                for (int z=0; z<model.gridDepth; z++) model.insideGrid.set(i,j,z,0);
+        }
     }
 
     private static void initModel() {
@@ -161,32 +156,36 @@ public class FireEscapeHttpServer {
         }
         syncInsideGridWithObstacles();
 
-        if (noFireMode) {
-            // ★ 无火模式：清空火源，火场保持环境温度
-            model.fireSourcePositions.clear();
-            for (int i=0; i<model.gridWidth; i++)
-                for (int j=0; j<model.gridHeight; j++)
-                    for (int z=0; z<model.gridDepth; z++)
-                        model.fireGrid.set(i, j, z, FireEscape.T_AMBIENT);
-        } else if (customFireSources != null && !customFireSources.isEmpty()) {
+        if (customFireSources != null && !customFireSources.isEmpty()) {
             model.fireSourcePositions.clear();
             for (int[] p : customFireSources) {
                 if (model.insideGrid.get(p[0],p[1],0)==1 && model.obstacleGrid.get(p[0],p[1],0)==0)
                     model.fireSourcePositions.add(new int[]{p[0], p[1], 0});
             }
             if (model.fireSourcePositions.isEmpty()) model.generateRandomFireSources();
-            model.initMultipleFireSources();
         } else {
             model.fireSourcePositions.clear();
             model.generateRandomFireSources();
-            model.initMultipleFireSources();
         }
+        model.initMultipleFireSources();
         model.initExits();
         model.deadByFire = 0;
         model.deadBySmoke = 0;
         model.schedule.clear();
-        Steppable[] agents = Person.spawnPopulation(model);
-        if (agents.length > 0) model.schedule.scheduleRepeating(new RandomSequence(agents));
+        Steppable[] agents = new Steppable[model.personCount];
+        for (int i=0; i<model.personCount; i++) {
+            int x,y,z;
+            do {
+                x = model.random.nextInt(model.gridWidth);
+                y = model.random.nextInt(model.gridHeight);
+                z = model.random.nextInt(model.gridDepth);
+            } while (!(model.insideGrid.get(x,y,z)==1 && model.obstacleGrid.get(x,y,z)==0) ||
+                    model.fireGrid.get(x,y,z) > FireEscape.T_AMBIENT + 50);
+            model.persons[i] = new Person(model, x, y, z);
+            model.personGrid.setObjectLocation(model.persons[i], x, y, z);
+            agents[i] = model.persons[i];
+        }
+        model.schedule.scheduleRepeating(new RandomSequence(agents));
         fireSpread = new FireSpread();
         model.schedule.scheduleRepeating(Schedule.EPOCH, 1, fireSpread, 1);
     }
@@ -264,65 +263,65 @@ public class FireEscapeHttpServer {
         }
     }
 
-    /**
-     * 静态文件处理器：将 URL 路径映射到本地文件目录，防止路径穿越攻击。
-     */
-    static class StaticFileHandler implements HttpHandler {
-        private final File baseDir;
-
-        public StaticFileHandler(String dir) {
-            this.baseDir = new File(dir);
-        }
-
-        @Override
-        public void handle(HttpExchange exchange) throws IOException {
-            String path = exchange.getRequestURI().getPath();
-            // 去掉上下文前缀 "/ifc_output"
-            if (path.startsWith("/ifc_output")) path = path.substring("/ifc_output".length());
-            if (path.startsWith("/")) path = path.substring(1);
-            if (path.isEmpty()) path = "index.html";
-
-            // 安全：防止路径穿越
-            File requested = new File(baseDir, path);
-            File canonical = requested.getCanonicalFile();
-            if (!canonical.getPath().startsWith(baseDir.getCanonicalPath())) {
-                exchange.sendResponseHeaders(403, -1);
-                return;
-            }
-            if (!canonical.exists() || canonical.isDirectory()) {
-                exchange.sendResponseHeaders(404, -1);
-                return;
-            }
-
-            String contentType = guessContentType(canonical.getName());
-            byte[] data = Files.readAllBytes(canonical.toPath());
-            exchange.getResponseHeaders().set("Content-Type", contentType + ";charset=UTF-8");
-            exchange.getResponseHeaders().set("Content-Length", String.valueOf(data.length));
-            exchange.sendResponseHeaders(200, data.length);
-            try (OutputStream os = exchange.getResponseBody()) { os.write(data); }
-        }
-
-        private static String guessContentType(String name) {
-            String lower = name.toLowerCase();
-            if (lower.endsWith(".glb") || lower.endsWith(".gltf")) return "model/gltf-binary";
-            if (lower.endsWith(".json")) return "application/json";
-            if (lower.endsWith(".voxel")) return "application/octet-stream";
-            if (lower.endsWith(".png")) return "image/png";
-            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-            if (lower.endsWith(".gif")) return "image/gif";
-            if (lower.endsWith(".html")) return "text/html";
-            if (lower.endsWith(".js")) return "application/javascript";
-            if (lower.endsWith(".css")) return "text/css";
-            return "application/octet-stream";
-        }
-    }
-
     static class IndexHandler implements HttpHandler {
         @Override public void handle(HttpExchange exchange) throws IOException {
             byte[] bytes = htmlContent.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "text/html;charset=UTF-8");
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
+        }
+    }
+
+    /**
+     * 静态文件处理器：服务指定目录下的文件
+     */
+    static class StaticFileHandler implements HttpHandler {
+        private final String baseDir;
+
+        public StaticFileHandler(String baseDir) {
+            this.baseDir = baseDir;
+        }
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            // 去掉前缀（/ifc_output/ 或 /test_output/）
+            int idx = path.indexOf('/', 1);
+            String relativePath = idx >= 0 ? path.substring(idx + 1) : "";
+
+            // 安全检查：防止路径穿越
+            if (relativePath.contains("..") || relativePath.startsWith("/")) {
+                exchange.sendResponseHeaders(403, -1);
+                return;
+            }
+
+            File file = new File(baseDir, relativePath);
+            if (!file.exists() || !file.isFile()) {
+                exchange.sendResponseHeaders(404, -1);
+                return;
+            }
+
+            // 根据扩展名设置 Content-Type
+            String contentType = getContentType(file.getName());
+            exchange.getResponseHeaders().set("Content-Type", contentType);
+            byte[] data = Files.readAllBytes(file.toPath());
+            exchange.sendResponseHeaders(200, data.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(data);
+            }
+        }
+
+        private String getContentType(String fileName) {
+            String lower = fileName.toLowerCase();
+            if (lower.endsWith(".json")) return "application/json;charset=UTF-8";
+            if (lower.endsWith(".glb")) return "model/gltf-binary";
+            if (lower.endsWith(".gltf")) return "model/gltf+json";
+            if (lower.endsWith(".png")) return "image/png";
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+            if (lower.endsWith(".gif")) return "image/gif";
+            if (lower.endsWith(".voxel")) return "application/octet-stream";
+            if (lower.endsWith(".bin")) return "application/octet-stream";
+            return "application/octet-stream";
         }
     }
 
@@ -349,20 +348,12 @@ public class FireEscapeHttpServer {
                 if (cmd != null) {
                     if (cmd.startsWith("speed_")) { int mult = Integer.parseInt(cmd.substring(6)); setSpeed(mult); exchange.sendResponseHeaders(200, 0); return; }
                     switch (cmd) {
-                        case "start": noFireMode = false; resetModel(); startAutoStep(); break;
+                        case "start": resetModel(); startAutoStep(); break;
                         case "pause": stopAutoStep(); break;
                         case "resume": startAutoStep(); break;
                         case "step": stopAutoStep(); model.schedule.step(model); break;
-                        case "reset": noFireMode = false; resetModel(); break;
+                        case "reset": resetModel(); break;
                         case "togglePersons": model.showPersons = !model.showPersons; break;
-                        case "noFire":
-                            noFireMode = true;
-                            boolean wasRunning = autoStepRunning;
-                            if (wasRunning) stopAutoStep();
-                            initModel();
-                            if (wasRunning) startAutoStep();
-                            System.out.println("[Mode] 无火模式已开启（仅观察人员行为）");
-                            break;
                     }
                 }
             }
@@ -547,6 +538,13 @@ public class FireEscapeHttpServer {
         sb.append("\"width\":").append(model.gridWidth).append(",");
         sb.append("\"height\":").append(model.gridHeight).append(",");
         sb.append("\"depth\":").append(model.gridDepth).append(",");
+        // 从语义信息读取真实楼板层位置，不再硬编码
+        sb.append("\"floorSlabs\":[");
+        for (int i = 0; i < model.floorSlabs.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(model.floorSlabs.get(i));
+        }
+        sb.append("],");
 
         sb.append("\"fire\":[");
         for (int z=0; z<model.gridDepth; z++) {
@@ -629,39 +627,6 @@ public class FireEscapeHttpServer {
         }
         sb.append("],");
 
-        // ★ 出口位置（供小地图绘制绿色出口标记）
-        sb.append("\"exits\":[");
-        boolean firstExit=true;
-        for (int[] p : model.exits) {
-            if (!firstExit) sb.append(",");
-            sb.append("{\"x\":").append(p[0]).append(",\"y\":").append(p[1]).append(",\"z\":").append(p[2]).append("}");
-            firstExit=false;
-        }
-        sb.append("],");
-
-        // ★ 楼板层 z 索引（与 Java 端 zGround/zRoof 检测一致：墙体覆盖率 > 40% 的 z 切片）
-        sb.append("\"floorSlabs\":[");
-        java.util.List<Integer> slabs = new ArrayList<>();
-        for (int z=0; z<model.gridDepth; z++) {
-            int wallCount=0;
-            for (int i=0; i<model.gridWidth; i++)
-                for (int j=0; j<model.gridHeight; j++)
-                    if (model.obstacleGrid.get(i,j,z)==1) wallCount++;
-            if (wallCount > model.gridWidth * model.gridHeight * 0.4) slabs.add(z);
-        }
-        for (int i=0; i<slabs.size(); i++) {
-            if (i>0) sb.append(",");
-            sb.append(slabs.get(i));
-        }
-        sb.append("],");
-
-        // ★ 坐标系统参数（让前端无需单独 fetch semantic_info.json）
-        sb.append("\"voxelSize\":").append(model.deltaX).append(",");
-        sb.append("\"originOffset\":[")
-                .append(model.semanticInfo.originOffset[0]).append(",")
-                .append(model.semanticInfo.originOffset[1]).append(",")
-                .append(model.semanticInfo.originOffset[2]).append("],");
-
         if (model.showPersons) {
             sb.append("\"persons\":[");
             boolean first=true;
@@ -676,6 +641,15 @@ public class FireEscapeHttpServer {
         } else {
             sb.append("\"persons\":[]");
         }
+        // ★ 添加出口数据
+        sb.append(",\"exits\":[");
+        boolean firstExit=true;
+        for (int[] e : model.exits) {
+            if (!firstExit) sb.append(",");
+            sb.append("{\"x\":").append(e[0]).append(",\"y\":").append(e[1]).append(",\"z\":").append(e[2]).append("}");
+            firstExit=false;
+        }
+        sb.append("]");
         sb.append("}");
         return sb.toString();
     }

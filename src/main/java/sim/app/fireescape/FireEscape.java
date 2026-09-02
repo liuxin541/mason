@@ -27,6 +27,7 @@ public class FireEscape extends SimState {
     public IntGrid3D fuelGrid;
     public IntGrid3D insideGrid;
     public List<int[]> exits = new ArrayList<>();
+    public List<Integer> floorSlabs = new ArrayList<>();
 
     public Person[] persons;
     private FireSpread fireSpread;
@@ -143,16 +144,15 @@ public class FireEscape extends SimState {
                 }
             }
 
-            // 4. 处理语义信息（楼梯 2D 坐标 -> 3D 贯穿）
+            // 4. 处理语义信息（楼层、楼板位置）
             SemanticInfo semantic = SemanticInfo.loadFromJson(semanticPath);
-            for (int[] pos : semantic.stairPositions) {
-                int sx = pos[0], sy = pos[1];
-                for (int z = 0; z < depth; z++) {
-                    obstacleGrid.set(sx, sy, z, TYPE_STAIR);
-                    insideGrid.set(sx, sy, z, 0);
-                }
-            }
-            System.out.println("[BIM] 地图加载成功！尺寸: " + width + "x" + height + "x" + depth + ", 出口数量: " + exits.size());
+            floorSlabs.clear();
+            floorSlabs.addAll(semantic.floorSlabs);
+            // 注意：楼梯已在 Python 端体素化时做连通性修复，体素数据中已有正确的 3D 楼梯，
+            // 不再用 2D stairPositions 贯穿全楼（避免楼梯穿透楼板和屋顶）
+            System.out.println("[BIM] 地图加载成功！尺寸: " + width + "x" + height + "x" + depth
+                    + ", 出口数量: " + exits.size()
+                    + ", 楼板层: " + floorSlabs.size() + " 层");
             return true;
 
         } catch (Exception e) {
@@ -342,28 +342,4 @@ public class FireEscape extends SimState {
 
     public static void main(String[] args) { doLoop(FireEscape.class, args); System.exit(0); }
 
-    // ================================================================
-    // ★ 静态内部类：SemanticInfo (JSON 语义解析器)
-    // ================================================================
-    public static class SemanticInfo {
-        public int floorCount = 0;
-        public List<int[]> stairPositions = new ArrayList<>();
-
-        public static SemanticInfo loadFromJson(String filePath) throws IOException {
-            if (!Files.exists(Paths.get(filePath))) return new SemanticInfo();
-            String content = new String(Files.readAllBytes(Paths.get(filePath)));
-            SemanticInfo info = new SemanticInfo();
-            Pattern floorPattern = Pattern.compile("\"floors\"\\s*:\\s*(\\d+)");
-            Matcher fm = floorPattern.matcher(content);
-            if (fm.find()) info.floorCount = Integer.parseInt(fm.group(1));
-            Pattern stairPattern = Pattern.compile("\\[(\\d+),(\\d+)\\]");
-            Matcher sm = stairPattern.matcher(content);
-            while (sm.find()) {
-                int x = Integer.parseInt(sm.group(1));
-                int y = Integer.parseInt(sm.group(2));
-                info.stairPositions.add(new int[]{x, y});
-            }
-            return info;
-        }
-    }
 }
