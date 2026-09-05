@@ -95,6 +95,11 @@ public class FireEscape extends SimState {
     private int fireSourceCount = 1;
     public List<int[]> fireSourcePositions = new ArrayList<>();
 
+    // 每个火源的实时物理参数（与 fireSourcePositions 下标一一对应）
+    public double[] fireSourceHeatRelease = new double[0];  // kW
+    public double[] fireSourceFlameHeight = new double[0];  // m
+    public double[] fireSourcePlumeRadius = new double[0];  // m
+
     // ★ 语义信息（解析自 semantic_info.json，供 HTTP 端暴露给前端）
     public SemanticInfo semanticInfo = new SemanticInfo();
 
@@ -466,9 +471,67 @@ public class FireEscape extends SimState {
     }
 
     // ★ 重写核心启动流程：默认加载一号办公楼所在的 ifc_output，失败则回退
+    // ★ 地图模式: "building" (默认, 加载voxel) | "simple" (简单矩形房间)
+    public String mapMode = "building";
+
+    // ★ 简单矩形房间 (单层, 一个出口, 用于观察烟和火焰算法)
+    public void loadSimpleRectRoom() {
+        int w = 30, h = 20, d = 10;
+        createGrids(w, h, d);
+        exits.clear();
+
+        // 1. 四面墙
+        for (int z = 0; z < d; z++) {
+            for (int x = 0; x < w; x++) {
+                obstacleGrid.set(x, 0, z, TYPE_WALL);
+                obstacleGrid.set(x, h - 1, z, TYPE_WALL);
+            }
+            for (int y = 0; y < h; y++) {
+                obstacleGrid.set(0, y, z, TYPE_WALL);
+                obstacleGrid.set(w - 1, y, z, TYPE_WALL);
+            }
+        }
+        // 2. 地板(z=0)和天花板(z=d-1)
+        for (int x = 0; x < w; x++)
+            for (int y = 0; y < h; y++) {
+                obstacleGrid.set(x, y, 0, TYPE_WALL);
+                obstacleGrid.set(x, y, d - 1, TYPE_WALL);
+            }
+        // 3. 出口: 在右侧墙(x=w-1)中间开一个门 (z=1~2)
+        int exitY = h / 2;
+        obstacleGrid.set(w - 1, exitY, 1, TYPE_EXIT);
+        obstacleGrid.set(w - 1, exitY, 2, TYPE_EXIT);
+        exits.add(new int[]{w - 1, exitY, 1});
+
+        // 4. 同步 insideGrid / fuelGrid
+        for (int x = 0; x < w; x++)
+            for (int y = 0; y < h; y++)
+                for (int z = 0; z < d; z++) {
+                    if (obstacleGrid.get(x, y, z) == TYPE_WALL) {
+                        insideGrid.set(x, y, z, 0);
+                        fuelGrid.set(x, y, z, 0);
+                    } else {
+                        insideGrid.set(x, y, z, 1);
+                    }
+                }
+
+        // 5. 坐标参数
+        deltaX = 0.5;
+        deltaZ = 0.5;
+        this.semanticInfo = new SemanticInfo();
+        this.groundFloorMinZ = 1;
+        this.groundFloorMaxZ = d - 2;
+        System.out.println("[Simple] 已加载简单矩形房间 " + w + "x" + h + "x" + d
+                + " (出口: x=" + (w-1) + ",y=" + exitY + ",z=1)");
+    }
+
     public void start() {
         super.start();
 
+        // ★ 根据 mapMode 选择地图
+        if ("simple".equals(mapMode)) {
+            loadSimpleRectRoom();
+        } else {
         // 1. 尝试加载真实体素
         // ★ 默认指向 ifc_output（一号办公楼）；若想临时切换，可用 -Dfireescape.voxel=新路径 覆盖
         String voxelPath = System.getProperty("fireescape.voxel", "./ifc_output/voxel_grid.voxel");
@@ -481,6 +544,8 @@ public class FireEscape extends SimState {
         if (!loaded) {
             System.out.println("[Init] 回退至内建测试地图！");
             fallbackInitRealisticObstacles();
+        }
+
         }
 
         // 3. 重置状态与火源
@@ -497,6 +562,9 @@ public class FireEscape extends SimState {
     }
 
     public void initMultipleFireSources() {
+        fireSourceHeatRelease = new double[fireSourcePositions.size()];
+        fireSourceFlameHeight = new double[fireSourcePositions.size()];
+        fireSourcePlumeRadius = new double[fireSourcePositions.size()];
         for (int x = 0; x < gridWidth; x++) {
             for (int y = 0; y < gridHeight; y++) {
                 for (int z = 0; z < gridDepth; z++) {
@@ -540,6 +608,9 @@ public class FireEscape extends SimState {
                 if (pos != null) fireSourcePositions.add(pos);
             }
         }
+        fireSourceHeatRelease = new double[fireSourcePositions.size()];
+        fireSourceFlameHeight = new double[fireSourcePositions.size()];
+        fireSourcePlumeRadius = new double[fireSourcePositions.size()];
     }
 
     /** 在 (sx, sy, sz) 附近搜索最近的 inside=1 且非墙非出口体素，返回坐标或 null。 */
