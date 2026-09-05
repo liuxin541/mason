@@ -1,4 +1,4 @@
-﻿package sim.app.fireescape;
+package sim.app.fireescape;
 
 import sim.engine.*;
 import sim.field.grid.*;

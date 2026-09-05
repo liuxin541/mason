@@ -1,4 +1,4 @@
-﻿package sim.app.fireescape;
+package sim.app.fireescape;
 
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpHandler;
