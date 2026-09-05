@@ -5,9 +5,12 @@ import sim.util.*;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.TreeMap;
+import java.util.WeakHashMap;
 
 public class Person implements Steppable {
     private static final long serialVersionUID = 1L;
@@ -18,6 +21,18 @@ public class Person implements Steppable {
     private static final int STAIR_CLEARANCE_CELLS = 1;
     private static final double STAIRWELL_SEARCH_RADIUS_METERS = 4.0;
     private static final int STAIRWELL_SPAWN_INTERVAL = 4;
+    private static final double MAX_ROUTE_SMOKE = 0.8;
+    private static final double MAX_ROUTE_TEMPERATURE = FireEscape.T_DEATH - 20.0;
+    private static final double SMOKE_ROUTE_COST = 40.0;
+    private static final double HEAT_ROUTE_COST = 20.0;
+    private static final double OCCUPIED_CELL_COST = 12.0;
+    private static final double QUEUED_PERSON_COST = 8.0;
+    private static final double STAIR_SWITCH_RATIO = 0.8;
+    private static final int BLOCKED_REPLAN_ATTEMPTS = 8;
+    private static final int ROUTE_LOCK_TICKS = 20;
+    private static final int NO_PATH_RETRY_TICKS = 10;
+    private static final Map<FireEscape, NavigationData> NAVIGATION_CACHE =
+            Collections.synchronizedMap(new WeakHashMap<FireEscape, NavigationData>());
 
     public boolean alive;
     public boolean escaped;
@@ -26,6 +41,19 @@ public class Person implements Steppable {
     private int x, y, z;
     private FireEscape model;
     private int moveCooldown = 0;
+    private EvacuationPhase evacuationPhase;
+    private EvacuationPhase phaseBeforeQueue;
+    private EvacuationPhase phaseBeforeNoSafePath;
+    private int currentFloorIndex = -1;
+    private int targetFloorIndex = -1;
+    private int selectedStairId = -1;
+    private int selectedDoorPortalId = -1;
+    private int selectedDoorFloorZ = -1;
+    private int blockedMoveAttempts = 0;
+    private int routeLockTicks = 0;
+    private int noPathRetryTicks = 0;
+    private final ArrayDeque<int[]> route = new ArrayDeque<>();
+    private transient NavigationData navigation;
 
     public Person(FireEscape model, int x, int y, int z) {
         this.model = model;
@@ -36,6 +64,9 @@ public class Person implements Steppable {
         this.escaped = false;
         this.smokeExposure = 0.0;
         this.deathCause = null;
+        this.evacuationPhase = null;
+        this.phaseBeforeQueue = null;
+        this.phaseBeforeNoSafePath = null;
     }
 
     public static boolean canOccupy(FireEscape model, int x, int y, int z) {
@@ -194,6 +225,8 @@ public class Person implements Steppable {
         int spawnCount = Math.min(model.personCount, candidateCount);
         Steppable[] agents = new Steppable[spawnCount];
         List<Integer> floors = new ArrayList<>(candidatesByFloor.keySet());
+        NavigationData navigation = buildNavigationData(model, floors);
+        NAVIGATION_CACHE.put(model, navigation);
         int floorCursor = model.random.nextInt(floors.size());
         Map<Integer, Integer> spawnedByFloor = new TreeMap<>();
         Map<Integer, Integer> spawnedInStairwell = new TreeMap<>();
@@ -220,6 +253,8 @@ public class Person implements Steppable {
 
             int[] position = selectedPool.remove(model.random.nextInt(selectedPool.size()));
             Person person = new Person(model, position[0], position[1], position[2]);
+            person.navigation = navigation;
+            person.initializeEvacuationState();
             model.persons[i] = person;
             model.personGrid.setObjectLocation(person, position[0], position[1], position[2]);
             agents[i] = person;
@@ -240,6 +275,8 @@ public class Person implements Steppable {
                 ", 合法出生点=" + candidateCount +
                 ", 楼梯间候选点=" + stairwellCandidateCount +
                 ", 楼梯间室内修复=" + repairedStairwellByFloor +
+                ", 楼梯组件=" + navigation.stairwells.size() +
+                ", 疏散出口=" + navigation.exitTargets.size() +
                 ", 楼层分布=" + spawnedByFloor +
                 ", 楼梯间分布=" + spawnedInStairwell +
                 ", 已生成人员=" + spawnCount);
@@ -623,6 +660,17 @@ public class Person implements Steppable {
         }
     }
 
+    private enum EvacuationPhase {
+        SEEK_ROOM_DOOR,
+        DOOR_QUEUE,
+        SEEK_STAIR,
+        QUEUE_FOR_STAIR,
+        DESCEND_STAIR,
+        SEEK_EXIT,
+        EXIT_QUEUE,
+        NO_SAFE_PATH
+    }
+
     @Override
     public void step(SimState state) {
         FireEscape fm = (FireEscape) state;
@@ -647,144 +695,1599 @@ public class Person implements Steppable {
             fm.personGrid.remove(this); fm.recordDeath(deathCause); return;
         }
 
-        // 3. 逃生成功判定
-        if (fm.obstacleGrid.get(x, y, z) == FireEscape.TYPE_EXIT) {
-            escaped = true;
-            fm.personGrid.remove(this); return;
-        }
+        ensureNavigation();
+        initializeEvacuationState();
 
-        // 4. 移动概率判定
-        double moveProb = fm.moveProbability * (1.0 - smoke * 0.7);
-        if (moveCooldown > 0 || fm.random.nextDouble() >= moveProb) {
-            moveCooldown = Math.max(0, moveCooldown - 1);
+        // 3. 到达显式出口或从一楼外门推断出的出口后完成疏散。
+        if (isAtEvacuationExit()) {
+            markEscaped();
             return;
         }
 
-        // ============================================================
-        // ★ 核心逻辑：自动过门 + 找楼梯 + 避墙 + 底层冲出口
-        // ============================================================
-        // ============================================================
-        boolean onStair = (fm.obstacleGrid.get(x, y, z) == FireEscape.TYPE_STAIR);
-        boolean isGroundFloor = (z >= fm.groundFloorMinZ && z <= fm.groundFloorMaxZ);
-
-        int bestX = x, bestY = y, bestZ = z;
-        double bestScore = Double.MAX_VALUE;
-
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
-
-                    int nx = fm.personGrid.stx(x + dx);
-                    int ny = fm.personGrid.sty(y + dy);
-                    int nz = z + dz;
-
-                    if (nz < 0 || nz >= fm.gridDepth) continue;
-
-                    if (onStair && dz == 1) continue;
-
-                    if (!isGroundFloor && dz != 0) {
-                        if (fm.obstacleGrid.get(nx, ny, nz) != FireEscape.TYPE_STAIR &&
-                                fm.obstacleGrid.get(x, y, z) != FireEscape.TYPE_STAIR) {
-                            continue;
-                        }
-                    }
-
-                    if (!fm.isPassable(nx, ny, nz)) continue;
-
-                    double fireVal = fm.fireGrid.get(nx, ny, nz);
-                    double smokeVal = fm.getSmokeAt(nx, ny, nz);
-                    if (fireVal >= FireEscape.T_DEATH - 20.0) continue;
-                    if (smokeVal >= 0.8) continue;
-
-                    double currentScore = 0.0;
-                    double minTargetDist = Double.MAX_VALUE;
-
-                    if (isGroundFloor) {
-                        for (int[] exit : fm.exits) {
-                            double d = Math.sqrt(Math.pow(nx - exit[0], 2) + Math.pow(ny - exit[1], 2) + Math.pow(nz - exit[2], 2));
-                            if (d < minTargetDist) minTargetDist = d;
-                        }
-                    } else {
-                        if (fm.obstacleGrid.get(nx, ny, nz) == FireEscape.TYPE_STAIR) {
-                            minTargetDist = -100.0;
-                        } else {
-                            double minStairDist = Double.MAX_VALUE;
-                            for (int[] stair : fm.semanticInfo.stairPositions) {
-                                double d = Math.sqrt(Math.pow(nx - stair[0], 2) + Math.pow(ny - stair[1], 2));
-                                if (d < minStairDist) minStairDist = d;
-                            }
-                            minTargetDist = minStairDist * 2.0;
-                        }
-                    }
-
-                    double wallPenalty = 0.0;
-                    int wallCheckX = fm.personGrid.stx(x + dx * 2);
-                    int wallCheckY = fm.personGrid.sty(y + dy * 2);
-                    if (fm.obstacleGrid.get(wallCheckX, wallCheckY, nz) == FireEscape.TYPE_WALL) {
-                        wallPenalty = 100.0;
-                    }
-
-                    if (fm.obstacleGrid.get(nx, ny, nz) == FireEscape.TYPE_DOOR) {
-                        currentScore -= 50.0;
-                    }
-
-                    currentScore = minTargetDist + wallPenalty;
-
-                    if (currentScore < bestScore) {
-                        bestScore = currentScore;
-                        bestX = nx; bestY = ny; bestZ = nz;
-                    }
-                }
-            }
-        }
-        // ★ 暴力破除死锁：如果算了半天原地没动，强行推一把
-        if (bestX == x && bestY == y && bestZ == z) {
-            int[][] dirs = {{0,1},{1,0},{0,-1},{-1,0}};
-            for (int[] d : dirs) {
-                int nx = fm.personGrid.stx(x + d[0]);
-                int ny = fm.personGrid.sty(y + d[1]);
-                if (fm.isPassable(nx, ny, z)) {
-                    bestX = nx; bestY = ny; bestZ = z;
-                    break;
-                }
-            }
-            if (bestX == x && bestY == y && bestZ == z) {
-                int nz = z - 1;
-                if (nz >= 0 && fm.insideGrid.get(x, y, nz) == 1) {
-                    bestX = x; bestY = y; bestZ = nz;
-                }
-            }
+        // 4. 烟气会降低移动概率；路径和排队状态仍保留到下一次移动机会。
+        double moveProb = fm.moveProbability * (1.0 - smoke * 0.7);
+        if (moveCooldown > 0 || fm.random.nextDouble() >= moveProb) {
+            moveCooldown = Math.max(0, moveCooldown - 1);
+            if (routeLockTicks > 0) routeLockTicks--;
+            if (noPathRetryTicks > 0) noPathRetryTicks--;
+            return;
         }
 
-        // 执行移动
-        if (bestX != x || bestY != y || bestZ != z) {
-            fm.personGrid.setObjectLocation(this, bestX, bestY, bestZ);
-            x = bestX; y = bestY; z = bestZ;
-            moveCooldown = 4;
-        } else {
+        if (routeLockTicks > 0) routeLockTicks--;
+        if (noPathRetryTicks > 0) {
+            noPathRetryTicks--;
+            return;
+        }
+
+        if (!ensureRoute()) {
             moveCooldown = 1;
+            return;
         }
-        // ★ 移动后重力校正：下落到楼板/楼梯上，且不离开建筑内部
-        while (z > 0) {
-            int below = fm.obstacleGrid.get(x, y, z - 1);
-            if (below == FireEscape.TYPE_WALL || below == FireEscape.TYPE_STAIR) break;
-            if (fm.insideGrid.get(x, y, z - 1) != 1) break;
-            z--;
-        }
-        fm.personGrid.setObjectLocation(this, x, y, z);
 
-        // 移动后检查高温
+        int[] next = route.peekFirst();
+        if (next == null) {
+            moveCooldown = 1;
+            return;
+        }
+
+        // 路线上出现新的烟火危险时立即废弃路径，下次重新评估楼梯或出口。
+        if (!isRouteCellSafe(fm, next[0], next[1], next[2]) ||
+                !isNavigationCell(fm, next[0], next[1], next[2])) {
+            invalidateRouteForHazard();
+            moveCooldown = 1;
+            return;
+        }
+
+        // 一个体素同一时刻只允许一个人占用。楼梯口被占用时原地排队，
+        // 不再随机绕行或与前方人员重叠，从而让拥堵自然向走廊回溢。
+        if (fm.personGrid.numObjectsAtLocation(next[0], next[1], next[2]) > 0) {
+            enterQueueState(next);
+            blockedMoveAttempts++;
+            if (blockedMoveAttempts >= BLOCKED_REPLAN_ATTEMPTS) {
+                reconsiderBlockedRoute();
+            }
+            moveCooldown = 1;
+            return;
+        }
+
+        leaveQueueState();
+        route.removeFirst();
+        fm.personGrid.setObjectLocation(this, next[0], next[1], next[2]);
+        x = next[0];
+        y = next[1];
+        z = next[2];
+        blockedMoveAttempts = 0;
+        moveCooldown = fm.obstacleGrid.get(x, y, z) == FireEscape.TYPE_STAIR ? 4 : 2;
+
+        if (route.isEmpty()) completeRouteLeg();
+        if (isAtEvacuationExit()) {
+            markEscaped();
+            return;
+        }
+
+        // 移动后再次检查高温，避免人物进入刚刚恶化的火场格后多存活一个时间步。
         fire = fm.fireGrid.get(x, y, z);
         if (fire >= FireEscape.T_DEATH) {
             alive = false; deathCause = "fire";
             fm.personGrid.remove(this); fm.recordDeath(deathCause);
         }
+    }
 
+    private void ensureNavigation() {
+        if (navigation != null) return;
+        navigation = NAVIGATION_CACHE.get(model);
+        if (navigation == null) {
+            List<Integer> floors = detectValidFloors(model);
+            navigation = buildNavigationData(model, floors);
+            NAVIGATION_CACHE.put(model, navigation);
+        }
+    }
+
+    private void initializeEvacuationState() {
+        if (evacuationPhase != null) return;
+        currentFloorIndex = nearestFloorIndex(navigation.floorLevels, z);
+        currentFloorIndex = Math.max(0, currentFloorIndex);
+        evacuationPhase = selectPhaseForCurrentSpace();
+    }
+
+    /**
+     * 每到一个新楼层或穿过一道门后，重新判断人物是否仍在门分隔区域内。
+     * 只有已经进入与楼梯/出口直接连通的区域，才开始寻找楼梯或出口；
+     * 这样房间人员不会隔着墙直接搜索楼梯，也不会误选通往其他房间的近门。
+     */
+    private EvacuationPhase selectPhaseForCurrentSpace() {
+        FloorDoorGraph floorGraph = navigation.getFloorDoorGraph(currentFloorIndex);
+        if (floorGraph != null && floorGraph.requiresDoorTraversal(x, y)) {
+            return EvacuationPhase.SEEK_ROOM_DOOR;
+        }
+        return primaryPhaseForFloor();
+    }
+
+    private EvacuationPhase primaryPhaseForFloor() {
+        return currentFloorIndex <= 0 ?
+                EvacuationPhase.SEEK_EXIT : EvacuationPhase.SEEK_STAIR;
+    }
+
+    /**
+     * 按疏散阶段生成一段路径，而不是每一步重新贪心选择方向：
+     * 高层先到选定楼梯，进入后保持同一楼梯连续下降，到达一楼后才转向出口。
+     */
+    private boolean ensureRoute() {
+        for (int transitions = 0; transitions < 4; transitions++) {
+            if (!route.isEmpty()) return true;
+
+            if (evacuationPhase == EvacuationPhase.QUEUE_FOR_STAIR ||
+                    evacuationPhase == EvacuationPhase.DOOR_QUEUE ||
+                    evacuationPhase == EvacuationPhase.EXIT_QUEUE) {
+                leaveQueueState();
+            }
+
+            if (evacuationPhase == EvacuationPhase.NO_SAFE_PATH) {
+                // 暂时无路不等于疏散阶段结束。特别是人在楼梯中等待烟火消退时，
+                // 必须恢复 DESCEND_STAIR，不能误回到“寻找本层楼梯”而原地卡死。
+                evacuationPhase = phaseBeforeNoSafePath == null ?
+                        selectPhaseForCurrentSpace() :
+                        phaseBeforeNoSafePath;
+                phaseBeforeNoSafePath = null;
+            }
+
+            if (evacuationPhase == EvacuationPhase.SEEK_ROOM_DOOR) {
+                if (planRouteThroughNextDoor()) return true;
+                // 到达下一门分区时可能已经进入走廊，也可能还需继续穿过防火门。
+                // 让状态重新判断后在本次时间步继续生成下一段路线。
+                if (evacuationPhase != EvacuationPhase.SEEK_ROOM_DOOR) continue;
+                setNoSafePath();
+                return false;
+            }
+
+            if (evacuationPhase == EvacuationPhase.SEEK_EXIT) {
+                PathResult exitPath = findPath(new ExitGoal(navigation), false, null);
+                if (installPathOrWait(exitPath)) return true;
+                if (isAtEvacuationExit()) {
+                    markEscaped();
+                    return false;
+                }
+                continue;
+            }
+
+            if (evacuationPhase == EvacuationPhase.SEEK_STAIR) {
+                if (planRouteToBestStair()) return true;
+                // 人物可能已经位于选定楼梯入口，此时 A* 返回零长度路径；
+                // 直接进入下楼阶段，不把“已经到达”误判成无路可走。
+                if (evacuationPhase == EvacuationPhase.DESCEND_STAIR) continue;
+                setNoSafePath();
+                return false;
+            }
+
+            if (evacuationPhase == EvacuationPhase.DESCEND_STAIR) {
+                if (currentFloorIndex <= 0) {
+                    evacuationPhase = EvacuationPhase.SEEK_EXIT;
+                    selectedStairId = -1;
+                    continue;
+                }
+                targetFloorIndex = currentFloorIndex - 1;
+                Stairwell stairwell = navigation.getStairwell(selectedStairId);
+                if (stairwell == null) {
+                    evacuationPhase = EvacuationPhase.SEEK_STAIR;
+                    continue;
+                }
+                int landingZ = navigation.floorLevels.get(targetFloorIndex);
+                PathResult descentPath = findPath(
+                        new LandingGoal(stairwell, landingZ, model),
+                        true,
+                        stairwell);
+                if (installPathOrWait(descentPath)) return true;
+                if (isAtLanding(stairwell, landingZ)) {
+                    completeRouteLeg();
+                    continue;
+                }
+
+                // 当前楼梯无法到达下一层时，不允许随机下坠；只有已回到平台后
+                // 才重新选择其他楼梯，否则保持原位等待路径恢复。
+                if (model.obstacleGrid.get(x, y, z) != FireEscape.TYPE_STAIR) {
+                    selectedStairId = -1;
+                    evacuationPhase = EvacuationPhase.SEEK_STAIR;
+                    continue;
+                }
+                setNoSafePath();
+                return false;
+            }
+        }
+        return !route.isEmpty();
+    }
+
+    private boolean planRouteThroughNextDoor() {
+        FloorDoorGraph floorGraph = navigation.getFloorDoorGraph(currentFloorIndex);
+        if (floorGraph == null) return false;
+
+        int currentZone = floorGraph.resolveZoneAt(x, y);
+        if (currentZone < 0) return false;
+        if (floorGraph.egressDistance(currentZone) == 0) {
+            selectedDoorPortalId = -1;
+            selectedDoorFloorZ = -1;
+            evacuationPhase = primaryPhaseForFloor();
+            return false;
+        }
+
+        DoorExitChoice bestChoice = null;
+        for (DoorTransition transition : floorGraph.transitionsFrom(currentZone)) {
+            // 只选择能让人物更接近楼梯厅或一楼出口的门。
+            // 与安全通道不连通的门、通往更深房间的门不会成为候选。
+            if (!floorGraph.movesTowardEgress(currentZone, transition.destinationZone)) {
+                continue;
+            }
+
+            PathResult path = findPath(
+                    new ZoneGoal(floorGraph, transition.destinationZone),
+                    false,
+                    null);
+            if (path == null) continue;
+
+            double totalCost = path.cost +
+                    countPeopleCommittedToDoor(
+                            floorGraph.floorZ, transition.portalId) *
+                            QUEUED_PERSON_COST;
+            DoorExitChoice choice = new DoorExitChoice(
+                    transition.portalId,
+                    transition.destinationZone,
+                    path,
+                    totalCost);
+            if (bestChoice == null || choice.totalCost < bestChoice.totalCost) {
+                bestChoice = choice;
+            }
+        }
+
+        if (bestChoice == null) return false;
+
+        selectedDoorPortalId = bestChoice.portalId;
+        selectedDoorFloorZ = floorGraph.floorZ;
+        route.clear();
+        route.addAll(bestChoice.path.steps);
+        routeLockTicks = ROUTE_LOCK_TICKS;
+        if (route.isEmpty()) {
+            completeRouteLeg();
+        }
+        return !route.isEmpty();
+    }
+
+    private boolean installPathOrWait(PathResult path) {
+        if (path == null) {
+            setNoSafePath();
+            return false;
+        }
+        route.clear();
+        route.addAll(path.steps);
+        return !route.isEmpty();
+    }
+
+    private boolean planRouteToBestStair() {
+        StairChoice currentChoice = null;
+        StairChoice bestChoice = null;
+
+        for (Stairwell stairwell : navigation.stairwells) {
+            PathResult path = findPath(
+                    new StairEntryGoal(stairwell, currentFloorIndex, navigation, model),
+                    true,
+                    stairwell);
+            if (path == null) continue;
+
+            double totalCost = path.cost +
+                    countPeopleCommittedToStair(stairwell.id) * QUEUED_PERSON_COST;
+            StairChoice choice = new StairChoice(stairwell, path, totalCost);
+            if (stairwell.id == selectedStairId) currentChoice = choice;
+            if (bestChoice == null || choice.totalCost < bestChoice.totalCost) {
+                bestChoice = choice;
+            }
+        }
+
+        if (bestChoice == null) return false;
+
+        // 已选路线只有在替代楼梯预计总代价至少降低 20% 时才切换，
+        // 防止拥堵变化使所有人员在楼梯之间来回振荡。
+        StairChoice selected = bestChoice;
+        if (currentChoice != null && bestChoice.stairwell.id != currentChoice.stairwell.id &&
+                (routeLockTicks > 0 ||
+                        bestChoice.totalCost >= currentChoice.totalCost * STAIR_SWITCH_RATIO)) {
+            selected = currentChoice;
+        }
+
+        selectedStairId = selected.stairwell.id;
+        route.clear();
+        route.addAll(selected.path.steps);
+        routeLockTicks = ROUTE_LOCK_TICKS;
+        if (route.isEmpty() &&
+                selected.stairwell.containsCell(x, y, z)) {
+            completeRouteLeg();
+        }
+        return !route.isEmpty();
+    }
+
+    private int countPeopleCommittedToStair(int stairId) {
+        int count = 0;
+        if (model.persons == null) return count;
+        for (Person person : model.persons) {
+            if (person == null || person == this || !person.alive || person.escaped) continue;
+            if (person.selectedStairId == stairId &&
+                    person.currentFloorIndex == currentFloorIndex) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int countPeopleCommittedToDoor(int floorZ, int portalId) {
+        int count = 0;
+        if (model.persons == null) return count;
+        for (Person person : model.persons) {
+            if (person == null || person == this || !person.alive || person.escaped) continue;
+            if (person.selectedDoorFloorZ == floorZ &&
+                    person.selectedDoorPortalId == portalId) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void enterQueueState(int[] next) {
+        if (evacuationPhase == EvacuationPhase.QUEUE_FOR_STAIR ||
+                evacuationPhase == EvacuationPhase.DOOR_QUEUE ||
+                evacuationPhase == EvacuationPhase.EXIT_QUEUE) {
+            return;
+        }
+        phaseBeforeQueue = evacuationPhase;
+        if (evacuationPhase == EvacuationPhase.SEEK_ROOM_DOOR) {
+            evacuationPhase = EvacuationPhase.DOOR_QUEUE;
+        } else if (evacuationPhase == EvacuationPhase.SEEK_EXIT ||
+                navigation.isExitTarget(next[0], next[1], next[2])) {
+            evacuationPhase = EvacuationPhase.EXIT_QUEUE;
+        } else {
+            evacuationPhase = EvacuationPhase.QUEUE_FOR_STAIR;
+        }
+    }
+
+    private void leaveQueueState() {
+        if (evacuationPhase == EvacuationPhase.QUEUE_FOR_STAIR ||
+                evacuationPhase == EvacuationPhase.DOOR_QUEUE ||
+                evacuationPhase == EvacuationPhase.EXIT_QUEUE) {
+            evacuationPhase = phaseBeforeQueue == null ?
+                    selectPhaseForCurrentSpace() :
+                    phaseBeforeQueue;
+            phaseBeforeQueue = null;
+        }
+    }
+
+    private void reconsiderBlockedRoute() {
+        if (evacuationPhase == EvacuationPhase.DOOR_QUEUE &&
+                phaseBeforeQueue == EvacuationPhase.SEEK_ROOM_DOOR &&
+                routeLockTicks <= 0) {
+            evacuationPhase = EvacuationPhase.SEEK_ROOM_DOOR;
+            phaseBeforeQueue = null;
+            route.clear();
+            selectedDoorPortalId = -1;
+            selectedDoorFloorZ = -1;
+        } else if (evacuationPhase == EvacuationPhase.QUEUE_FOR_STAIR &&
+                phaseBeforeQueue == EvacuationPhase.SEEK_STAIR &&
+                routeLockTicks <= 0) {
+            evacuationPhase = EvacuationPhase.SEEK_STAIR;
+            phaseBeforeQueue = null;
+            route.clear();
+        }
+        // 已经进入楼梯后保持队列顺序，不因前方短时拥堵逆行或超越。
+        blockedMoveAttempts = 0;
+    }
+
+    private void invalidateRouteForHazard() {
+        route.clear();
+        blockedMoveAttempts = 0;
+        leaveQueueState();
+        if (evacuationPhase == EvacuationPhase.SEEK_ROOM_DOOR) {
+            selectedDoorPortalId = -1;
+            selectedDoorFloorZ = -1;
+            routeLockTicks = 0;
+        } else if (evacuationPhase == EvacuationPhase.SEEK_STAIR) {
+            routeLockTicks = 0;
+        } else if (evacuationPhase == EvacuationPhase.DESCEND_STAIR &&
+                model.obstacleGrid.get(x, y, z) != FireEscape.TYPE_STAIR) {
+            selectedStairId = -1;
+            evacuationPhase = EvacuationPhase.SEEK_STAIR;
+        }
+    }
+
+    private void completeRouteLeg() {
+        if (evacuationPhase == EvacuationPhase.SEEK_ROOM_DOOR) {
+            selectedDoorPortalId = -1;
+            selectedDoorFloorZ = -1;
+            evacuationPhase = selectPhaseForCurrentSpace();
+        } else if (evacuationPhase == EvacuationPhase.SEEK_STAIR) {
+            evacuationPhase = EvacuationPhase.DESCEND_STAIR;
+            targetFloorIndex = currentFloorIndex - 1;
+        } else if (evacuationPhase == EvacuationPhase.DESCEND_STAIR) {
+            currentFloorIndex = Math.max(0, targetFloorIndex);
+            if (currentFloorIndex == 0) {
+                selectedStairId = -1;
+                evacuationPhase = EvacuationPhase.SEEK_EXIT;
+            } else {
+                // 同一个受保护楼梯间继续向下一层，不在每层重新选择楼梯。
+                evacuationPhase = EvacuationPhase.DESCEND_STAIR;
+                targetFloorIndex = currentFloorIndex - 1;
+            }
+        }
+    }
+
+    private void setNoSafePath() {
+        route.clear();
+        if (evacuationPhase != EvacuationPhase.NO_SAFE_PATH) {
+            phaseBeforeNoSafePath = evacuationPhase;
+        }
+        evacuationPhase = EvacuationPhase.NO_SAFE_PATH;
+        noPathRetryTicks = NO_PATH_RETRY_TICKS;
+    }
+
+    private boolean isAtEvacuationExit() {
+        return model.obstacleGrid.get(x, y, z) == FireEscape.TYPE_EXIT ||
+                navigation.isExitTarget(x, y, z);
+    }
+
+    private void markEscaped() {
+        escaped = true;
+        route.clear();
+        model.personGrid.remove(this);
+    }
+
+    private boolean isAtLanding(Stairwell stairwell, int landingZ) {
+        return z == landingZ &&
+                isNavigationCell(model, x, y, z) &&
+                stairwell.distanceAt(x, y) <= metersToCells(
+                        model, STAIRWELL_SEARCH_RADIUS_METERS);
+    }
+
+    private PathResult findPath(RouteGoal goal,
+                                boolean allowVerticalStairMovement,
+                                Stairwell stairRestriction) {
+        return findPath(model, navigation, x, y, z, goal,
+                allowVerticalStairMovement, stairRestriction, this);
+    }
+
+    private static PathResult findPath(FireEscape model,
+                                       NavigationData navigation,
+                                       int startX,
+                                       int startY,
+                                       int startZ,
+                                       RouteGoal goal,
+                                       boolean allowVerticalStairMovement,
+                                       Stairwell stairRestriction,
+                                       Person movingPerson) {
+        if (!isWithinGrid(model, startX, startY, startZ)) return null;
+
+        synchronized (navigation) {
+            int searchStamp = navigation.nextSearchStamp();
+            int startIndex = voxelIndex(model, startX, startY, startZ);
+            PriorityQueue<PathNode> open = new PriorityQueue<>();
+            navigation.visitedStamp[startIndex] = searchStamp;
+            navigation.gScore[startIndex] = 0.0;
+            navigation.parent[startIndex] = -1;
+            open.add(new PathNode(startIndex,
+                    goal.estimate(startX, startY, startZ)));
+
+            while (!open.isEmpty()) {
+                PathNode node = open.poll();
+                if (navigation.closedStamp[node.index] == searchStamp) continue;
+                navigation.closedStamp[node.index] = searchStamp;
+
+                int cx = node.index % model.gridWidth;
+                int yz = node.index / model.gridWidth;
+                int cy = yz % model.gridHeight;
+                int cz = yz / model.gridHeight;
+                if (goal.matches(cx, cy, cz)) {
+                    return reconstructPath(model, navigation, startIndex,
+                            node.index, searchStamp);
+                }
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        if (dx == 0 && dy == 0) continue;
+                        relaxPathNeighbor(model, navigation, goal, searchStamp,
+                                node.index, cx, cy, cz,
+                                cx + dx, cy + dy, cz,
+                                allowVerticalStairMovement, stairRestriction,
+                                movingPerson, open);
+                    }
+                }
+
+                if (allowVerticalStairMovement) {
+                    for (int dz = -1; dz <= 1; dz += 2) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            for (int dy = -1; dy <= 1; dy++) {
+                                relaxPathNeighbor(model, navigation, goal, searchStamp,
+                                        node.index, cx, cy, cz,
+                                        cx + dx, cy + dy, cz + dz,
+                                        true, stairRestriction, movingPerson, open);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void relaxPathNeighbor(FireEscape model,
+                                          NavigationData navigation,
+                                          RouteGoal goal,
+                                          int searchStamp,
+                                          int currentIndex,
+                                          int cx,
+                                          int cy,
+                                          int cz,
+                                          int nx,
+                                          int ny,
+                                          int nz,
+                                          boolean allowVerticalStairMovement,
+                                          Stairwell stairRestriction,
+                                          Person movingPerson,
+                                          PriorityQueue<PathNode> open) {
+        if (!isWithinGrid(model, nx, ny, nz) ||
+                !isNavigationCell(model, nx, ny, nz) ||
+                !isRouteCellSafe(model, nx, ny, nz)) {
+            return;
+        }
+
+        int dx = nx - cx;
+        int dy = ny - cy;
+        int dz = nz - cz;
+
+        if (dz != 0) {
+            boolean currentOnStairRoute = isStairTransitionCell(
+                    model, stairRestriction, cx, cy, cz);
+            boolean nextOnStairRoute = isStairTransitionCell(
+                    model, stairRestriction, nx, ny, nz);
+            if (!allowVerticalStairMovement ||
+                    (!currentOnStairRoute && !nextOnStairRoute)) {
+                return;
+            }
+        } else if (dx != 0 && dy != 0) {
+            // 对角移动要求两个正交方向都可通行，防止从墙角穿过去。
+            if (!isNavigationCell(model, cx + dx, cy, cz) ||
+                    !isNavigationCell(model, cx, cy + dy, cz)) {
+                return;
+            }
+        }
+
+        int nextIndex = voxelIndex(model, nx, ny, nz);
+        if (navigation.closedStamp[nextIndex] == searchStamp) return;
+
+        double movementCost = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dz > 0) movementCost += 3.0;
+        double smoke = model.getSmokeAt(nx, ny, nz);
+        double heatRatio = Math.max(0.0,
+                (model.fireGrid.get(nx, ny, nz) - FireEscape.T_AMBIENT) /
+                        Math.max(1.0, MAX_ROUTE_TEMPERATURE - FireEscape.T_AMBIENT));
+        int occupants = model.personGrid.numObjectsAtLocation(nx, ny, nz);
+        if (movingPerson != null && nx == movingPerson.x &&
+                ny == movingPerson.y && nz == movingPerson.z) {
+            occupants = Math.max(0, occupants - 1);
+        }
+
+        double tentativeScore = navigation.gScore[currentIndex] +
+                movementCost +
+                smoke * SMOKE_ROUTE_COST +
+                heatRatio * HEAT_ROUTE_COST +
+                occupants * OCCUPIED_CELL_COST;
+
+        if (navigation.visitedStamp[nextIndex] != searchStamp ||
+                tentativeScore < navigation.gScore[nextIndex]) {
+            navigation.visitedStamp[nextIndex] = searchStamp;
+            navigation.gScore[nextIndex] = tentativeScore;
+            navigation.parent[nextIndex] = currentIndex;
+            double estimatedTotal = tentativeScore + goal.estimate(nx, ny, nz);
+            open.add(new PathNode(nextIndex, estimatedTotal));
+        }
+    }
+
+    private static boolean isStairTransitionCell(FireEscape model,
+                                                 Stairwell stairRestriction,
+                                                 int x,
+                                                 int y,
+                                                 int z) {
+        if (!isWithinGrid(model, x, y, z)) return false;
+        if (model.obstacleGrid.get(x, y, z) == FireEscape.TYPE_STAIR) {
+            return stairRestriction == null ||
+                    stairRestriction.containsCell(x, y, z);
+        }
+
+        // IFC 体素化后，楼梯顶面与站立层之间偶尔会保留一个空气体素。
+        // 仅将“指定楼梯实体正上方”的这一格视为楼梯过渡，避免开放普通区域竖移。
+        int stairZ = z - 1;
+        return stairZ >= 0 &&
+                model.obstacleGrid.get(x, y, stairZ) == FireEscape.TYPE_STAIR &&
+                (stairRestriction == null ||
+                        stairRestriction.containsCell(x, y, stairZ));
+    }
+
+    private static PathResult reconstructPath(FireEscape model,
+                                              NavigationData navigation,
+                                              int startIndex,
+                                              int goalIndex,
+                                              int searchStamp) {
+        ArrayDeque<int[]> steps = new ArrayDeque<>();
+        int index = goalIndex;
+        while (index != startIndex) {
+            if (index < 0 || navigation.visitedStamp[index] != searchStamp) return null;
+            int x = index % model.gridWidth;
+            int yz = index / model.gridWidth;
+            int y = yz % model.gridHeight;
+            int z = yz / model.gridHeight;
+            steps.addFirst(new int[]{x, y, z});
+            index = navigation.parent[index];
+        }
+        return new PathResult(new ArrayList<>(steps), navigation.gScore[goalIndex]);
+    }
+
+    private static boolean isNavigationCell(FireEscape model, int x, int y, int z) {
+        if (!isWithinGrid(model, x, y, z)) return false;
+        int type = model.obstacleGrid.get(x, y, z);
+        // 门和楼梯可能因开放连通关系被全局室内洪水标成 outside，但它们的业务
+        // 语义本身就是可通行连接，因此导航时优先按类型恢复，不让路径在门口中断。
+        if (type == FireEscape.TYPE_STAIR ||
+                type == FireEscape.TYPE_DOOR ||
+                type == FireEscape.TYPE_EXIT) {
+            return true;
+        }
+        if (type == FireEscape.TYPE_EMPTY && z > 0 &&
+                model.obstacleGrid.get(x, y, z - 1) == FireEscape.TYPE_STAIR) {
+            // 楼梯顶面上方的单个空气体素属于踏步可站立空间；即使其因楼梯井
+            // 与室外连通而被标成 outside，也必须保留，否则顶层无法踏入楼梯。
+            return true;
+        }
+        NavigationData cachedNavigation = NAVIGATION_CACHE.get(model);
+        if (type == FireEscape.TYPE_EMPTY &&
+                cachedNavigation != null &&
+                cachedNavigation.isFloorWalkable(x, y, z)) {
+            // 3D indoor 仍是主判定；只有已识别站立层上经二维边界洪水确认封闭的
+            // 空格才作为补偿通道，用于跨越 IFC 门槛和楼板交界处的体素缺口。
+            return true;
+        }
+        if (!canOccupy(model, x, y, z)) return false;
+        if (z <= 0) return false;
+        int below = model.obstacleGrid.get(x, y, z - 1);
+        return below == FireEscape.TYPE_WALL || below == FireEscape.TYPE_STAIR;
+    }
+
+    private static boolean isRouteCellSafe(FireEscape model, int x, int y, int z) {
+        return model.fireGrid.get(x, y, z) < MAX_ROUTE_TEMPERATURE &&
+                model.getSmokeAt(x, y, z) < MAX_ROUTE_SMOKE;
+    }
+
+    private static boolean isWithinGrid(FireEscape model, int x, int y, int z) {
+        return x >= 0 && x < model.gridWidth &&
+                y >= 0 && y < model.gridHeight &&
+                z >= 0 && z < model.gridDepth;
+    }
+
+    private static int voxelIndex(FireEscape model, int x, int y, int z) {
+        return (z * model.gridHeight + y) * model.gridWidth + x;
+    }
+
+    private static int nearestFloorIndex(List<Integer> floors, int z) {
+        if (floors.isEmpty()) return 0;
+        int bestIndex = 0;
+        int bestDistance = Math.abs(floors.get(0) - z);
+        for (int i = 1; i < floors.size(); i++) {
+            int distance = Math.abs(floors.get(i) - z);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestIndex = i;
+            }
+        }
+        return bestIndex;
+    }
+
+    private static NavigationData buildNavigationData(FireEscape model,
+                                                       List<Integer> floorLevels) {
+        List<Integer> floors = new ArrayList<>(floorLevels);
+        Collections.sort(floors);
+        List<Stairwell> stairwells = detectStairwells(model);
+        List<int[]> exits = collectEvacuationExits(model, floors);
+        NavigationData data = new NavigationData(
+                model, model.gridWidth, model.gridHeight, model.gridDepth,
+                floors, stairwells, exits);
+        System.out.println("[Person] 疏散导航初始化: 楼层=" + floors +
+                ", 楼梯组件=" + stairwells.size() +
+                ", 出口目标=" + exits.size() +
+                ", 需穿门区域=" + data.doorSeparatedZoneCount() +
+                ", 不连通区域=" + data.disconnectedZoneCount());
+        return data;
+    }
+
+    /**
+     * 将一个楼层按门分割成若干空间区域，再把门作为区域之间的连接边。
+     *
+     * 反向从高层楼梯入口或一楼出口计算每个区域需要经过的门数。人物只沿门数
+     * 递减的方向移动，因此不会因为几何距离较近而误入另一个房间或死胡同。
+     */
+    private static FloorDoorGraph buildFloorDoorGraph(
+            FireEscape model,
+            int floorIndex,
+            List<Integer> floorLevels,
+            List<Stairwell> stairwells,
+            List<int[]> exitTargets,
+            boolean[] floorWalkable) {
+        int width = model.gridWidth;
+        int height = model.gridHeight;
+        int floorZ = floorLevels.get(floorIndex);
+        int cellCount = width * height;
+        boolean[] zoneCells = new boolean[cellCount];
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int index = y * width + x;
+                zoneCells[index] = isFloorGraphNavigationCell(
+                        model, x, y, floorZ, floorWalkable) &&
+                        model.obstacleGrid.get(x, y, floorZ) !=
+                                FireEscape.TYPE_DOOR;
+            }
+        }
+
+        int[] zoneByCell = new int[cellCount];
+        Arrays.fill(zoneByCell, -1);
+        int[] queue = new int[cellCount];
+        int zoneCount = 0;
+        for (int start = 0; start < cellCount; start++) {
+            if (!zoneCells[start] || zoneByCell[start] >= 0) continue;
+
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = start;
+            zoneByCell[start] = zoneCount;
+            while (head < tail) {
+                int index = queue[head++];
+                int x = index % width;
+                int y = index / width;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        if (dx == 0 && dy == 0) continue;
+                        int nx = x + dx;
+                        int ny = y + dy;
+                        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                            continue;
+                        }
+
+                        int nextIndex = ny * width + nx;
+                        if (!zoneCells[nextIndex] || zoneByCell[nextIndex] >= 0) {
+                            continue;
+                        }
+                        if (dx != 0 && dy != 0 &&
+                                (!zoneCells[y * width + nx] ||
+                                        !zoneCells[ny * width + x])) {
+                            continue;
+                        }
+                        zoneByCell[nextIndex] = zoneCount;
+                        queue[tail++] = nextIndex;
+                    }
+                }
+            }
+            zoneCount++;
+        }
+
+        int[] portalByCell = new int[cellCount];
+        Arrays.fill(portalByCell, -1);
+        boolean[] visitedDoor = new boolean[cellCount];
+        List<DoorPortal> portals = new ArrayList<>();
+        int[][] orthogonalDirections = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+        for (int start = 0; start < cellCount; start++) {
+            int startX = start % width;
+            int startY = start / width;
+            if (visitedDoor[start] ||
+                    model.obstacleGrid.get(startX, startY, floorZ) !=
+                            FireEscape.TYPE_DOOR) {
+                continue;
+            }
+
+            List<Integer> doorCells = new ArrayList<>();
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = start;
+            visitedDoor[start] = true;
+            while (head < tail) {
+                int index = queue[head++];
+                doorCells.add(index);
+                int x = index % width;
+                int y = index / width;
+                for (int[] direction : orthogonalDirections) {
+                    int nx = x + direction[0];
+                    int ny = y + direction[1];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int nextIndex = ny * width + nx;
+                    if (!visitedDoor[nextIndex] &&
+                            model.obstacleGrid.get(nx, ny, floorZ) ==
+                                    FireEscape.TYPE_DOOR) {
+                        visitedDoor[nextIndex] = true;
+                        queue[tail++] = nextIndex;
+                    }
+                }
+            }
+
+            boolean[] touchedZone = new boolean[zoneCount];
+            for (int index : doorCells) {
+                int x = index % width;
+                int y = index / width;
+                for (int[] direction : orthogonalDirections) {
+                    int nx = x + direction[0];
+                    int ny = y + direction[1];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int zoneId = zoneByCell[ny * width + nx];
+                    if (zoneId >= 0) touchedZone[zoneId] = true;
+                }
+            }
+
+            int touchedCount = 0;
+            for (boolean touched : touchedZone) {
+                if (touched) touchedCount++;
+            }
+            int[] touchingZones = new int[touchedCount];
+            int cursor = 0;
+            for (int zoneId = 0; zoneId < zoneCount; zoneId++) {
+                if (touchedZone[zoneId]) touchingZones[cursor++] = zoneId;
+            }
+
+            int portalId = portals.size();
+            for (int index : doorCells) {
+                portalByCell[index] = portalId;
+            }
+            portals.add(new DoorPortal(portalId, touchingZones));
+        }
+
+        List<List<DoorTransition>> transitionsByZone = new ArrayList<>();
+        for (int zoneId = 0; zoneId < zoneCount; zoneId++) {
+            transitionsByZone.add(new ArrayList<DoorTransition>());
+        }
+        for (DoorPortal portal : portals) {
+            for (int fromZone : portal.touchingZones) {
+                for (int toZone : portal.touchingZones) {
+                    if (fromZone != toZone) {
+                        transitionsByZone.get(fromZone).add(
+                                new DoorTransition(portal.id, toZone));
+                    }
+                }
+            }
+        }
+
+        boolean[] egressZone = new boolean[zoneCount];
+        if (floorIndex == 0) {
+            for (int[] exit : exitTargets) {
+                if (exit[2] != floorZ) continue;
+                int index = exit[1] * width + exit[0];
+                int zoneId = zoneByCell[index];
+                if (zoneId >= 0) {
+                    egressZone[zoneId] = true;
+                } else {
+                    int portalId = portalByCell[index];
+                    if (portalId >= 0) {
+                        for (int touchingZone : portals.get(portalId).touchingZones) {
+                            egressZone[touchingZone] = true;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (int index = 0; index < cellCount; index++) {
+                int zoneId = zoneByCell[index];
+                if (zoneId < 0) continue;
+                int x = index % width;
+                int y = index / width;
+                if (hasStairAccessFromFloor(
+                        model, stairwells, x, y, floorZ)) {
+                    egressZone[zoneId] = true;
+                }
+            }
+        }
+
+        int[] egressDistance = new int[zoneCount];
+        Arrays.fill(egressDistance, -1);
+        ArrayDeque<Integer> zoneQueue = new ArrayDeque<>();
+        for (int zoneId = 0; zoneId < zoneCount; zoneId++) {
+            if (egressZone[zoneId]) {
+                egressDistance[zoneId] = 0;
+                zoneQueue.addLast(zoneId);
+            }
+        }
+        while (!zoneQueue.isEmpty()) {
+            int zoneId = zoneQueue.removeFirst();
+            for (DoorTransition transition : transitionsByZone.get(zoneId)) {
+                int nextZone = transition.destinationZone;
+                if (egressDistance[nextZone] < 0) {
+                    egressDistance[nextZone] = egressDistance[zoneId] + 1;
+                    zoneQueue.addLast(nextZone);
+                }
+            }
+        }
+
+        return new FloorDoorGraph(
+                floorZ, width, height,
+                zoneByCell, portalByCell,
+                portals, transitionsByZone, egressDistance);
+    }
+
+    private static boolean isFloorGraphNavigationCell(
+            FireEscape model, int x, int y, int z, boolean[] floorWalkable) {
+        int type = model.obstacleGrid.get(x, y, z);
+        if (type == FireEscape.TYPE_STAIR ||
+                type == FireEscape.TYPE_DOOR ||
+                type == FireEscape.TYPE_EXIT) {
+            return true;
+        }
+        if (type != FireEscape.TYPE_EMPTY) return false;
+        if (z > 0 &&
+                model.obstacleGrid.get(x, y, z - 1) ==
+                        FireEscape.TYPE_STAIR) {
+            return true;
+        }
+        return floorWalkable[y * model.gridWidth + x];
+    }
+
+    private static boolean hasStairAccessFromFloor(
+            FireEscape model,
+            List<Stairwell> stairwells,
+            int x,
+            int y,
+            int floorZ) {
+        for (Stairwell stairwell : stairwells) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    int stairX = x + dx;
+                    int stairY = y + dy;
+                    if (isStairTransitionCell(
+                            model, stairwell, stairX, stairY, floorZ)) {
+                        return true;
+                    }
+                    // 顶层站立面可能比最后一级楼梯高一格；只允许相邻的真实楼梯
+                    // 过渡格建立连接，不能把整片楼梯二维投影都当作入口。
+                    if (isStairTransitionCell(
+                            model, stairwell, stairX, stairY, floorZ - 1)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static List<Stairwell> detectStairwells(FireEscape model) {
+        int width = model.gridWidth;
+        int height = model.gridHeight;
+        int depth = model.gridDepth;
+        int cellCount = width * height * depth;
+        boolean[] stairCells = new boolean[cellCount];
+        for (int z = 0; z < model.gridDepth; z++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    if (model.obstacleGrid.get(x, y, z) == FireEscape.TYPE_STAIR) {
+                        stairCells[voxelIndex(model, x, y, z)] = true;
+                    }
+                }
+            }
+        }
+
+        // 楼梯按真实三维邻接关系分组，不能把所有楼层先投影到二维平面。
+        // 否则上下楼层中仅投影相邻、实际并不连通的楼梯会被错误合并。
+        boolean[] visited = new boolean[cellCount];
+        List<Stairwell> stairwells = new ArrayList<>();
+        for (int start = 0; start < cellCount; start++) {
+            if (!stairCells[start] || visited[start]) continue;
+            boolean[] componentCells = new boolean[cellCount];
+            boolean[] footprint = new boolean[width * height];
+            ArrayDeque<Integer> queue = new ArrayDeque<>();
+            queue.add(start);
+            visited[start] = true;
+
+            while (!queue.isEmpty()) {
+                int index = queue.removeFirst();
+                int x = index % width;
+                int yz = index / width;
+                int y = yz % height;
+                int z = yz / height;
+                componentCells[index] = true;
+                footprint[y * width + x] = true;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dz = -1; dz <= 1; dz++) {
+                            if (dx == 0 && dy == 0 && dz == 0) continue;
+                            int nx = x + dx;
+                            int ny = y + dy;
+                            int nz = z + dz;
+                            if (nx < 0 || nx >= width ||
+                                    ny < 0 || ny >= height ||
+                                    nz < 0 || nz >= depth) {
+                                continue;
+                            }
+                            int nextIndex = voxelIndex(model, nx, ny, nz);
+                            if (stairCells[nextIndex] && !visited[nextIndex]) {
+                                visited[nextIndex] = true;
+                                queue.addLast(nextIndex);
+                            }
+                        }
+                    }
+                }
+            }
+            stairwells.add(new Stairwell(
+                    stairwells.size(), width, height, depth,
+                    footprint, componentCells));
+        }
+        return stairwells;
+    }
+
+    private static List<int[]> collectEvacuationExits(FireEscape model,
+                                                       List<Integer> floors) {
+        List<int[]> targets = new ArrayList<>();
+        boolean[] seen = new boolean[
+                model.gridWidth * model.gridHeight * model.gridDepth];
+        for (int[] exit : model.exits) {
+            if (!isWithinGrid(model, exit[0], exit[1], exit[2])) continue;
+            int index = voxelIndex(model, exit[0], exit[1], exit[2]);
+            if (!seen[index] && canOccupy(model, exit[0], exit[1], exit[2])) {
+                seen[index] = true;
+                targets.add(new int[]{exit[0], exit[1], exit[2]});
+            }
+        }
+        if (!targets.isEmpty() || floors.isEmpty()) return targets;
+
+        int groundZ = floors.get(0);
+        boolean[] visitedDoors = new boolean[model.gridWidth * model.gridHeight];
+        int[][] directions = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+        for (int y = 0; y < model.gridHeight; y++) {
+            for (int x = 0; x < model.gridWidth; x++) {
+                int startIndex = y * model.gridWidth + x;
+                if (visitedDoors[startIndex] ||
+                        model.obstacleGrid.get(x, y, groundZ) != FireEscape.TYPE_DOOR) {
+                    continue;
+                }
+
+                List<Integer> component = new ArrayList<>();
+                ArrayDeque<Integer> queue = new ArrayDeque<>();
+                queue.add(startIndex);
+                visitedDoors[startIndex] = true;
+                boolean touchesIndoor = false;
+                boolean touchesOutdoor = false;
+
+                while (!queue.isEmpty()) {
+                    int index = queue.removeFirst();
+                    component.add(index);
+                    int doorX = index % model.gridWidth;
+                    int doorY = index / model.gridWidth;
+
+                    for (int[] direction : directions) {
+                        int nx = doorX + direction[0];
+                        int ny = doorY + direction[1];
+                        if (nx < 0 || nx >= model.gridWidth ||
+                                ny < 0 || ny >= model.gridHeight) {
+                            touchesOutdoor = true;
+                            continue;
+                        }
+
+                        int nextIndex = ny * model.gridWidth + nx;
+                        int nextType = model.obstacleGrid.get(nx, ny, groundZ);
+                        if (nextType == FireEscape.TYPE_DOOR) {
+                            if (!visitedDoors[nextIndex]) {
+                                visitedDoors[nextIndex] = true;
+                                queue.addLast(nextIndex);
+                            }
+                        } else if (model.insideGrid.get(nx, ny, groundZ) == 1) {
+                            touchesIndoor = true;
+                        } else if (nextType == FireEscape.TYPE_EMPTY ||
+                                nextType == FireEscape.TYPE_FUEL) {
+                            touchesOutdoor = true;
+                        }
+                    }
+                }
+
+                // 仅把同时连接室内与室外的首层门组件作为出口，普通房门不会误入。
+                if (touchesIndoor && touchesOutdoor) {
+                    for (int index : component) {
+                        int doorX = index % model.gridWidth;
+                        int doorY = index / model.gridWidth;
+                        if (canOccupy(model, doorX, doorY, groundZ)) {
+                            int voxelIndex = voxelIndex(model, doorX, doorY, groundZ);
+                            if (!seen[voxelIndex]) {
+                                seen[voxelIndex] = true;
+                                targets.add(new int[]{doorX, doorY, groundZ});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return targets;
+    }
+
+    private interface RouteGoal {
+        boolean matches(int x, int y, int z);
+        double estimate(int x, int y, int z);
+    }
+
+    private static final class ZoneGoal implements RouteGoal {
+        private final FloorDoorGraph floorGraph;
+        private final int destinationZone;
+
+        ZoneGoal(FloorDoorGraph floorGraph, int destinationZone) {
+            this.floorGraph = floorGraph;
+            this.destinationZone = destinationZone;
+        }
+
+        public boolean matches(int x, int y, int z) {
+            return z == floorGraph.floorZ &&
+                    floorGraph.zoneAt(x, y) == destinationZone;
+        }
+
+        public double estimate(int x, int y, int z) {
+            // 区域可能是不规则形状。这里使用零启发保持可采纳性，
+            // 由实际烟气、温度和拥堵代价决定穿门路线。
+            return 0.0;
+        }
+    }
+
+    private static final class ExitGoal implements RouteGoal {
+        private final NavigationData navigation;
+
+        ExitGoal(NavigationData navigation) {
+            this.navigation = navigation;
+        }
+
+        public boolean matches(int x, int y, int z) {
+            return navigation.isExitTarget(x, y, z);
+        }
+
+        public double estimate(int x, int y, int z) {
+            double minimum = Double.MAX_VALUE;
+            for (int[] exit : navigation.exitTargets) {
+                double distance = Math.abs(x - exit[0]) +
+                        Math.abs(y - exit[1]) +
+                        Math.abs(z - exit[2]);
+                if (distance < minimum) minimum = distance;
+            }
+            return minimum;
+        }
+    }
+
+    private static final class StairEntryGoal implements RouteGoal {
+        private final Stairwell stairwell;
+        private final int lowerZ;
+        private final int upperZ;
+        private final FireEscape model;
+
+        StairEntryGoal(Stairwell stairwell,
+                       int floorIndex,
+                       NavigationData navigation,
+                       FireEscape model) {
+            this.stairwell = stairwell;
+            this.model = model;
+            int currentZ = navigation.floorLevels.get(floorIndex);
+            this.lowerZ = floorIndex > 0 ?
+                    navigation.floorLevels.get(floorIndex - 1) : 0;
+            this.upperZ = Math.min(model.gridDepth - 1, currentZ + 1);
+        }
+
+        public boolean matches(int x, int y, int z) {
+            return z >= lowerZ && z <= upperZ &&
+                    stairwell.containsCell(x, y, z) &&
+                    model.obstacleGrid.get(x, y, z) == FireEscape.TYPE_STAIR;
+        }
+
+        public double estimate(int x, int y, int z) {
+            int verticalDistance = z > upperZ ? z - upperZ :
+                    (z < lowerZ ? lowerZ - z : 0);
+            return stairwell.distanceAt(x, y) + verticalDistance;
+        }
+    }
+
+    private static final class LandingGoal implements RouteGoal {
+        private final Stairwell stairwell;
+        private final int landingZ;
+        private final int landingRadius;
+        private final FireEscape model;
+
+        LandingGoal(Stairwell stairwell, int landingZ, FireEscape model) {
+            this.stairwell = stairwell;
+            this.landingZ = landingZ;
+            this.model = model;
+            this.landingRadius = metersToCells(model, STAIRWELL_SEARCH_RADIUS_METERS);
+        }
+
+        public boolean matches(int x, int y, int z) {
+            return z == landingZ &&
+                    model.obstacleGrid.get(x, y, z) != FireEscape.TYPE_STAIR &&
+                    stairwell.distanceAt(x, y) <= landingRadius &&
+                    isNavigationCell(model, x, y, z);
+        }
+
+        public double estimate(int x, int y, int z) {
+            return Math.abs(z - landingZ) +
+                    Math.max(0, stairwell.distanceAt(x, y) - landingRadius);
+        }
+    }
+
+    private static final class NavigationData {
+        final int width;
+        final int height;
+        final int depth;
+        final List<Integer> floorLevels;
+        final List<Stairwell> stairwells;
+        final List<int[]> exitTargets;
+        final boolean[] exitMask;
+        final Map<Integer, boolean[]> floorWalkableMasks;
+        final Map<Integer, FloorDoorGraph> floorDoorGraphs;
+        final double[] gScore;
+        final int[] parent;
+        final int[] visitedStamp;
+        final int[] closedStamp;
+        int searchStamp;
+
+        NavigationData(FireEscape model,
+                       int width,
+                       int height,
+                       int depth,
+                       List<Integer> floorLevels,
+                       List<Stairwell> stairwells,
+                       List<int[]> exitTargets) {
+            this.width = width;
+            this.height = height;
+            this.depth = depth;
+            this.floorLevels = Collections.unmodifiableList(
+                    new ArrayList<>(floorLevels));
+            this.stairwells = Collections.unmodifiableList(
+                    new ArrayList<>(stairwells));
+            this.exitTargets = Collections.unmodifiableList(
+                    new ArrayList<>(exitTargets));
+            this.floorWalkableMasks = new TreeMap<>();
+            for (int floorZ : floorLevels) {
+                boolean[] planarInterior = buildPlanarInteriorMask(model, floorZ);
+                boolean[] walkable = new boolean[width * height];
+                for (int y = 0; y < height; y++) {
+                    for (int x = 0; x < width; x++) {
+                        int index = y * width + x;
+                        int type = model.obstacleGrid.get(x, y, floorZ);
+                        walkable[index] = type == FireEscape.TYPE_EMPTY &&
+                                (model.insideGrid.get(x, y, floorZ) == 1 ||
+                                        planarInterior[index]);
+                    }
+                }
+                floorWalkableMasks.put(floorZ, walkable);
+            }
+            this.floorDoorGraphs = new TreeMap<>();
+            for (int floorIndex = 0;
+                 floorIndex < floorLevels.size();
+                 floorIndex++) {
+                int floorZ = floorLevels.get(floorIndex);
+                floorDoorGraphs.put(
+                        floorZ,
+                        buildFloorDoorGraph(
+                                model,
+                                floorIndex,
+                                floorLevels,
+                                stairwells,
+                                exitTargets,
+                                floorWalkableMasks.get(floorZ)));
+            }
+            int cellCount = width * height * depth;
+            this.exitMask = new boolean[cellCount];
+            for (int[] exit : exitTargets) {
+                exitMask[(exit[2] * height + exit[1]) * width + exit[0]] = true;
+            }
+            this.gScore = new double[cellCount];
+            this.parent = new int[cellCount];
+            this.visitedStamp = new int[cellCount];
+            this.closedStamp = new int[cellCount];
+            this.searchStamp = 0;
+        }
+
+        int nextSearchStamp() {
+            searchStamp++;
+            if (searchStamp == Integer.MAX_VALUE) {
+                Arrays.fill(visitedStamp, 0);
+                Arrays.fill(closedStamp, 0);
+                searchStamp = 1;
+            }
+            return searchStamp;
+        }
+
+        Stairwell getStairwell(int id) {
+            return id >= 0 && id < stairwells.size() ? stairwells.get(id) : null;
+        }
+
+        boolean isFloorLevel(int z) {
+            return Collections.binarySearch(floorLevels, z) >= 0;
+        }
+
+        boolean isFloorWalkable(int x, int y, int z) {
+            boolean[] mask = floorWalkableMasks.get(z);
+            return mask != null && mask[y * width + x];
+        }
+
+        boolean isExitTarget(int x, int y, int z) {
+            if (x < 0 || x >= width || y < 0 || y >= height ||
+                    z < 0 || z >= depth) {
+                return false;
+            }
+            return exitMask[(z * height + y) * width + x];
+        }
+
+        FloorDoorGraph getFloorDoorGraph(int floorIndex) {
+            if (floorIndex < 0 || floorIndex >= floorLevels.size()) return null;
+            return floorDoorGraphs.get(floorLevels.get(floorIndex));
+        }
+
+        int doorSeparatedZoneCount() {
+            int count = 0;
+            for (FloorDoorGraph graph : floorDoorGraphs.values()) {
+                count += graph.doorSeparatedZoneCount();
+            }
+            return count;
+        }
+
+        int disconnectedZoneCount() {
+            int count = 0;
+            for (FloorDoorGraph graph : floorDoorGraphs.values()) {
+                count += graph.disconnectedZoneCount();
+            }
+            return count;
+        }
+    }
+
+    private static final class FloorDoorGraph {
+        final int floorZ;
+        final int width;
+        final int height;
+        final int[] zoneByCell;
+        final int[] portalByCell;
+        final List<DoorPortal> portals;
+        final List<List<DoorTransition>> transitionsByZone;
+        final int[] egressDistance;
+
+        FloorDoorGraph(int floorZ,
+                       int width,
+                       int height,
+                       int[] zoneByCell,
+                       int[] portalByCell,
+                       List<DoorPortal> portals,
+                       List<List<DoorTransition>> transitionsByZone,
+                       int[] egressDistance) {
+            this.floorZ = floorZ;
+            this.width = width;
+            this.height = height;
+            this.zoneByCell = zoneByCell;
+            this.portalByCell = portalByCell;
+            this.portals = portals;
+            this.transitionsByZone = transitionsByZone;
+            this.egressDistance = egressDistance;
+        }
+
+        int zoneAt(int x, int y) {
+            if (x < 0 || x >= width || y < 0 || y >= height) return -1;
+            return zoneByCell[y * width + x];
+        }
+
+        int resolveZoneAt(int x, int y) {
+            int index = y * width + x;
+            int zoneId = zoneByCell[index];
+            if (zoneId >= 0) return zoneId;
+
+            int portalId = portalByCell[index];
+            if (portalId < 0 || portalId >= portals.size()) return -1;
+            DoorPortal portal = portals.get(portalId);
+            int bestZone = -1;
+            int bestDistance = Integer.MAX_VALUE;
+            for (int touchingZone : portal.touchingZones) {
+                int distance = egressDistance[touchingZone];
+                if (distance >= 0 && distance < bestDistance) {
+                    bestDistance = distance;
+                    bestZone = touchingZone;
+                }
+            }
+            return bestZone >= 0 ? bestZone :
+                    (portal.touchingZones.length == 0 ?
+                            -1 : portal.touchingZones[0]);
+        }
+
+        boolean requiresDoorTraversal(int x, int y) {
+            int zoneId = resolveZoneAt(x, y);
+            return zoneId >= 0 && egressDistance[zoneId] != 0;
+        }
+
+        int egressDistance(int zoneId) {
+            return zoneId >= 0 && zoneId < egressDistance.length ?
+                    egressDistance[zoneId] : -1;
+        }
+
+        List<DoorTransition> transitionsFrom(int zoneId) {
+            if (zoneId < 0 || zoneId >= transitionsByZone.size()) {
+                return Collections.emptyList();
+            }
+            return transitionsByZone.get(zoneId);
+        }
+
+        boolean movesTowardEgress(int fromZone, int toZone) {
+            int fromDistance = egressDistance(fromZone);
+            int toDistance = egressDistance(toZone);
+            return fromDistance > 0 &&
+                    toDistance >= 0 &&
+                    toDistance < fromDistance;
+        }
+
+        int doorSeparatedZoneCount() {
+            int count = 0;
+            for (int distance : egressDistance) {
+                if (distance > 0) count++;
+            }
+            return count;
+        }
+
+        int disconnectedZoneCount() {
+            int count = 0;
+            for (int distance : egressDistance) {
+                if (distance < 0) count++;
+            }
+            return count;
+        }
+    }
+
+    private static final class DoorPortal {
+        final int id;
+        final int[] touchingZones;
+
+        DoorPortal(int id, int[] touchingZones) {
+            this.id = id;
+            this.touchingZones = touchingZones;
+        }
+    }
+
+    private static final class DoorTransition {
+        final int portalId;
+        final int destinationZone;
+
+        DoorTransition(int portalId, int destinationZone) {
+            this.portalId = portalId;
+            this.destinationZone = destinationZone;
+        }
+    }
+
+    private static final class Stairwell {
+        final int id;
+        final int width;
+        final int height;
+        final int depth;
+        final boolean[] footprint;
+        final boolean[] cells;
+        final int[] horizontalDistance;
+
+        Stairwell(int id,
+                  int width,
+                  int height,
+                  int depth,
+                  boolean[] footprint,
+                  boolean[] cells) {
+            this.id = id;
+            this.width = width;
+            this.height = height;
+            this.depth = depth;
+            this.footprint = footprint;
+            this.cells = cells;
+            this.horizontalDistance = buildHorizontalDistance(
+                    width, height, footprint);
+        }
+
+        boolean containsXY(int x, int y) {
+            return x >= 0 && x < width && y >= 0 && y < height &&
+                    footprint[y * width + x];
+        }
+
+        boolean containsCell(int x, int y, int z) {
+            return x >= 0 && x < width &&
+                    y >= 0 && y < height &&
+                    z >= 0 && z < depth &&
+                    cells[(z * height + y) * width + x];
+        }
+
+        int distanceAt(int x, int y) {
+            if (x < 0 || x >= width || y < 0 || y >= height) {
+                return Integer.MAX_VALUE / 4;
+            }
+            return horizontalDistance[y * width + x];
+        }
+
+        private static int[] buildHorizontalDistance(
+                int width, int height, boolean[] footprint) {
+            int[] distances = new int[width * height];
+            Arrays.fill(distances, -1);
+            ArrayDeque<Integer> queue = new ArrayDeque<>();
+            for (int index = 0; index < footprint.length; index++) {
+                if (footprint[index]) {
+                    distances[index] = 0;
+                    queue.addLast(index);
+                }
+            }
+            int[][] directions = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            while (!queue.isEmpty()) {
+                int index = queue.removeFirst();
+                int x = index % width;
+                int y = index / width;
+                for (int[] direction : directions) {
+                    int nx = x + direction[0];
+                    int ny = y + direction[1];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int nextIndex = ny * width + nx;
+                    if (distances[nextIndex] < 0) {
+                        distances[nextIndex] = distances[index] + 1;
+                        queue.addLast(nextIndex);
+                    }
+                }
+            }
+            return distances;
+        }
+    }
+
+    private static final class PathNode implements Comparable<PathNode> {
+        final int index;
+        final double estimatedTotal;
+
+        PathNode(int index, double estimatedTotal) {
+            this.index = index;
+            this.estimatedTotal = estimatedTotal;
+        }
+
+        public int compareTo(PathNode other) {
+            return Double.compare(estimatedTotal, other.estimatedTotal);
+        }
+    }
+
+    private static final class PathResult {
+        final List<int[]> steps;
+        final double cost;
+
+        PathResult(List<int[]> steps, double cost) {
+            this.steps = steps;
+            this.cost = cost;
+        }
+    }
+
+    private static final class StairChoice {
+        final Stairwell stairwell;
+        final PathResult path;
+        final double totalCost;
+
+        StairChoice(Stairwell stairwell, PathResult path, double totalCost) {
+            this.stairwell = stairwell;
+            this.path = path;
+            this.totalCost = totalCost;
+        }
+    }
+
+    private static final class DoorExitChoice {
+        final int portalId;
+        final int destinationZone;
+        final PathResult path;
+        final double totalCost;
+
+        DoorExitChoice(int portalId,
+                       int destinationZone,
+                       PathResult path,
+                       double totalCost) {
+            this.portalId = portalId;
+            this.destinationZone = destinationZone;
+            this.path = path;
+            this.totalCost = totalCost;
+        }
     }
 
     public int getX() { return x; }
     public int getY() { return y; }
     public int getZ() { return z; }
     public double getSmokeExposure() { return smokeExposure; }
+    public String getEvacuationPhase() {
+        return evacuationPhase == null ? "UNINITIALIZED" : evacuationPhase.name();
+    }
+    public int getSelectedStairId() { return selectedStairId; }
+    public int getBlockedMoveAttempts() { return blockedMoveAttempts; }
 }
