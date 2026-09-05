@@ -144,8 +144,14 @@
     let personGroup = new THREE.Group();
     let lastStep = -1, currentData = null;
     const T_AMB = 293.15;
+    const T_MAX_HOT = 1273.15;
 
     const dx = 0.5, dz = 0.25;
+    const clock = new THREE.Clock();
+    let fireParticles = null;
+    let smokeParticles = null;
+    let volumeSmoke = null;
+    let fireLights = [];
 
     // ================================================================
     // 3. 辅助函数
@@ -183,6 +189,8 @@
         }).catch(e => addLog(`指令失败: ${e}`, 'error'));
     }
 
+    let cameraFramed = false;
+
     function fetchState() {
         fetch('/state')
             .then(r => r.json())
@@ -190,6 +198,18 @@
                 currentData = d;
                 updateStats(d);
                 update3DWorld(d);
+                if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz, d.fire, d.stride || 1);
+                // if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth, d.stride || 1);
+                updateFireLights(d);
+                // ★ 首次有数据时自动框住整个建筑（含火/烟区域）
+                if (!cameraFramed && d.width && d.depth && controls && camera) {
+                    cameraFramed = true;
+                    const cx = d.width * dx / 2, cy = d.depth * dz / 2, cz = d.height * dx / 2;
+                    controls.target.set(cx, cy, cz);
+                    const size = Math.max(d.width * dx, d.depth * dz, d.height * dx);
+                    camera.position.set(cx + size * 0.6, cy + size * 0.75, cz + size * 0.6);
+                    controls.update();
+                }
                 if (lastStep !== d.step) lastStep = d.step;
             })
             .catch(e => addLog('获取状态失败: ' + e, 'error'));
@@ -233,7 +253,728 @@
     }
 
     // ================================================================
-    // 5. 3D 场景初始化
+    // 4b. 动态火源点光源 + 烟雾遮挡火焰
+    // ================================================================
+    function updateFireLights(d) {
+        const srcs = d.fireSources || [];
+        while (fireLights.length < srcs.length) {
+            const l = new THREE.PointLight(0xff6622, 0, 40, 2);
+            scene.add(l);
+            fireLights.push(l);
+        }
+        while (fireLights.length > srcs.length) {
+            const l = fireLights.pop();
+            scene.remove(l);
+        }
+        srcs.forEach((f, i) => {
+            const l = fireLights[i];
+            const fh = f.flameHeight || 2.0;
+            // 光源位于火焰中部
+            l.position.set(f.x * dx + dx/2, f.z * dz + dz/2 + fh * 0.5, f.y * dx + dx/2);
+            l.intensity = Math.min(3.0, 0.6 + (f.heatRelease || 0) / 400.0);
+        });
+        // 烟雾遮挡: 火源上方烟浓度 → 火焰透明度衰减
+        if (fireParticles && srcs.length > 0 && d.smoke && d.depth) {
+            const f = srcs[0];
+            let s = 0, cnt = 0;
+            const zTop = Math.min(d.depth - 1, f.z + Math.ceil((f.flameHeight || 2) / dz));
+            for (let zi = f.z; zi <= zTop; zi++) {
+                s += (d.smoke[zi]?.[f.x]?.[f.y]) || 0;
+                cnt++;
+            }
+            fireParticles.material.uniforms.uSmokeDensity.value = cnt > 0 ? Math.min(1, (s / cnt) * 4) : 0;
+        }
+    }
+
+    // ================================================================
+    // 5. 火焰粒子系统 (GPU Shader)
+    // ================================================================
+    const fireVertexShader = `
+        attribute float aLife;      // 0~1 剩余生命比例
+        attribute float aSeed;      // 随机种子 0~1
+        attribute float aSize;      // 基础大小
+        uniform float uTime;
+        uniform float uFlameHeight;
+        uniform vec3  uFirePos;
+        varying float vLife;
+        varying float vSeed;
+
+        // 简化 curl noise (用 sin 模拟湍流)
+        vec3 noise3(vec3 p) {
+            return vec3(
+                sin(p.y*3.0 + p.z*2.0 + uTime*2.0),
+                sin(p.x*3.0 + p.z*2.5 + uTime*1.8),
+                sin(p.x*2.5 + p.y*3.0 + uTime*2.2)
+            ) * 0.5;
+        }
+
+        void main() {
+            vLife = aLife;
+            vSeed = aSeed;
+            float t = 1.0 - aLife;  // 0=出生, 1=死亡
+            // 向上运动, 高度受火焰高度控制
+            vec3 pos = position;
+            pos.y += t * uFlameHeight;
+            // 湍流偏移 (底部小, 顶部大)
+            vec3 turb = noise3(pos * 2.0 + aSeed * 10.0) * t * 0.8;
+            pos.xz += turb.xz;
+            // 底部收缩 (火焰根部窄)
+            float radiusScale = 0.3 + t * 0.7;
+            pos.xz *= radiusScale;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            // 粒子大小: 底部大, 顶部小, 带闪烁
+            float flicker = 0.85 + 0.15 * sin(uTime * 15.0 + aSeed * 50.0);
+            gl_PointSize = aSize * (1.0 - t * 0.6) * flicker * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `;
+
+    const fireFragmentShader = `
+        uniform float uSmokeDensity;
+        varying float vLife;
+        varying float vSeed;
+        void main() {
+            // 圆形软边
+            vec2 uv = gl_PointCoord - 0.5;
+            float dist = length(uv);
+            if (dist > 0.5) discard;
+            float alpha = smoothstep(0.5, 0.1, dist);
+            // 颜色渐变: 底部白黄 → 橙 → 红 → 顶部透明
+            float t = 1.0 - vLife;
+            vec3 col;
+            if (t < 0.3)      col = mix(vec3(1.0, 0.95, 0.6), vec3(1.0, 0.6, 0.1), t/0.3);
+            else if (t < 0.7) col = mix(vec3(1.0, 0.6, 0.1), vec3(0.9, 0.2, 0.0), (t-0.3)/0.4);
+            else              col = mix(vec3(0.9, 0.2, 0.0), vec3(0.3, 0.0, 0.0), (t-0.7)/0.3);
+            alpha *= (1.0 - t * 0.8);
+            // 浓烟遮挡火焰
+            alpha *= (1.0 - uSmokeDensity * 0.8);
+            gl_FragColor = vec4(col, alpha);
+        }
+    `;
+
+    class FireParticleSystem {
+        constructor(scene, maxParticles = 5000) {
+            this.scene = scene;
+            this.maxParticles = maxParticles;
+            this.activeCount = 0;
+            this.sources = [];  // [{pos, flameHeight, emissionRate, accumulator}]
+            this.emissionScale = 1.0;
+
+            const geo = new THREE.BufferGeometry();
+            this.positions = new Float32Array(maxParticles * 3);
+            this.life = new Float32Array(maxParticles);
+            this.seed = new Float32Array(maxParticles);
+            this.size = new Float32Array(maxParticles);
+            geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+            geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+            geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
+            geo.setDrawRange(0, 0);
+
+            this.material = new THREE.ShaderMaterial({
+                vertexShader: fireVertexShader,
+                fragmentShader: fireFragmentShader,
+                uniforms: {
+                    uTime: { value: 0 },
+                    uFlameHeight: { value: 2.0 },
+                    uFirePos: { value: new THREE.Vector3(0,0,0) },
+                    uSmokeDensity: { value: 0.0 }
+                },
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                depthTest: false
+            });
+
+            this.points = new THREE.Points(geo, this.material);
+            this.points.frustumCulled = false;
+            scene.add(this.points);
+        }
+
+        updateSources(fireSources, dx, dz, fireData, stride) {
+            const st = stride || 1;
+            const srcs = (fireSources || []).map(f => ({
+                pos: new THREE.Vector3(f.x * dx + dx/2, f.z * dz + dz/2, f.y * dx + dx/2),
+                flameHeight: f.flameHeight || 2.0,
+                emissionRate: Math.min(120, 20 + (f.heatRelease || 0) * 0.15),
+                accumulator: 0
+            }));
+            // ★ 次级火源: 温度场高温体素(火焰蔓延区域)也发射粒子
+            if (fireData && fireData.length) {
+                const depth = fireData.length;
+                const w = (fireData[0] || []).length;
+                const h = (fireData[0]?.[0]) ? fireData[0][0].length : 0;
+                if (w && h) {
+                    const thresh = T_AMB + 0.25 * (T_MAX_HOT - T_AMB);
+                    const baseFh = (fireSources && fireSources[0] && fireSources[0].flameHeight) || 2.0;
+                    const spread = [];
+                    for (let z = 0; z < depth; z++) {
+                        const layer = fireData[z];
+                        if (!layer) continue;
+                        for (let x = 0; x < w; x++) {
+                            const row = layer[x];
+                            if (!row) continue;
+                            for (let y = 0; y < h; y++) {
+                                const t = row[y] || 0;
+                                if (t > thresh) {
+                                    spread.push({ t: t, x: x, y: y, z: z });
+                                }
+                            }
+                        }
+                    }
+                    // 按温度取前 150 个, 控制粒子总量
+                    spread.sort((a, b) => b.t - a.t);
+                    const cap = Math.min(spread.length, 150);
+                    for (let i = 0; i < cap; i++) {
+                        const s = spread[i];
+                        srcs.push({
+                            pos: new THREE.Vector3(s.x * dx * st + dx * st / 2, s.z * dz + dz / 2, s.y * dx * st + dx * st / 2),
+                            flameHeight: baseFh * 0.6,
+                            emissionRate: Math.min(30, 10 + (s.t - T_AMB) * 0.015),
+                            accumulator: 0
+                        });
+                    }
+                }
+            }
+            this.sources = srcs;
+        }
+
+        emit(dt) {
+            const scale = this.emissionScale;
+            for (const src of this.sources) {
+                src.accumulator += src.emissionRate * scale * dt;
+                const toEmit = Math.floor(src.accumulator);
+                src.accumulator -= toEmit;
+                for (let i = 0; i < toEmit; i++) {
+                    if (this.activeCount >= this.maxParticles) return;
+                    const idx = this.activeCount++;
+                    // 在火源底部小圆盘内随机分布 (绝对世界坐标)
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = Math.random() * 0.3;
+                    this.positions[idx*3]   = src.pos.x + Math.cos(angle) * r;
+                    this.positions[idx*3+1] = src.pos.y + Math.random() * 0.1;
+                    this.positions[idx*3+2] = src.pos.z + Math.sin(angle) * r;
+                    this.life[idx] = 1.0;
+                    this.seed[idx] = Math.random();
+                    this.size[idx] = 20 + Math.random() * 15;
+                }
+            }
+        }
+
+        update(dt, time, camera) {
+            // LOD: 相机远离时降低发射率
+            let scale = 1.0;
+            if (camera && this.sources.length > 0) {
+                let dist = Infinity;
+                for (const src of this.sources) dist = Math.min(dist, src.pos.distanceTo(camera.position));
+                if (dist > 25) scale = 0.3;
+            }
+            if (this.activeCount >= this.maxParticles * 0.9) scale *= 0.5;
+            this.emissionScale = scale;
+
+            this.emit(dt);
+            // 生命衰减
+            const decay = dt * 1.2;  // 粒子寿命 ~0.83s
+            for (let i = 0; i < this.activeCount; i++) {
+                this.life[i] -= decay;
+            }
+            // 死亡粒子压缩到末尾
+            let writeIdx = 0;
+            for (let i = 0; i < this.activeCount; i++) {
+                if (this.life[i] > 0) {
+                    if (writeIdx !== i) {
+                        this.positions[writeIdx*3]   = this.positions[i*3];
+                        this.positions[writeIdx*3+1] = this.positions[i*3+1];
+                        this.positions[writeIdx*3+2] = this.positions[i*3+2];
+                        this.life[writeIdx] = this.life[i];
+                        this.seed[writeIdx] = this.seed[i];
+                        this.size[writeIdx] = this.size[i];
+                    }
+                    writeIdx++;
+                }
+            }
+            this.activeCount = writeIdx;
+            this.points.geometry.setDrawRange(0, this.activeCount);
+            this.points.geometry.attributes.position.needsUpdate = true;
+            this.points.geometry.attributes.aLife.needsUpdate = true;
+            this.points.geometry.attributes.aSeed.needsUpdate = true;
+            this.points.geometry.attributes.aSize.needsUpdate = true;
+
+            // 更新 uniform (取第一个火源, 多火源时可扩展为实例化)
+            if (this.sources.length > 0) {
+                this.material.uniforms.uFirePos.value.copy(this.sources[0].pos);
+                this.material.uniforms.uFlameHeight.value = this.sources[0].flameHeight;
+            }
+            this.material.uniforms.uTime.value = time;
+        }
+
+        dispose() {
+            this.scene.remove(this.points);
+            this.points.geometry.dispose();
+            this.material.dispose();
+        }
+    }
+
+    // ============================================================
+    // 烟雾粒子系统 (GPU Shader)
+    // ============================================================
+    const smokeVertexShader = `
+        attribute float aLife;
+        attribute float aSeed;
+        attribute float aSize;
+        attribute vec3  aVelocity;
+        uniform float uTime;
+        varying float vLife;
+        varying float vSeed;
+        varying float vDensity;
+
+        vec3 noise3(vec3 p) {
+            return vec3(
+                sin(p.y*1.5 + p.z + uTime*0.5),
+                sin(p.x*1.5 + p.z*1.2 + uTime*0.4),
+                sin(p.x*1.2 + p.y*1.5 + uTime*0.6)
+            ) * 0.5;
+        }
+
+        void main() {
+            vLife = aLife;
+            vSeed = aSeed;
+            float t = 1.0 - aLife;
+            vec3 pos = position + aVelocity * t * 3.0;
+            // 烟雾湍流 (比火焰慢、幅度大)
+            vec3 turb = noise3(pos * 0.8 + aSeed * 5.0) * t * 1.5;
+            pos += turb;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            float grow = 1.0 + t * 2.0;  // 粒子越老越大
+            gl_PointSize = aSize * grow * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+            vDensity = aLife;
+        }
+    `;
+
+    const smokeFragmentShader = `
+        varying float vLife;
+        varying float vSeed;
+        varying float vDensity;
+        void main() {
+            vec2 uv = gl_PointCoord - 0.5;
+            float dist = length(uv);
+            if (dist > 0.5) discard;
+            // 软边高斯
+            float alpha = smoothstep(0.5, 0.0, dist);
+            alpha *= 0.6 * vDensity;  // 烟雾半透明
+            // 颜色: 淡灰 → 深灰 (基于生命和随机)
+            float gray = 0.35 + 0.25 * vSeed + (1.0 - vDensity) * 0.2;
+            vec3 col = vec3(gray);
+            gl_FragColor = vec4(col, alpha);
+        }
+    `;
+
+    class SmokeParticleSystem {
+        constructor(scene, maxParticles = 6000) {
+            this.scene = scene;
+            this.maxParticles = maxParticles;
+            this.activeCount = 0;
+            this.emissionCells = [];  // [{pos, vel, density, acc}]
+            this.emissionScale = 1.0;
+
+            const geo = new THREE.BufferGeometry();
+            this.positions = new Float32Array(maxParticles * 3);
+            this.velocities = new Float32Array(maxParticles * 3);
+            this.life = new Float32Array(maxParticles);
+            this.seed = new Float32Array(maxParticles);
+            this.size = new Float32Array(maxParticles);
+            geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+            geo.setAttribute('aVelocity', new THREE.BufferAttribute(this.velocities, 3));
+            geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+            geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
+            geo.setDrawRange(0, 0);
+
+            this.material = new THREE.ShaderMaterial({
+                vertexShader: smokeVertexShader,
+                fragmentShader: smokeFragmentShader,
+                uniforms: {
+                    uTime: { value: 0 }
+                },
+                transparent: true,
+                blending: THREE.NormalBlending,
+                depthWrite: false,
+                depthTest: false
+            });
+
+            this.points = new THREE.Points(geo, this.material);
+            this.points.frustumCulled = false;
+            scene.add(this.points);
+        }
+
+        // 从后端浓度场收集发射单元: 浓度 > 0.05 的体素, 速度=垂直上升+温度梯度水平分量
+        updateFromField(smokeData, fireData, dx, dz, depth, stride) {
+            this.emissionCells = [];
+            if (!smokeData || !fireData || !depth) return;
+            const st = stride || 1;
+            const w = (smokeData[0] || []).length;
+            const h = (smokeData[0]?.[0]) ? smokeData[0][0].length : 0;
+            if (!w || !h) return;
+
+            const cells = [];
+            for (let z = 0; z < depth; z++) {
+                const layer = smokeData[z];
+                if (!layer) continue;
+                for (let x = 0; x < w; x++) {
+                    const row = layer[x];
+                    if (!row) continue;
+                    for (let y = 0; y < h; y++) {
+                        const c = row[y] || 0;
+                        if (c <= 0.05) continue;
+                        // 温度梯度水平分量 (驱动水平飘散)
+                        const xm = Math.max(0, x - 1), xp = Math.min(w - 1, x + 1);
+                        const ym = Math.max(0, y - 1), yp = Math.min(h - 1, y + 1);
+                        const gx = ((fireData[z]?.[xp]?.[y] || 0) - (fireData[z]?.[xm]?.[y] || 0)) * 0.002;
+                        const gz = ((fireData[z]?.[x]?.[yp] || 0) - (fireData[z]?.[x]?.[ym] || 0)) * 0.002;
+                        const pos = new THREE.Vector3(x * dx * st + dx * st / 2, z * dz + dz / 2, y * dx * st + dx * st / 2);
+                        cells.push({
+                            pos: pos,
+                            vel: new THREE.Vector3(gx, 1.0, gz),
+                            density: c,
+                            acc: 0,
+                            x: x, y: y, z: z
+                        });
+                    }
+                }
+            }
+            // ★ 空间分层采样: 按浓度降序, 每 ~2m 网格桶只取一个发射单元,
+            //   让烟云均匀覆盖整个建筑, 而不是扫描序前 500 个全挤在一个角落
+            cells.sort((a, b) => b.density - a.density);
+            const bucket = Math.max(2, Math.floor(Math.max(w, h) / 10));
+            const bucketSet = new Set();
+            const chosen = [];
+            for (const c of cells) {
+                const k = Math.floor(c.x / bucket) + ',' + Math.floor(c.y / bucket);
+                if (bucketSet.has(k)) continue;
+                bucketSet.add(k);
+                chosen.push(c);
+                if (chosen.length >= 500) break;
+            }
+            if (chosen.length < 500 && chosen.length < cells.length) {
+                for (const c of cells) {
+                    if (chosen.includes(c)) continue;
+                    chosen.push(c);
+                    if (chosen.length >= 500) break;
+                }
+            }
+            this.emissionCells = chosen;
+        }
+
+        emit(dt) {
+            const scale = this.emissionScale;
+            for (const cell of this.emissionCells) {
+                const rate = Math.min(8, 1 + cell.density * 12) * scale;
+                cell.acc += rate * dt;
+                const n = Math.floor(cell.acc);
+                cell.acc -= n;
+                for (let i = 0; i < n; i++) {
+                    if (this.activeCount >= this.maxParticles) return;
+                    const idx = this.activeCount++;
+                    this.positions[idx*3]   = cell.pos.x + (Math.random() - 0.5) * dx;
+                    this.positions[idx*3+1] = cell.pos.y + (Math.random() - 0.5) * dz;
+                    this.positions[idx*3+2] = cell.pos.z + (Math.random() - 0.5) * dx;
+                    this.velocities[idx*3]   = cell.vel.x + (Math.random() - 0.5) * 0.2;
+                    this.velocities[idx*3+1] = cell.vel.y * (0.8 + Math.random() * 0.4);
+                    this.velocities[idx*3+2] = cell.vel.z + (Math.random() - 0.5) * 0.2;
+                    this.life[idx] = 1.0;
+                    this.seed[idx] = Math.random();
+                    this.size[idx] = 40 + Math.random() * 25;
+                }
+            }
+        }
+
+        update(dt, time, camera) {
+            // LOD: 相机远离时降低发射率
+            let scale = 1.0;
+            if (camera && this.emissionCells.length > 0) {
+                const dist = this.emissionCells[0].pos.distanceTo(camera.position);
+                if (dist > 25) scale = 0.3;
+            }
+            if (this.activeCount >= this.maxParticles * 0.9) scale *= 0.5;
+            this.emissionScale = scale;
+
+            this.emit(dt);
+            const decay = dt / 3.0;  // 烟雾粒子寿命 ~3s
+            for (let i = 0; i < this.activeCount; i++) {
+                this.life[i] -= decay;
+            }
+            let writeIdx = 0;
+            for (let i = 0; i < this.activeCount; i++) {
+                if (this.life[i] > 0) {
+                    if (writeIdx !== i) {
+                        this.positions[writeIdx*3]   = this.positions[i*3];
+                        this.positions[writeIdx*3+1] = this.positions[i*3+1];
+                        this.positions[writeIdx*3+2] = this.positions[i*3+2];
+                        this.velocities[writeIdx*3]   = this.velocities[i*3];
+                        this.velocities[writeIdx*3+1] = this.velocities[i*3+1];
+                        this.velocities[writeIdx*3+2] = this.velocities[i*3+2];
+                        this.life[writeIdx] = this.life[i];
+                        this.seed[writeIdx] = this.seed[i];
+                        this.size[writeIdx] = this.size[i];
+                    }
+                    writeIdx++;
+                }
+            }
+            this.activeCount = writeIdx;
+            this.points.geometry.setDrawRange(0, this.activeCount);
+            this.points.geometry.attributes.position.needsUpdate = true;
+            this.points.geometry.attributes.aVelocity.needsUpdate = true;
+            this.points.geometry.attributes.aLife.needsUpdate = true;
+            this.points.geometry.attributes.aSeed.needsUpdate = true;
+            this.points.geometry.attributes.aSize.needsUpdate = true;
+            this.material.uniforms.uTime.value = time;
+        }
+
+        dispose() {
+            this.scene.remove(this.points);
+            this.points.geometry.dispose();
+            this.material.dispose();
+        }
+    }
+
+    // ================================================================
+    // 5b. 体积烟雾渲染 (3D Texture + Ray Marching)
+    // ================================================================
+    const volumeVertexShader = `
+        out vec3 vWorldPos;
+        void main() {
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+    `;
+
+    const volumeFragmentShader = `
+        precision highp float;
+        uniform highp sampler2D uSmokeTex;
+        uniform highp sampler2D uTempTex;
+        uniform float uLayerCount;    // 高度层数 (3D场打包进2D图集)
+        uniform vec3 uBoxHalf;        // 建筑半尺寸 (米)
+        uniform vec3 uBoxCenter;      // 建筑中心世界坐标
+        uniform vec3 uCameraPos;
+        uniform vec3 uLightDir;
+        uniform vec3 uLightColor;
+        uniform vec3 uAmbientColor;
+        uniform float uAbsorption;
+        uniform float uScattering;
+        uniform float uStepSize;
+        uniform int uMaxSteps;
+        uniform float uDensityThreshold;
+        uniform float uTime;
+
+        in vec3 vWorldPos;
+        out vec4 outFragColor;
+
+        vec2 rayBoxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
+            vec3 invR = 1.0 / rd;
+            vec3 t0 = (bmin - ro) * invR;
+            vec3 t1 = (bmax - ro) * invR;
+            vec3 tmin = min(t0, t1);
+            vec3 tmax = max(t0, t1);
+            float tN = max(max(tmin.x, tmin.y), tmin.z);
+            float tF = min(min(tmax.x, tmax.y), tmax.z);
+            return vec2(tN, tF);
+        }
+
+        float hgPhase(float cosT, float g) {
+            float g2 = g * g;
+            return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
+        }
+
+        // 3D采样: uvw=(X, 深度, 高度) → 2D图集坐标
+        float sampleField(sampler2D tex, vec3 uvw) {
+            vec2 auv = vec2(uvw.x, (uvw.z * uLayerCount + uvw.y) / uLayerCount);
+            return texture(tex, auv).r;
+        }
+
+        void main() {
+            vec3 ro = vWorldPos - uBoxCenter;
+            // ★ 光线方向: 从远面朝相机方向步进 (BackSide 远面 → 穿过体积 → 相机)
+            vec3 rd = normalize(uCameraPos - vWorldPos);
+
+            vec2 tHit = rayBoxIntersect(ro, rd, -uBoxHalf, uBoxHalf);
+            if (tHit.x > tHit.y) discard;
+
+            float tStart = max(tHit.x, 0.0);
+            float tEnd = tHit.y;
+
+            vec3 accumColor = vec3(0.0);
+            float accumAlpha = 0.0;
+
+            for (int i = 0; i < 256; i++) {
+                if (i >= uMaxSteps) break;
+                float t = tStart + float(i) * uStepSize;
+                if (t > tEnd) break;
+
+                vec3 sp = ro + rd * t;
+                vec3 p = sp / uBoxHalf;
+                // 建筑坐标 → 3D场坐标: uvw=(X, 深度, 高度)
+                vec3 uvw = vec3(p.x, p.z, p.y) * 0.5 + 0.5;
+
+                float density = sampleField(uSmokeTex, uvw) / 255.0;
+                if (density < uDensityThreshold) continue;
+
+                float temp = 293.15 + sampleField(uTempTex, uvw) / 255.0 * 880.0;
+                float excessT = max(0.0, temp - 293.15);
+
+                // === 颜色: 深灰浓烟 (可见性好), 高温区偏灰亮 ===
+                vec3 smokeColor = mix(vec3(0.08), vec3(0.25), density);
+                smokeColor += vec3(0.05) * smoothstep(300.0, 800.0, excessT);
+
+                // === 光照散射 ===
+                float lightTrans = exp(-density * uAbsorption * 0.8);
+                float cosT = dot(rd, uLightDir);
+                float phase = hgPhase(cosT, 0.55);
+
+                vec3 scatterL = uLightColor * lightTrans * phase * uScattering;
+                vec3 ambientL = uAmbientColor * uScattering * 0.25;
+                vec3 emissive = vec3(1.0, 0.4, 0.1) * smoothstep(400.0, 900.0, excessT) * density * 0.3;
+
+                vec3 totalLight = scatterL + ambientL + emissive;
+                vec3 color = smokeColor * totalLight;
+
+                // === Beer-Lambert 累积 ===
+                float absorp = density * uAbsorption * uStepSize;
+                float alpha = 1.0 - exp(-absorp);
+
+                accumColor += (1.0 - accumAlpha) * color * alpha;
+                accumAlpha += (1.0 - accumAlpha) * alpha;
+
+                if (accumAlpha > 0.97) break;
+            }
+
+            if (accumAlpha < 0.01) discard;
+            outFragColor = vec4(accumColor, accumAlpha);
+        }
+    `;
+
+    class VolumeSmoke {
+        constructor(scene) {
+            this.scene = scene;
+            this.mesh = null;
+            this.smokeTex = null;
+            this.tempTex = null;
+            this.material = null;
+            this.dims = { w: 0, h: 0, d: 0 };
+        }
+
+        update(data, dx, dz) {
+            if (!data || !data.smoke || !data.temp) return;
+            const stride = data.stride || 1;
+            const dw = Math.ceil(data.width / stride);
+            const dh = Math.ceil(data.height / stride);
+            const dd = Math.ceil(data.depth / stride);
+            const need = dw * dh * dd;
+            if (data.smoke.length < need || data.temp.length < need) return;
+            // ★ 2D 图集: 每高度层一行 (dw x dh*dd), 后端扁平化顺序可直接复用
+            const atlasW = dw, atlasH = dh * dd;
+            const smokeArr = new Uint8Array(atlasW * atlasH * 4);
+            const tempArr = new Uint8Array(atlasW * atlasH * 4);
+            let maxS = -1, maxIdx = 0;
+            for (let i = 0; i < need; i++) {
+                const s = Math.max(0, Math.min(1, data.smoke[i] || 0));
+                smokeArr[i * 4] = Math.round(s * 255);
+                if (s > maxS) { maxS = s; maxIdx = i; }
+                const t = Math.max(293.15, data.temp[i] || 0);
+                tempArr[i * 4] = Math.round(Math.min(1, (t - 293.15) / 880.0) * 255);
+            }
+
+            if (!this.mesh || this.dims.w !== dw || this.dims.h !== dh || this.dims.d !== dd) {
+                this.dispose();
+                this.dims = { w: dw, h: dh, d: dd };
+
+                this.smokeTex = new THREE.DataTexture(smokeArr, atlasW, atlasH, THREE.RGBAFormat);
+                this.smokeTex.type = THREE.UnsignedByteType;
+                this.smokeTex.minFilter = THREE.LinearFilter;
+                this.smokeTex.magFilter = THREE.LinearFilter;
+                this.smokeTex.wrapS = THREE.ClampToEdgeWrapping;
+                this.smokeTex.wrapT = THREE.ClampToEdgeWrapping;
+                this.smokeTex.needsUpdate = true;
+
+                this.tempTex = new THREE.DataTexture(tempArr, atlasW, atlasH, THREE.RGBAFormat);
+                this.tempTex.type = THREE.UnsignedByteType;
+                this.tempTex.minFilter = THREE.LinearFilter;
+                this.tempTex.magFilter = THREE.LinearFilter;
+                this.tempTex.wrapS = THREE.ClampToEdgeWrapping;
+                this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
+                this.tempTex.needsUpdate = true;
+
+                const boxW = data.width * dx, boxH = data.depth * dz, boxD = data.height * dx;
+                const geo = new THREE.BoxGeometry(boxW, boxH, boxD);
+                geo.translate(boxW / 2, boxH / 2, boxD / 2);
+
+                this.material = new THREE.ShaderMaterial({
+                    vertexShader: volumeVertexShader,
+                    fragmentShader: volumeFragmentShader,
+                    glslVersion: THREE.GLSL3,
+                    uniforms: {
+                        uSmokeTex: { value: this.smokeTex },
+                        uTempTex: { value: this.tempTex },
+                        uLayerCount: { value: dd },
+                        uBoxHalf: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
+                        uBoxCenter: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
+                        uCameraPos: { value: new THREE.Vector3() },
+                        uLightDir: { value: new THREE.Vector3(0.3, 0.9, 0.2).normalize() },
+                        uLightColor: { value: new THREE.Color(0.95, 0.90, 0.80) },
+                        uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
+                        uAbsorption: { value: 14.0 },
+                        uScattering: { value: 3.0 },
+                        uStepSize: { value: 0.2 },
+                        uMaxSteps: { value: 256 },
+                        uDensityThreshold: { value: 0.008 },
+                        uTime: { value: 0 }
+                    },
+                    transparent: true,
+                    side: THREE.BackSide,
+                    depthWrite: false,
+                    depthTest: true,
+                    blending: THREE.NormalBlending
+                });
+
+                this.mesh = new THREE.Mesh(geo, this.material);
+                this.mesh.frustumCulled = false;
+                this.mesh.renderOrder = 2;
+                this.scene.add(this.mesh);
+            } else {
+                this.smokeTex.image.data.set(smokeArr);
+                this.smokeTex.needsUpdate = true;
+                this.tempTex.image.data.set(tempArr);
+                this.tempTex.needsUpdate = true;
+            }
+        }
+
+        updateFrame(camera, time) {
+            if (!this.material) return;
+            this.material.uniforms.uCameraPos.value.copy(camera.position);
+            this.material.uniforms.uTime.value = time;
+        }
+
+        setVisible(v) {
+            if (this.mesh) this.mesh.visible = v;
+        }
+
+        dispose() {
+            if (this.mesh) {
+                this.scene.remove(this.mesh);
+                this.mesh.geometry.dispose();
+                this.material.dispose();
+                if (this.smokeTex) this.smokeTex.dispose();
+                if (this.tempTex) this.tempTex.dispose();
+                this.mesh = null;
+            }
+        }
+    }
+
+    // ================================================================
+    // 6. 3D 场景初始化
     // ================================================================
     function init3D() {
         scene = new THREE.Scene();
@@ -243,6 +984,7 @@
         camera.position.set(60, 40, 60);
 
         renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
         renderer.setSize(canvas.clientWidth, canvas.clientHeight);
         renderer.shadowMap.enabled = true;
 
@@ -265,11 +1007,20 @@
 
         loadingTip.style.display = 'none';
         addLog('3D 引擎加载完毕，按住左键可旋转视角', 'info');
+        fireParticles = new FireParticleSystem(scene, 3000);
+        // ★ 体积烟雾接管: 粒子烟雾停用
+        // smokeParticles = new SmokeParticleSystem(scene, 6000);
+        volumeSmoke = new VolumeSmoke(scene);
         animate();
     }
 
     function animate() {
         requestAnimationFrame(animate);
+        const dt = clock.getDelta();
+        const time = clock.getElapsedTime();
+        if (fireParticles) fireParticles.update(dt, time, camera);
+        // if (smokeParticles) smokeParticles.update(dt, time, camera);
+        if (volumeSmoke) volumeSmoke.updateFrame(camera, time);
         controls.update();
         renderer.render(scene, camera);
     }
@@ -292,12 +1043,14 @@
     window.addEventListener('resize', resizeCanvas);
 
     // ================================================================
-    // 6. 核心渲染函数 (真正 3D 全数据支持)
+    // 7. 核心渲染函数 (真正 3D 全数据支持)
     // ================================================================
     function update3DWorld(data) {
         if (!data) return;
         const depth = data.depth || 8;
-        const w = data.width, h = data.height;
+        const st = data.stride || 1;
+        const w = (data.obstacle && data.obstacle[0]) ? data.obstacle[0].length : Math.ceil(data.width / st);
+        const h = (data.obstacle && data.obstacle[0] && data.obstacle[0][0]) ? data.obstacle[0][0].length : Math.ceil(data.height / st);
 
         scene.remove(personGroup);
         personGroup = new THREE.Group();
@@ -308,11 +1061,11 @@
 
         // ★ 遍历真正的 3D 网格数据 (障碍物、温度、烟雾)
         for (let z = 0; z < depth; z++) {
-            const zPos = z * dz + dz / 2;
+            const zPos = z * dz + dz / 2;  // z(垂直) 未降采样
             for (let x = 0; x < w; x++) {
-                const xPos = x * dx + dx / 2;
+                const xPos = x * dx * st + dx * st / 2;
                 for (let y = 0; y < h; y++) {
-                    const yPos = y * dx + dx / 2;
+                    const yPos = y * dx * st + dx * st / 2;
 
                     // ★ 取出 3D 空间对应位置的属性
                     const obs = data.obstacle[z]?.[x]?.[y];
@@ -327,23 +1080,17 @@
                         draw = true;
                         color = valueToColor(obs);
                     }
-                    // 2. 其次渲染烟雾（烟雾优先于温度显示）
+                    // 2. 烟雾已由 GPU 粒子系统渲染, 此处跳过立方体
                     else if (smoke > 0.001) {
-                        draw = true;
-                        const t = Math.min(smoke / 0.15, 1.0);
-                        const gray = 0.78 - t * 0.58;
-                        color = new THREE.Color(gray, gray, gray);
+                        draw = false;
                     }
                     // 3. 温度分级渲染（仅无烟雾时显示）
                     else if (temp > 473.15) {
-                        // > 200°C: 真正的火焰
-                        draw = true;
-                        color = temperatureToColor(temp);
+                        // 火焰已由 GPU 粒子系统渲染, 此处跳过立方体
+                        draw = false;
                     } else if (temp > 373.15) {
-                        // 100-200°C: 热空气（淡橙色）
-                        draw = true;
-                        const t = Math.min((temp - 373.15) / 100.0, 1.0);
-                        color = new THREE.Color(0.95 - t * 0.15, 0.75 - t * 0.35, 0.45 - t * 0.45);
+                        // 火焰已由 GPU 粒子系统渲染, 此处跳过立方体
+                        draw = false;
                     }
 
                     if (draw && color) {
@@ -360,7 +1107,7 @@
         if (matrices.length > 0) {
             if (!voxelMesh || matrices.length !== voxelMesh.count) {
                 if (voxelMesh) scene.remove(voxelMesh);
-                const geometry = new THREE.BoxGeometry(dx * 0.9, dx * 0.9, dz * 0.9);
+                const geometry = new THREE.BoxGeometry(dx * st * 0.9, dz * 0.9, dx * st * 0.9);
                 const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
                 voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
                 voxelMesh.castShadow = true;
@@ -372,6 +1119,9 @@
             }
             voxelMesh.instanceMatrix.needsUpdate = true;
             voxelMesh.instanceColor.needsUpdate = true;
+        } else if (voxelMesh) {
+            scene.remove(voxelMesh);
+            voxelMesh = null;
         }
 
         // ★ 人员生成：接收最新的 3D 坐标 (x, y, z)
@@ -389,7 +1139,7 @@
     }
 
     // ================================================================
-    // 7. 绑定 UI 控制按钮 (保持原本逻辑)
+    // 8. 绑定 UI 控制按钮 (保持原本逻辑)
     // ================================================================
     document.getElementById('startBtn').onclick = () => sendCommand('start');
     document.getElementById('pauseBtn').onclick = () => sendCommand('pause');
@@ -416,7 +1166,7 @@
     });
 
     // ================================================================
-    // 8. 模态框兼容 (地图编辑器保持原样)
+    // 9. 模态框兼容 (地图编辑器保持原样)
     // ================================================================
     const modal = document.getElementById('mapModal');
     const modalClose = document.querySelector('.close');
@@ -605,11 +1355,24 @@
     };
 
     // ================================================================
-    // 9. 启动运行！
+    // 10. 启动运行！
     // ================================================================
     setTimeout(resizeCanvas, 100);
     init3D();
-    setInterval(fetchState, 150);
+    setInterval(fetchState, 1000);
+
+    // ★ 体积烟雾: 独立低频轮询 /smokeVolume (服务器按时间缓存, 开销小)
+    async function fetchSmokeVolume() {
+        try {
+            const resp = await fetch('/smokeVolume');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (volumeSmoke) volumeSmoke.update(data, dx, dz);
+        } catch (e) {
+            // 静默失败, 不影响主循环
+        }
+    }
+    setInterval(fetchSmokeVolume, 500);
     fetchState();
     addLog('3D 物理真实版加载完成，按住左键可旋转视角', 'info');
 </script>

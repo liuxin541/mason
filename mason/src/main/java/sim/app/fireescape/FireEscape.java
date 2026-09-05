@@ -1,4 +1,4 @@
-package sim.app.fireescape;
+﻿package sim.app.fireescape;
 
 import sim.engine.*;
 import sim.field.grid.*;
@@ -165,7 +165,7 @@ public class FireEscape extends SimState {
                 for (int y = 0; y < height; y++) {
                     for (int z = 0; z < depth; z++) {
                         int wtype = obstacleGrid.get(x, y, z);
-                        if (wtype != TYPE_WINDOW && wtype != 6) continue;
+                        if (wtype != TYPE_WINDOW) continue;
                         for (int dx2 = -6; dx2 <= 6; dx2++) {
                             for (int dy2 = -6; dy2 <= 6; dy2++) {
                                 for (int dz2 = -1; dz2 <= 8; dz2++) {
