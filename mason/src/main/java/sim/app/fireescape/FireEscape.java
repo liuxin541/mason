@@ -159,6 +159,31 @@ public class FireEscape extends SimState {
             //    防止室外区域从正常开口或竖向通道灌入建筑内部。
             rebuildInsideGridFromExterior();
 
+            // ★ 窗户外部溢出: 将窗户周围大范围外部空气标记为inside, 让烟雾从窗户冒出形成羽状
+            int windowOverflow = 0;
+            for (int x = 0; x < width; x++) {
+                for (int y = 0; y < height; y++) {
+                    for (int z = 0; z < depth; z++) {
+                        int wtype = obstacleGrid.get(x, y, z);
+                        if (wtype != TYPE_WINDOW && wtype != 6) continue;
+                        for (int dx2 = -6; dx2 <= 6; dx2++) {
+                            for (int dy2 = -6; dy2 <= 6; dy2++) {
+                                for (int dz2 = -1; dz2 <= 8; dz2++) {
+                                    int nx = x+dx2, ny = y+dy2, nz = z+dz2;
+                                    if (nx<0||nx>=width||ny<0||ny>=height||nz<0||nz>=depth) continue;
+                                    if (insideGrid.get(nx, ny, nz) == 1) continue;
+                                    if (obstacleGrid.get(nx, ny, nz) == TYPE_WALL) continue;
+                                    insideGrid.set(nx, ny, nz, 1);
+                                    fuelGrid.set(nx, ny, nz, 0);
+                                    windowOverflow++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            System.out.println("[BIM] 窗户外部溢出: 新增inside体素 " + windowOverflow + " 个");
+
 
             // 5. ★ 坐标系统统一：从 semantic_info.json 读取 voxel_size / origin_offset，
             //    覆盖默认 deltaX/deltaZ，使后端物理计算与 Python 体素网格一致。

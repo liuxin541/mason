@@ -1,4 +1,4 @@
-package sim.app.fireescape;
+﻿package sim.app.fireescape;
 
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpHandler;
@@ -20,6 +20,7 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.Base64;
+import java.util.zip.GZIPOutputStream;
 
 public class FireEscapeHttpServer {
     private static FireEscape model;
@@ -27,7 +28,7 @@ public class FireEscapeHttpServer {
     private static String htmlContent;
     private static ScheduledExecutorService stepScheduler;
     private static volatile boolean autoStepRunning = false;
-    private static int stepIntervalMs = 150;
+    private static int stepIntervalMs = 500;  // 1x速度=1倍实时(每步0.5s, 每秒2步)
     private static volatile int speedMultiplier = 1;
 
     private static FireSpread fireSpread;
@@ -49,6 +50,7 @@ public class FireEscapeHttpServer {
         server.createContext("/", new IndexHandler());
         server.createContext("/ifc_output", new StaticFileHandler("ifc_output"));
         server.createContext("/state", new StateHandler());
+        server.createContext("/smokeVolume", new SmokeVolumeHandler());
         server.createContext("/command", new CommandHandler());
         server.createContext("/listMaps", new ListMapsHandler());
         server.createContext("/loadMap", new LoadMapHandler());
@@ -62,10 +64,11 @@ public class FireEscapeHttpServer {
     }
 
     // ---- 原版速度控制 ----
+    // 基础间隔500ms: 每步0.5s物理时间, 1x速度=1倍实时(每秒2步=1s物理时间)
     private static void setSpeed(int multiplier) {
         if (multiplier < 1) multiplier = 1;
         speedMultiplier = multiplier;
-        int newInterval = 150 / multiplier;
+        int newInterval = 500 / multiplier;
         if (newInterval < 10) newInterval = 10;
         boolean wasRunning = autoStepRunning;
         if (wasRunning) stopAutoStep();
@@ -159,7 +162,8 @@ public class FireEscapeHttpServer {
                 customInside = auto;
             }
         }
-        syncInsideGridWithObstacles();
+        // ★ 仅2D自定义地图模式需要同步（voxel模型和简单房间已有正确的3D insideGrid）
+        if (customObstacles != null) syncInsideGridWithObstacles();
 
         if (noFireMode) {
             // ★ 无火模式：清空火源，火场保持环境温度
@@ -336,8 +340,126 @@ public class FireEscapeHttpServer {
             String json = buildStateJson();
             byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
+            String ae = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+            if (ae != null && ae.toLowerCase().contains("gzip")) {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream(bytes.length / 2);
+                try (GZIPOutputStream gz = new GZIPOutputStream(bos)) { gz.write(bytes); }
+                byte[] gzBytes = bos.toByteArray();
+                if (gzBytes.length < bytes.length) {
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                    exchange.sendResponseHeaders(200, gzBytes.length);
+                    try (OutputStream os = exchange.getResponseBody()) { os.write(gzBytes); }
+                    return;
+                }
+            }
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
+        }
+    }
+
+    // ★ 零长度响应必须关闭响应流, 否则 JDK HttpServer 客户端永远收不到响应
+    private static void respondOk(HttpExchange exchange) throws IOException {
+        exchange.sendResponseHeaders(200, 0);
+        exchange.getResponseBody().close();
+    }
+
+    // ===== /smokeVolume: 输出扁平化3D浓度场+温度场 (供前端体积渲染) =====
+    // 降采样取 max + 按模拟时间缓存 + gzip, 避免大载荷拖垮轮询
+    // 支持 ?stride=N 参数: 简单房间用1(全分辨率), 大楼用2/4(控制载荷)
+    static class SmokeVolumeHandler implements HttpHandler {
+        private static double cachedTime = -1;
+        private static int cachedStride = -1;
+        private static byte[] cachedBody = null;
+
+        @Override public void handle(HttpExchange exchange) throws IOException {
+            // 解析 stride 参数
+            String query = exchange.getRequestURI().getQuery();
+            int stride = 2;
+            if (query != null && query.contains("stride=")) {
+                try {
+                    stride = Integer.parseInt(query.substring(query.indexOf("stride=") + 7).split("&")[0]);
+                    if (stride < 1) stride = 1;
+                    if (stride > 8) stride = 8;
+                } catch (Exception e) { /* 默认2 */ }
+            }
+            double t = model.currentTime;
+            if (cachedBody == null || cachedTime != t || cachedStride != stride) {
+                cachedBody = buildSmokeVolumeJson(stride).getBytes(StandardCharsets.UTF_8);
+                cachedTime = t;
+                cachedStride = stride;
+            }
+            byte[] bytes = cachedBody;
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            String ae = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+            if (ae != null && ae.toLowerCase().contains("gzip")) {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream(bytes.length / 3);
+                try (GZIPOutputStream gz = new GZIPOutputStream(bos)) { gz.write(bytes); }
+                byte[] gzBytes = bos.toByteArray();
+                if (gzBytes.length < bytes.length) {
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                    exchange.sendResponseHeaders(200, gzBytes.length);
+                    try (OutputStream os = exchange.getResponseBody()) { os.write(gzBytes); }
+                    return;
+                }
+            }
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
+        }
+
+        private static String buildSmokeVolumeJson(int stride) {
+            int w = model.gridWidth, h = model.gridHeight, d = model.gridDepth;
+            int dw = (w + stride - 1) / stride;
+            int dh = (h + stride - 1) / stride;
+            int dd = (d + stride - 1) / stride;
+            double[][][] C = model.smokeGrid.field;
+            double[][][] T = model.fireGrid.field;
+            int[][][] inside = model.insideGrid.field;
+            float[] smoke = new float[dw * dh * dd];
+            float[] temp = new float[dw * dh * dd];
+            int idx = 0;
+            for (int z = 0; z < d; z += stride) {
+                for (int y = 0; y < h; y += stride) {
+                    for (int x = 0; x < w; x += stride) {
+                        float sMax = 0f, tMax = (float) FireEscape.T_AMBIENT;
+                        boolean anyInside = false;
+                        for (int k = 0; k < stride && z + k < d; k++) {
+                            int zz = z + k;
+                            for (int j = 0; j < stride && y + j < h; j++) {
+                                int yy = y + j;
+                                double[] cx = C[x][yy];
+                                double[] tx = T[x][yy];
+                                int[] ix = inside[x][yy];
+                                for (int i = 0; i < stride && x + i < w; i++) {
+                                    if (ix[zz] == 1) anyInside = true;
+                                    double s = cx[zz];
+                                    double t2 = tx[zz];
+                                    if (s > sMax) sMax = (float) s;
+                                    if (t2 > tMax) tMax = (float) t2;
+                                }
+                            }
+                        }
+                        if (!anyInside) { sMax = 0f; tMax = (float) FireEscape.T_AMBIENT; }
+                        smoke[idx] = sMax;
+                        temp[idx] = tMax;
+                        idx++;
+                    }
+                }
+            }
+            StringBuilder sb = new StringBuilder(200 + idx * 24);
+            sb.append("{\"width\":").append(w).append(",\"height\":").append(h).append(",\"depth\":").append(d)
+              .append(",\"stride\":").append(stride)
+              .append(",\"smoke\":[");
+            for (int i = 0; i < idx; i++) {
+                if (i > 0) sb.append(',');
+                sb.append(Math.round(smoke[i] * 100.0) / 100.0);
+            }
+            sb.append("],\"temp\":[");
+            for (int i = 0; i < idx; i++) {
+                if (i > 0) sb.append(',');
+                sb.append(Math.round(temp[i] * 10.0) / 10.0);
+            }
+            sb.append("]}");
+            return sb.toString();
         }
     }
 
@@ -347,7 +469,7 @@ public class FireEscapeHttpServer {
                 String body = readRequestBody(exchange.getRequestBody());
                 String cmd = body.startsWith("cmd=") ? body.substring(4) : null;
                 if (cmd != null) {
-                    if (cmd.startsWith("speed_")) { int mult = Integer.parseInt(cmd.substring(6)); setSpeed(mult); exchange.sendResponseHeaders(200, 0); return; }
+                    if (cmd.startsWith("speed_")) { int mult = Integer.parseInt(cmd.substring(6)); setSpeed(mult); respondOk(exchange); return; }
                     switch (cmd) {
                         case "start": noFireMode = false; resetModel(); startAutoStep(); break;
                         case "pause": stopAutoStep(); break;
@@ -355,6 +477,16 @@ public class FireEscapeHttpServer {
                         case "step": stopAutoStep(); model.schedule.step(model); break;
                         case "reset": noFireMode = false; resetModel(); break;
                         case "togglePersons": model.showPersons = !model.showPersons; break;
+                        case "map_simple":
+                            model.mapMode = "simple";
+                            resetModel();
+                            System.out.println("[Map] 切换到简单矩形房间");
+                            break;
+                        case "map_building":
+                            model.mapMode = "building";
+                            resetModel();
+                            System.out.println("[Map] 切换到BIM大楼模型");
+                            break;
                         case "noFire":
                             noFireMode = true;
                             boolean wasRunning = autoStepRunning;
@@ -366,7 +498,7 @@ public class FireEscapeHttpServer {
                     }
                 }
             }
-            exchange.sendResponseHeaders(200, 0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -395,7 +527,7 @@ public class FireEscapeHttpServer {
             String query = exchange.getRequestURI().getQuery();
             if (query==null || !query.startsWith("name=")) { exchange.sendResponseHeaders(400,-1); return; }
             String mapName = URLDecoder.decode(query.substring(5), "UTF-8");
-            try { loadMapFile(mapName); exchange.sendResponseHeaders(200,0); } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(500,-1); }
+            try { loadMapFile(mapName); respondOk(exchange); } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(500,-1); }
         }
     }
 
@@ -416,7 +548,7 @@ public class FireEscapeHttpServer {
             int[][] obstacles = new int[model.gridWidth][model.gridHeight];
             for (int i=0; i<model.gridWidth; i++) for (int j=0; j<model.gridHeight; j++) obstacles[i][j] = model.obstacleGrid.get(i,j,0);
             saveMapFile(name, obstacles);
-            exchange.sendResponseHeaders(200,0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -493,7 +625,7 @@ public class FireEscapeHttpServer {
             } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(400,-1); return; }
             if (points.size() < 3) { exchange.sendResponseHeaders(400,-1); return; }
             fillInsideFromPolygon(points);
-            exchange.sendResponseHeaders(200,0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -524,7 +656,7 @@ public class FireEscapeHttpServer {
             for (int[] p : sources) { if (model.insideGrid.get(p[0],p[1],0)==1 && model.obstacleGrid.get(p[0],p[1],0)==0) valid.add(new int[]{p[0], p[1], 0}); }
             customFireSources = valid.isEmpty()? null : valid;
             resetModel();
-            exchange.sendResponseHeaders(200,0);
+            respondOk(exchange);
         }
         private String readRequestBody(InputStream is) throws IOException {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
@@ -548,20 +680,28 @@ public class FireEscapeHttpServer {
         sb.append("\"height\":").append(model.gridHeight).append(",");
         sb.append("\"depth\":").append(model.gridDepth).append(",");
 
+        // ★ 网格数据压缩: stride=2 (x,y 各降采样一半) + 数值取整, 载荷从 ~12MB 降到 ~1.5MB
+        int stride = 2;
+        sb.append("\"stride\":").append(stride).append(",");
+
         sb.append("\"fire\":[");
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
                     double val = model.fireGrid.get(i, j, z);
                     if (model.obstacleGrid.get(i, j, z) == 1 || model.insideGrid.get(i, j, z) == 0) val = FireEscape.T_AMBIENT;
-                    sb.append(val);
-                    if (j<model.gridHeight-1) sb.append(",");
+                    sb.append(((double)((long)(val*10.0)))/10.0);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -571,16 +711,20 @@ public class FireEscapeHttpServer {
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
                     double val = model.smokeGrid.get(i, j, z);
                     if (model.obstacleGrid.get(i, j, z) == 1 || model.insideGrid.get(i, j, z) == 0) val = 0.0;
-                    sb.append(val);
-                    if (j<model.gridHeight-1) sb.append(",");
+                    sb.append(((double)((long)(val*10.0)))/10.0);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -590,14 +734,23 @@ public class FireEscapeHttpServer {
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
-                    sb.append(model.obstacleGrid.get(i, j, z));
-                    if (j<model.gridHeight-1) sb.append(",");
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
+                    int val = model.obstacleGrid.get(i, j, z);
+                    // 2x2 块取最大(墙/楼梯/出口不丢失)
+                    if (i+1 < model.gridWidth) val = Math.max(val, model.obstacleGrid.get(i+1, j, z));
+                    if (j+1 < model.gridHeight) val = Math.max(val, model.obstacleGrid.get(i, j+1, z));
+                    if (i+1 < model.gridWidth && j+1 < model.gridHeight) val = Math.max(val, model.obstacleGrid.get(i+1, j+1, z));
+                    sb.append(val);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -607,14 +760,22 @@ public class FireEscapeHttpServer {
         for (int z=0; z<model.gridDepth; z++) {
             if (z>0) sb.append(",");
             sb.append("[");
-            for (int i=0; i<model.gridWidth; i++) {
+            int ix=0;
+            for (int i=0; i<model.gridWidth; i+=stride) {
+                if (ix>0) sb.append(",");
                 sb.append("[");
-                for (int j=0; j<model.gridHeight; j++) {
-                    sb.append(model.insideGrid.get(i, j, z));
-                    if (j<model.gridHeight-1) sb.append(",");
+                int iy=0;
+                for (int j=0; j<model.gridHeight; j+=stride) {
+                    if (iy>0) sb.append(",");
+                    int val = model.insideGrid.get(i, j, z);
+                    if (i+1 < model.gridWidth) val = Math.max(val, model.insideGrid.get(i+1, j, z));
+                    if (j+1 < model.gridHeight) val = Math.max(val, model.insideGrid.get(i, j+1, z));
+                    if (i+1 < model.gridWidth && j+1 < model.gridHeight) val = Math.max(val, model.insideGrid.get(i+1, j+1, z));
+                    sb.append(val);
+                    iy++;
                 }
                 sb.append("]");
-                if (i<model.gridWidth-1) sb.append(",");
+                ix++;
             }
             sb.append("]");
         }
@@ -622,12 +783,21 @@ public class FireEscapeHttpServer {
 
         sb.append("\"fireSources\":[");
         boolean firstSrc=true;
+        int srcIdx=0;
         for (int[] p : model.fireSourcePositions) {
             if (!firstSrc) sb.append(",");
-            sb.append("{\"x\":").append(p[0]).append(",\"y\":").append(p[1]).append(",\"z\":").append(p[2]).append("}");
+            double hr = srcIdx < model.fireSourceHeatRelease.length ? model.fireSourceHeatRelease[srcIdx] : 0.0;
+            double fh = srcIdx < model.fireSourceFlameHeight.length ? model.fireSourceFlameHeight[srcIdx] : 0.0;
+            double pr = srcIdx < model.fireSourcePlumeRadius.length ? model.fireSourcePlumeRadius[srcIdx] : 0.0;
+            sb.append("{\"x\":").append(p[0]).append(",\"y\":").append(p[1]).append(",\"z\":").append(p[2])
+              .append(",\"heatRelease\":").append(hr)
+              .append(",\"flameHeight\":").append(fh)
+              .append(",\"plumeRadius\":").append(pr).append("}");
             firstSrc=false;
+            srcIdx++;
         }
         sb.append("],");
+        sb.append("\"fireSourceCount\":").append(model.fireSourcePositions.size()).append(",");
 
         // ★ 出口位置（供小地图绘制绿色出口标记）
         sb.append("\"exits\":[");

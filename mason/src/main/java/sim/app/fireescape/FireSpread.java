@@ -26,7 +26,7 @@ public class FireSpread implements Steppable {
     private static final double SMOKE_FLOOR            = 0.002;
     private static final double SMOKE_CEIL             = 1.0;
     // ===== 方案1:火源烟气注入速率(单位浓度/秒),控制产烟强度 =====
-    private static final double SMOKE_SOURCE_RATE      = 5.0;
+    private static final double SMOKE_SOURCE_RATE      = 2.0;
     private static final int    EXIT_RADIUS            = 2;
     private static final double KILOWATT_TO_WATT       = 1000.0;
     private static final double CONV_RADIUS_METERS     = 1.0;
@@ -218,7 +218,7 @@ public class FireSpread implements Steppable {
         for (int x = 0; x < w; x++) {
             for (int y = 0; y < h; y++) {
                 for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) {
+                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) {
                         nextT[x][y][z] = T_AMB;
                         nextC[x][y][z] = 0.0;
                     } else {
@@ -244,7 +244,7 @@ public class FireSpread implements Steppable {
             for (int x = 0; x < w; x++)
                 for (int y = 0; y < h; y++)
                     for (int z = 0; z < d; z++) {
-                        if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) continue;
+                        if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
                         nextT[x][y][z] = T[x][y][z] - _cooling * DT_FINAL * (T[x][y][z] - T_AMB);
                         if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
                         // ===== 优化项 14: Stefan-Boltzmann 辐射冷却 =====
@@ -263,6 +263,20 @@ public class FireSpread implements Steppable {
         double T_source = T_AMB + Q_ratio * (T_FLAME - T_AMB);
         double srcRadiusSq05 = (double)srcRadius * srcRadius * GAUSSIAN_SIGMA_FACTOR;
 
+        // ===== 火焰物理参数输出（Heskestad 火焰高度公式）=====
+        double Q_per_src = Q_total / Math.max(1, nSources);
+        // 火源等效直径: 体素直径乘以0.6(实际燃烧区小于体素网格), 避免小火源火焰被压得过低
+        double flameDiameter = 2.0 * srcRadius * dx * 0.6;
+        for (int idx = 0; idx < nSources; idx++) {
+            fire.fireSourceHeatRelease[idx] = Q_per_src;
+            // Heskestad: L = 0.235 * Q^(2/5) - 1.02 * D  (Q in kW, L in m)
+            double L_flame = 0.235 * Math.pow(Q_per_src, 0.4) - 1.02 * flameDiameter;
+            if (L_flame < 0.8) L_flame = 0.8;  // 最小火焰高度(展示用, 避免看不见)
+            fire.fireSourceFlameHeight[idx] = L_flame;
+            // 羽流半径: 近似随高度线性扩展 (McCaffrey)
+            fire.fireSourcePlumeRadius[idx] = 0.5 * flameDiameter + 0.18 * L_flame;
+        }
+
         // ===================================================================
         // (2) 火灾源注入 + 优化项 11: 羽流卷吸 (Plume Entrainment)
         // ===================================================================
@@ -275,7 +289,7 @@ public class FireSpread implements Steppable {
                         int nx = fire.fireGrid.stx(cx + dx2);
                         int ny = fire.fireGrid.sty(cy + dy2);
                         int nz = fire.fireGrid.stz(cz + dz2);
-                        if (inside[nx][ny][nz] == 1 && obstacle[nx][ny][0] != TYPE_WALL) {
+                        if (inside[nx][ny][nz] == 1 && obstacle[nx][ny][nz] != TYPE_WALL) {
                             double distSq = (double)dx2*dx2 + (double)dy2*dy2 + (double)dz2*dz2;
                             double distLim = (double)srcRadius + 0.5;
                             if (distSq > distLim * distLim) continue;
@@ -329,7 +343,7 @@ public class FireSpread implements Steppable {
         for (int x = 0; x < w; x++) {
             for (int y = 0; y < h; y++) {
                 for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][0] != TYPE_FUEL || fuel[x][y][z] <= 0) continue;
+                    if (obstacle[x][y][z] != TYPE_FUEL || fuel[x][y][z] <= 0) continue;
                     if (T[x][y][z] < T_IGN) continue;
 
                     double tempFactor = Math.min(TEMP_FACTOR_MAX,
@@ -346,7 +360,7 @@ public class FireSpread implements Steppable {
                         fuel[x][y][z] -= fuelBurned;
                         if (fuel[x][y][z] <= 0) {
                             fuel[x][y][z] = 0;
-                            obstacle[x][y][0] = TYPE_EMPTY;
+                            obstacle[x][y][z] = TYPE_EMPTY;
                         }
                     }
                 }
@@ -378,7 +392,7 @@ public class FireSpread implements Steppable {
                         int nx = fire.fireGrid.stx(cx + dx2);
                         int ny = fire.fireGrid.sty(cy + dy2);
                         int nz = fire.fireGrid.stz(cz + dz2);
-                        if (inside[nx][ny][nz] == 0 || obstacle[nx][ny][0] == TYPE_WALL)
+                        if (inside[nx][ny][nz] == 0 || obstacle[nx][ny][nz] == TYPE_WALL)
                             continue;
                         double distSq = (double)dx2*dx2*dxSq + (double)dy2*dy2*dxSq + (double)dz2*dz2*dzSq;
                         if (distSq > convRadius * convRadius) continue;
@@ -407,7 +421,7 @@ public class FireSpread implements Steppable {
         for (int x = 1; x < w-1; x++) {
             for (int y = 1; y < h-1; y++) {
                 for (int z = 1; z < d-1; z++) {
-                    if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) continue;
+                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
                     double centerT = nextT[x][y][z];
                     double laplacian = 0.0;
                     double totalW = 0.0;
@@ -416,7 +430,7 @@ public class FireSpread implements Steppable {
                         int dx2 = NB6_FACES[n][0], dy2 = NB6_FACES[n][1], dz2 = NB6_FACES[n][2];
                         int nx = x + dx2, ny = y + dy2, nz = z + dz2;
                         boolean in_bounds = (nx >= 0 && nx < w && ny >= 0 && ny < h && nz >= 0 && nz < d);
-                        boolean is_air = in_bounds && obstacle[nx][ny][0] != TYPE_WALL && inside[nx][ny][nz] == 1;
+                        boolean is_air = in_bounds && obstacle[nx][ny][nz] != TYPE_WALL && inside[nx][ny][nz] == 1;
                         double wgt = WGT_FACE;
                         // z 方向网格更细,热流交换更频繁,按比例略增权重
                         if (dz2 != 0) wgt *= anisotropyFace * 0.7;
@@ -452,7 +466,7 @@ public class FireSpread implements Steppable {
         for (int x = 1; x < w-1; x++) {
             for (int y = 1; y < h-1; y++) {
                 for (int z = 1; z < d-1; z++) {
-                    if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) continue;
+                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
                     double laplacianC = 0.0;
                     double totalW = 0.0;
                     // ===== 优化项 4+13: 烟气扩散 6 面邻居 + Richardson 分层 =====
@@ -462,7 +476,7 @@ public class FireSpread implements Steppable {
                         if (dz2 != 0) wgt *= anisotropyZ * 0.7;
                         int nx = x + dx2, ny = y + dy2, nz = z + dz2;
                         if (nx >= 0 && nx < w && ny >= 0 && ny < h && nz >= 0 && nz < d) {
-                            if (obstacle[nx][ny][0] != TYPE_WALL && inside[nx][ny][nz] == 1) {
+                            if (obstacle[nx][ny][nz] != TYPE_WALL && inside[nx][ny][nz] == 1) {
                                 double neighborC = nextC[nx][ny][nz];
                                 laplacianC += wgt * neighborC;
                                 totalW += wgt;
@@ -521,7 +535,7 @@ public class FireSpread implements Steppable {
         for (int x = 1; x < w-1; x++) {
             for (int y = 1; y < h-1; y++) {
                 for (int z = 1; z < d-1; z++) {
-                    if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) continue;
+                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
                     if (C_afterDiff[x][y][z] < MIN_SMOKE_FOR_ADVECT) continue;
 
                     double T_cell = nextT[x][y][z];
@@ -619,7 +633,7 @@ public class FireSpread implements Steppable {
                                     if (dx2 == 0 && dy2 == 0) continue;
                                     int nx = x + dx2, ny = y + dy2;
                                     if (nx < 1 || nx >= w-1 || ny < 1 || ny >= h-1) continue;
-                                    if (inside[nx][ny][z] == 0 || obstacle[nx][ny][0] == TYPE_WALL) continue;
+                                    if (inside[nx][ny][z] == 0 || obstacle[nx][ny][z] == TYPE_WALL) continue;
                                     double r2 = (double)dx2*dx2 + (double)dy2*dy2;
                                     if (r2 > cjRi * cjRi) continue;
                                     double decay = Math.exp(-r2 / cjR2_05);
@@ -646,7 +660,7 @@ public class FireSpread implements Steppable {
         for (int x = 0; x < w; x++)
             for (int y = 0; y < h; y++)
                 for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) continue;
+                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
                     nextC[x][y][z] = C_afterAdvection[x][y][z];
                     nextT[x][y][z] = T_afterAdvection[x][y][z];
                 }
@@ -657,7 +671,7 @@ public class FireSpread implements Steppable {
         for (int x = 0; x < w; x++)
             for (int y = 0; y < h; y++)
                 for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][0] == TYPE_WALL || inside[x][y][z] == 0) continue;
+                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
                     nextT[x][y][z] -= _cooling * DT_FINAL * (nextT[x][y][z] - T_AMB);
                     if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
 
@@ -687,13 +701,15 @@ public class FireSpread implements Steppable {
         // ===================================================================
         for (int x = 0; x < w; x++) {
             for (int y = 0; y < h; y++) {
-                if (obstacle[x][y][0] != TYPE_EXIT) continue;
+                boolean hasExit = false;
+                for (int zz = 0; zz < d; zz++) { if (obstacle[x][y][zz] == TYPE_EXIT) { hasExit = true; break; } }
+                if (!hasExit) continue;
                 for (int dx2 = -EXIT_RADIUS; dx2 <= EXIT_RADIUS; dx2++) {
                     for (int dy2 = -EXIT_RADIUS; dy2 <= EXIT_RADIUS; dy2++) {
                         int nx = x + dx2, ny = y + dy2;
                         if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                         for (int z = 0; z < d; z++) {
-                            if (inside[nx][ny][z] == 0 || obstacle[nx][ny][0] == TYPE_WALL) continue;
+                            if (inside[nx][ny][z] == 0 || obstacle[nx][ny][z] == TYPE_WALL) continue;
                             double dist = Math.hypot(dx2, dy2);
                             double exhaustRate = _exhaust * DT_FINAL / (dist + 1.0);
                             nextC[nx][ny][z] -= exhaustRate * nextC[nx][ny][z];
@@ -718,6 +734,92 @@ public class FireSpread implements Steppable {
                     if (nextC[x][y][z] > SMOKE_CEIL) nextC[x][y][z] = SMOKE_CEIL;
                     if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0;
                 }
+
+        // ★ 烟雾从窗户涌出: 先在建筑内扩散, 浓度足够高时才从窗户挤出, 然后柱状上升
+        for (int x = 0; x < w; x++) {
+            for (int y = 0; y < h; y++) {
+                for (int z = 0; z < d; z++) {
+                    if (obstacle[x][y][z] != 6) continue;
+                    int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+
+                    // === 1. 窗户挤出: 只有当窗户内侧浓度足够高(>0.15)时才向外侧挤出 ===
+                    // 真实火灾: 烟雾先充满房间, 内部压力/浓度足够高时才从窗户涌出
+                    if (nextC[x][y][z] > 0.15) {
+                        for (int[] dir : dirs) {
+                            int nx = x+dir[0], ny = y+dir[1], nz = z+dir[2];
+                            if (nx<0||nx>=w||ny<0||ny>=h||nz<0||nz>=d) continue;
+                            if (obstacle[nx][ny][nz] == TYPE_WALL) continue;
+                            if (inside[nx][ny][nz] == 0) continue;
+                            double diff = nextC[x][y][z] - nextC[nx][ny][nz];
+                            if (diff > 0.02) {
+                                // 挤出系数: 水平方向0.45(比之前0.7降低), 垂直0.2
+                                double coeff = (dir[2] == 0) ? 0.45 : 0.2;
+                                double transfer = diff * coeff * DT_FINAL;
+                                nextC[x][y][z] -= transfer;
+                                nextC[nx][ny][nz] += transfer;
+                                double tDiff = nextT[x][y][z] - nextT[nx][ny][nz];
+                                if (tDiff > 0) {
+                                    double tTransfer = tDiff * 0.35 * DT_FINAL;
+                                    nextT[x][y][z] -= tTransfer;
+                                    nextT[nx][ny][nz] += tTransfer;
+                                }
+                            }
+                        }
+                    }
+
+                    // === 2. 柱状上升: 窗户外侧±5体素区域, 增强向上浮力(只有当该区域有烟雾时) ===
+                    for (int hx = -5; hx <= 5; hx++) {
+                        for (int hy = -5; hy <= 5; hy++) {
+                            if (hx == 0 && hy == 0) continue;
+                            int horizDist = Math.abs(hx) + Math.abs(hy);
+                            if (horizDist > 5) continue;
+                            int px = x + hx, py = y + hy;
+                            if (px<0||px>=w||py<0||py>=h) continue;
+                            // 向上7层, 浮力驱动柱状上升
+                            for (int uz = z + 1; uz <= Math.min(z + 7, d - 1); uz++) {
+                                if (obstacle[px][py][uz] == TYPE_WALL) break;
+                                if (inside[px][py][uz] == 0) continue;
+                                int belowZ = uz - 1;
+                                if (belowZ < 0 || obstacle[px][py][belowZ] == TYPE_WALL) continue;
+                                if (inside[px][py][belowZ] == 0) continue;
+                                double cBelow = nextC[px][py][belowZ];
+                                double cAbove = nextC[px][py][uz];
+                                // 浮力系数: 离窗越近越强, 越高越弱
+                                double buoyFactor = 0.4 * (1.0 - horizDist / 6.0) * (1.0 - (uz - z) / 8.0);
+                                if (buoyFactor > 0.02 && cBelow > cAbove + 0.002) {
+                                    double upTransfer = (cBelow - cAbove) * buoyFactor * DT_FINAL;
+                                    nextC[px][py][belowZ] -= upTransfer;
+                                    nextC[px][py][uz] += upTransfer;
+                                    if (nextT[px][py][belowZ] > nextT[px][py][uz] + 3) {
+                                        double tUp = (nextT[px][py][belowZ] - nextT[px][py][uz]) * buoyFactor * 0.7 * DT_FINAL;
+                                        nextT[px][py][belowZ] -= tUp;
+                                        nextT[px][py][uz] += tUp;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // === 3. 火焰探出窗户: 温度>550K时向外侧注入高温火焰(火势足够大才探出) ===
+                    if (nextT[x][y][z] > 550.0) {
+                        for (int[] dir : dirs) {
+                            if (dir[2] != 0) continue;
+                            for (int dist = 1; dist <= 2; dist++) {
+                                int nx = x+dir[0]*dist, ny = y+dir[1]*dist;
+                                if (nx<0||nx>=w||ny<0||ny>=h) break;
+                                if (obstacle[nx][ny][z] == TYPE_WALL) break;
+                                if (inside[nx][ny][z] == 0) continue;
+                                double flameInject = (nextT[x][y][z] - 500.0) * 0.1 / dist * DT_FINAL;
+                                if (flameInject > 0) {
+                                    nextT[nx][ny][z] = Math.min(T_MAX, nextT[nx][ny][z] + flameInject);
+                                    nextC[nx][ny][z] = Math.min(SMOKE_CEIL, nextC[nx][ny][z] + 0.003 / dist * DT_FINAL);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         swapBuffers(fire, nextT, nextC);
     }
@@ -751,7 +853,9 @@ public class FireSpread implements Steppable {
         double h_door = (double)d * dz;
         for (int x = 0; x < w; x++) {
             for (int y = 0; y < h; y++) {
-                if (obstacle[x][y][0] != TYPE_DOOR) continue;
+                boolean hasDoor = false;
+                for (int zz = 0; zz < d; zz++) { if (obstacle[x][y][zz] == TYPE_DOOR) { hasDoor = true; break; } }
+                if (!hasDoor) continue;
                 if (inside[x][y][0] == 0) continue;
 
                 double T_in_max = T_AMB;
