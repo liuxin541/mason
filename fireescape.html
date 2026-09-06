@@ -639,6 +639,16 @@
     let minimapOptions = { grid: true, overlay: false, scale: true, focus: true };
     let thumbCanvases = [];    // 侧边缩略条 canvas 列表
 
+    // ★ 性能优化状态：平面图节流重绘 + 粒子次级火源增量更新
+    let lastPlanDrawTime = 0;      // 平面图（小地图/缩略条/放大弹窗）上次重绘时间
+    let lastParticleStep = -1;     // 上次重建次级火源的仿真步
+    let lastFireSourceKey = '';    // 上次火源布局指纹
+    // 火源布局指纹（数组很小，直接 JSON 序列化比较）
+    function fireSourcesKey(srcs) {
+        try { return JSON.stringify((srcs || []).map(f => [f.x, f.y, f.z])); }
+        catch (e) { return '' + ((srcs || []).length); }
+    }
+
     // ================================================================
     // 3. 辅助函数
     // ================================================================
@@ -772,11 +782,28 @@
                 updateStats(d);
                 update3DWorld(d);
                 // ★ GPU 粒子系统：同步火源物理参数与浓度场 (粒子烟雾已由体积渲染接管)
-                if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz, d.fire, d.stride || 1);
+                //   性能：仅当仿真步进或火源布局变化时才全网格扫描重建次级火源
+                if (fireParticles) {
+                    const _fsKey = fireSourcesKey(d.fireSources);
+                    if (d.step !== lastParticleStep || _fsKey !== lastFireSourceKey) {
+                        lastParticleStep = d.step;
+                        lastFireSourceKey = _fsKey;
+                        fireParticles.updateSources(d.fireSources, dx, dz, d.fire, d.stride || 1);
+                    } else {
+                        // 数据未变：仅刷新主火源位置/强度，跳过全网格高温体素扫描
+                        fireParticles.updateSources(d.fireSources, dx, dz, null, d.stride || 1);
+                    }
+                }
                 // if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth, d.stride || 1);
                 updateFireLights(d);
-                // ★ 平面图：首次有数据时自适应画布 + 自动 fit 居中
+                // ★ 平面图：首次有数据时自适应画布 + 自动 fit 居中（先 fit 再重绘，保证坐标正确）
                 ensurePlanViewReady(d);
+                // ★ 平面图：数据到达后立即重绘一次（小地图/缩略条/放大弹窗），保证新数据及时显示
+                drawMinimap();
+                drawThumbStrip();
+                if (window.__isZoomOpen && window.__isZoomOpen()) {
+                    window.__drawZoomMap && window.__drawZoomMap();
+                }
                 // ★ 首次或网格尺寸变化时自动框住整个建筑
                 //   记录上次网格尺寸, 切换地图后自动重置相机
                 const gridKey = d.width + 'x' + d.height + 'x' + d.depth;
@@ -1709,8 +1736,10 @@
                         uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
                         uAbsorption: { value: 22.0 },
                         uScattering: { value: 4.5 },
-                        uStepSize: { value: 0.15 },
-                        uMaxSteps: { value: 320 },
+                        // ★ 性能：步长 0.15→0.19、步数 320→224（覆盖 42.6m，原 48m），
+                        //   GPU 光线步进计算量约 -30%，视觉差异极小
+                        uStepSize: { value: 0.19 },
+                        uMaxSteps: { value: 224 },
                         uDensityThreshold: { value: 0.003 },
                         uTime: { value: 0 }
                     },
@@ -1953,12 +1982,17 @@
 
         renderer.render(scene, camera);
 
-        // ★ 更新小地图（每帧绘制，与主画面同步）
-        drawMinimap();
-        drawThumbStrip();
-        // 若放大弹窗打开，同步重绘
-        if (window.__isZoomOpen && window.__isZoomOpen()) {
-            window.__drawZoomMap && window.__drawZoomMap();
+        // ★ 平面图节流重绘：数据更新后由 fetchState 立即重绘，动画循环内仅降频兜底
+        //   （约 6fps），避免每帧全量 Canvas 重绘（BIM 模式每帧数十万次 fillRect）拖垮主线程
+        const _planNow = performance.now();
+        if (_planNow - lastPlanDrawTime > 150) {
+            lastPlanDrawTime = _planNow;
+            drawMinimap();
+            // 缩略条无动态元素，仅在数据/楼层变化时重绘（fetchState 与楼层切换处）
+            // 若放大弹窗打开，同步重绘
+            if (window.__isZoomOpen && window.__isZoomOpen()) {
+                window.__drawZoomMap && window.__drawZoomMap();
+            }
         }
     }
 
@@ -2610,12 +2644,14 @@
             cvs.addEventListener('click', () => {
                 currentFloorZ = detectedFloors[i];
                 updateFloorLabel();
+                drawThumbStrip();
                 addLog(`🗺️ 跳转楼层 F${i + 1} (z=${currentFloorZ})`, 'info');
             });
             wrap.appendChild(lbl); wrap.appendChild(cvs);
             strip.appendChild(wrap);
             thumbCanvases.push({ canvas: cvs, floorZ: fz, idx: i });
         }
+        drawThumbStrip();  // ★ 重建后立即绘制，避免楼层检测后缩略条空白
     }
 
     function drawThumbStrip() {
@@ -2672,6 +2708,7 @@
             currentFloorZ = detectedFloors[idx + 1];
             updateFloorLabel();
             addLog(`🗺️ 切换到楼层 F${idx + 2} (z=${currentFloorZ})`, 'info');
+            drawThumbStrip();
             // 同步放大弹窗
             if (window.__syncZoomFloor) window.__syncZoomFloor(currentFloorZ);
         }
@@ -2684,6 +2721,7 @@
             currentFloorZ = detectedFloors[idx - 1];
             updateFloorLabel();
             addLog(`🗺️ 切换到楼层 F${idx} (z=${currentFloorZ})`, 'info');
+            drawThumbStrip();
             // 同步放大弹窗
             if (window.__syncZoomFloor) window.__syncZoomFloor(currentFloorZ);
         }
@@ -2734,6 +2772,13 @@
         let zoomFloorZ = -1;
         let zoomPanning = false, zoomLastX = 0, zoomLastY = 0;
         let zoomMouseDownX = 0, zoomMouseDownY = 0, zoomDragged = false;
+        // ★ 性能：wheel/拖动等高频交互的重绘合并到 rAF，避免每事件全量 Canvas 重绘
+        let zoomRedrawPending = false;
+        function requestZoomRedraw() {
+            if (zoomRedrawPending) return;
+            zoomRedrawPending = true;
+            requestAnimationFrame(() => { zoomRedrawPending = false; drawZoomMap(); });
+        }
 
         function openZoomModal() {
             if (!currentData) { addLog('暂无数据，无法放大', 'error'); return; }
@@ -3038,7 +3083,7 @@
             zoomView.offsetX = mx - (mx - zoomView.offsetX) * (ns / oldScale);
             zoomView.offsetY = my - (my - zoomView.offsetY) * (ns / oldScale);
             zoomView.scale = ns;
-            drawZoomMap();
+            requestZoomRedraw();
         }, { passive: false });
 
         // 左键拖动平移（支持拖动阈值判定）
@@ -3076,7 +3121,7 @@
                 zoomView.offsetY += dy_;
                 zoomLastX = e.clientX;
                 zoomLastY = e.clientY;
-                drawZoomMap();
+                requestZoomRedraw();
             }
         });
         zoomCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -3325,6 +3370,16 @@
         }
         personGroup = new THREE.Group();
 
+        // ★ 性能：墙体（obstacle）为静态数据，网格尺寸/剖面/建筑模式未变化时
+        //   直接复用上次构建结果，避免每次轮询全量扫描体素
+        //   （BIM 大楼 156×73×68 ≈ 77 万体素）重建 InstancedMesh
+        const gridKey = depth + 'x' + w + 'x' + h + '|' + (clipMode ? 1 : 0) + '|' + (buildingGroup ? 1 : 0);
+        if (gridKey === lastWallGridKey) {
+            buildPersonMeshes(data, personGroup);
+            return;
+        }
+        lastWallGridKey = gridKey;
+
         const matrices = [];
         const colors = [];
         const dummy = new THREE.Object3D();
@@ -3387,17 +3442,21 @@
             scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null;
         }
 
-        // 人员生成
-        if (data.persons && data.persons.length > 0) {
-            const sphereGeo = new THREE.SphereGeometry(dx * 0.35, 8, 8);
-            const sphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-            for (let p of data.persons) {
-                const sphere = new THREE.Mesh(sphereGeo, sphereMat);
-                sphere.position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
-                personGroup.add(sphere);
-            }
-            scene.add(personGroup);
+        // 人员生成（抽取为函数，供墙体缓存命中路径复用）
+        buildPersonMeshes(data, personGroup);
+    }
+
+    // 构建人员网格（每个人员一个白色小球）
+    function buildPersonMeshes(data, group) {
+        if (!data.persons || data.persons.length === 0) return;
+        const sphereGeo = new THREE.SphereGeometry(dx * 0.35, 8, 8);
+        const sphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+        for (let p of data.persons) {
+            const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+            sphere.position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
+            group.add(sphere);
         }
+        scene.add(group);
     }
 
     // ================================================================
