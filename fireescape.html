@@ -610,6 +610,8 @@
     let dx = voxelSize, dz = voxelSize;
     // ★ GPU 粒子系统（火焰/烟雾）与动态点光源
     const clock = new THREE.Clock();
+    // ★ 帧率检测状态（供体积烟雾质量自适应与闪烁冻结）
+    let fpsFrames = 0, fpsWindowStart = 0, currentFps = 60;
     let fireParticles = null;
     let smokeParticles = null;
     let volumeSmoke = null;
@@ -1555,7 +1557,8 @@
         float fbm(vec3 p) {
             float v = 0.0;
             float a = 0.5;
-            for (int i = 0; i < 4; i++) {
+            // ★ 性能：3 层噪声（原 4 层），每步 ALU 成本 -25%
+            for (int i = 0; i < 3; i++) {
                 v += a * vnoise(p);
                 p *= 2.0;
                 a *= 0.5;
@@ -1736,10 +1739,10 @@
                         uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
                         uAbsorption: { value: 22.0 },
                         uScattering: { value: 4.5 },
-                        // ★ 性能：步长 0.15→0.19、步数 320→224（覆盖 42.6m，原 48m），
-                        //   GPU 光线步进计算量约 -30%，视觉差异极小
-                        uStepSize: { value: 0.19 },
-                        uMaxSteps: { value: 224 },
+                        // ★ 性能：默认 96 步/0.26m（覆盖 25m，建筑内部完整），
+                        //   低帧率时由 applyQuality 自动再降级（48 步/0.4m）
+                        uStepSize: { value: 0.26 },
+                        uMaxSteps: { value: 96 },
                         uDensityThreshold: { value: 0.003 },
                         uTime: { value: 0 }
                     },
@@ -1767,6 +1770,15 @@
             if (!this.material) return;
             this.material.uniforms.uCameraPos.value.copy(camera.position);
             this.material.uniforms.uTime.value = time;
+        }
+
+        // ★ 帧率自适应降级：操作卡顿时自动减少光线步进（GPU 负载随步数线性下降）
+        applyQuality(fps) {
+            if (!this.material || fps < 0) return;
+            const u = this.material.uniforms;
+            if (fps < 18)      { u.uMaxSteps.value = 48;  u.uStepSize.value = 0.4; }
+            else if (fps < 30) { u.uMaxSteps.value = 72;  u.uStepSize.value = 0.3; }
+            else               { u.uMaxSteps.value = 96;  u.uStepSize.value = 0.26; }
         }
 
         setVisible(v) {
@@ -1797,9 +1809,9 @@
         camera.position.set(50, 30, 50);
 
         renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));  // ★ 性能：像素比上限 1.5
         renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.enabled = false;  // ★ 性能：关闭阴影，避免每帧额外 shadow pass
         window.__renderer = renderer;
 
         controls = new OrbitControls(camera, renderer.domElement);
@@ -1830,7 +1842,7 @@
         scene.add(ambLight);
         const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
         dirLight.position.set(20, 50, 20);
-        dirLight.castShadow = true;
+        dirLight.castShadow = false;  // ★ 性能：关闭方向光阴影
         scene.add(dirLight);
 
         loadingTip.style.display = 'none';
@@ -1902,6 +1914,16 @@
     function animate() {
         requestAnimationFrame(animate);
 
+        // ★ 帧率测量与体积烟雾质量自适应
+        fpsFrames++;
+        const _fpsTime = clock.getElapsedTime();
+        if (_fpsTime - fpsWindowStart >= 1.0) {
+            currentFps = fpsFrames / (_fpsTime - fpsWindowStart);
+            fpsFrames = 0;
+            fpsWindowStart = _fpsTime;
+            if (volumeSmoke) volumeSmoke.applyQuality(currentFps);
+        }
+
         // ★ GPU 粒子系统更新（火焰/烟雾）
         const dt = clock.getDelta();
         const ptime = clock.getElapsedTime();
@@ -1910,6 +1932,8 @@
         if (volumeSmoke) volumeSmoke.updateFrame(camera, ptime);
 
         // ★ 动态火光: 火焰光源逐帧闪烁脉动, 照亮周围墙壁/地面 (真实火焰光照)
+        //   性能：低帧率(<18fps)时冻结闪烁，减少光照 uniform 更新
+        if (currentFps >= 18) {
         for (let i = 0; i < fireLights.length; i++) {
             const l = fireLights[i];
             if (l.baseIntensity === undefined) continue;
@@ -1924,6 +1948,7 @@
             const gf = 0.72 + 0.28 * Math.sin(ptime * 9.5 + i * 2.1)
                              * Math.sin(ptime * 6.1 + i * 4.3);
             sp.material.opacity = Math.max(0.28, Math.min(1.0, 0.9 * gf));
+        }
         }
 
         // ★ 飞行模式：根据按键状态更新相机位置（无重力，可悬停）
@@ -1985,7 +2010,7 @@
         // ★ 平面图节流重绘：数据更新后由 fetchState 立即重绘，动画循环内仅降频兜底
         //   （约 6fps），避免每帧全量 Canvas 重绘（BIM 模式每帧数十万次 fillRect）拖垮主线程
         const _planNow = performance.now();
-        if (_planNow - lastPlanDrawTime > 150) {
+        if (_planNow - lastPlanDrawTime > 300) {
             lastPlanDrawTime = _planNow;
             drawMinimap();
             // 缩略条无动态元素，仅在数据/楼层变化时重绘（fetchState 与楼层切换处）
