@@ -1739,10 +1739,9 @@
                         uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
                         uAbsorption: { value: 22.0 },
                         uScattering: { value: 4.5 },
-                        // ★ 性能：默认 96 步/0.26m（覆盖 25m，建筑内部完整），
-                        //   低帧率时由 applyQuality 自动再降级（48 步/0.4m）
-                        uStepSize: { value: 0.26 },
-                        uMaxSteps: { value: 96 },
+                        // ★ 性能：默认 72 步/0.3m（覆盖 21.6m），低帧率时 applyQuality 自动再降级
+                        uStepSize: { value: 0.3 },
+                        uMaxSteps: { value: 72 },
                         uDensityThreshold: { value: 0.003 },
                         uTime: { value: 0 }
                     },
@@ -1776,9 +1775,9 @@
         applyQuality(fps) {
             if (!this.material || fps < 0) return;
             const u = this.material.uniforms;
-            if (fps < 18)      { u.uMaxSteps.value = 48;  u.uStepSize.value = 0.4; }
-            else if (fps < 30) { u.uMaxSteps.value = 72;  u.uStepSize.value = 0.3; }
-            else               { u.uMaxSteps.value = 96;  u.uStepSize.value = 0.26; }
+            if (fps < 18)      { u.uMaxSteps.value = 32;  u.uStepSize.value = 0.5; }
+            else if (fps < 30) { u.uMaxSteps.value = 48;  u.uStepSize.value = 0.4; }
+            else               { u.uMaxSteps.value = 72;  u.uStepSize.value = 0.3; }
         }
 
         setVisible(v) {
@@ -1809,7 +1808,7 @@
         camera.position.set(50, 30, 50);
 
         renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));  // ★ 性能：像素比上限 1.5
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));  // ★ 性能：像素比上限 1.25
         renderer.setSize(canvas.clientWidth, canvas.clientHeight);
         renderer.shadowMap.enabled = false;  // ★ 性能：关闭阴影，避免每帧额外 shadow pass
         window.__renderer = renderer;
@@ -1847,7 +1846,7 @@
 
         loadingTip.style.display = 'none';
         addLog('3D 引擎加载完毕，按住左键可旋转视角', 'info');
-        fireParticles = new FireParticleSystem(scene, 3000);
+        fireParticles = new FireParticleSystem(scene, 2000);  // ★ 性能：粒子上限 3000→2000
         // ★ 体积烟雾接管: 粒子烟雾停用
         // smokeParticles = new SmokeParticleSystem(scene, 6000);
         volumeSmoke = new VolumeSmoke(scene);
