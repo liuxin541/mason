@@ -216,6 +216,450 @@ public class FireEscape extends SimState {
         }
     }
 
+    // =====================================================================
+    // ★ 楼梯间门户自动修复（数据层修复，遵循"门才可通行"的物理语义）
+    // =====================================================================
+    // 背景：IFC 模型中楼梯间入口缺失 IfcDoor，体素化后各翼区走廊与楼梯间
+    // 之间被连续 WALL/COLUMN 完全隔断。人物按"出房间→走廊→找楼梯"疏散时，
+    // 最后一跳无路可走（A* 搜不到楼梯而进入 NO_SAFE_PATH）。
+    // 修复方式：逐层定位楼梯间连通域与各翼区连通域，在二者之间最薄的实体
+    // 隔墙上自动开凿门洞（墙体格改写为 TYPE_DOOR），而不是在寻路中做穿墙
+    // 特例，保证"墙不可穿越、门才可通行"的语义全局一致。
+    // 门洞开在脚层 z0 并向上延伸站立净空带。Person 的门户识别(FloorDoorGraph)
+    // 恰好按"脚层 z0 处的 TYPE_DOOR"划分门户，因此新门洞会被既有 DoorPortal
+    // 分区、门口排队拥堵逻辑零改动地识别和使用。
+
+    /** 允许开洞的最大隔墙厚度（格）；超过视为承重厚墙，禁止凿穿。 */
+    private static final int MAX_DOORWAY_WALL_THICKNESS = 4;
+    /** 参与楼梯间连通修复的最小区域格数，用于过滤卫生间等小隔间。 */
+    private static final int MIN_STAIRWELL_LINK_ZONE_CELLS = 200;
+    /** 门洞竖向最大高度（格）：脚层 + 6 格站立净空带 ≈ 1.75m。 */
+    private static final int DOORWAY_HEIGHT_CELLS = 7;
+    /** 每层开洞迭代上限：每次开洞至少合并一个区域，防止意外死循环。 */
+    private static final int MAX_DOORWAY_ITERATIONS_PER_FLOOR = 8;
+    /** 结构柱在穿墙选路中的代价：远高于墙，保证选路自动避开柱体。 */
+    private static final double DOORWAY_UNCARVABLE_COST = 50.0;
+    /**
+     * 楼梯实体格在穿墙 Dijkstra 中的额外代价：让"房间→走廊"路径
+     * （代价=墙厚）优先于"房间→楼梯间直达"路径（代价=墙厚+本罚值）。
+     * 设为 3：一面墙代价 1，罚值 3 意味着直达楼梯比到走廊至少贵 3 格墙厚，
+     * 但 1 格墙 + 3 = 4 仍在 MAX_DOORWAY_WALL_THICKNESS 上限内可接受。
+     */
+    private static final double STAIRWELL_CROSSING_PENALTY = 3.0;
+
+    /**
+     * 打通各层"走廊 ↔ 楼梯间"的物理交汇处。
+     * 委托给 Person 类：只恢复走廊-楼梯间交界处被 IFC 体素化误标为墙的
+     * 门洞格，不再使用 Dijkstra 穿墙开凿，避免在非交汇处造出不合理门洞。
+     * 幂等：门洞恢复后原墙格已变为 TYPE_DOOR，再次调用时不会重复开洞。
+     */
+    public void repairStairwellDoorways() {
+        Person.repairStairwellJunctions(this);
+    }
+
+    /**
+     * 修复单层：迭代"识别连通域 → 找最薄实体墙 → 开凿门洞"，直到所有大型
+     * 区域都与楼梯间连通，或不存在可开凿的墙。返回本层楼梯间足迹供上层继承。
+     */
+    private boolean[] repairFloorStairwellDoorways(int z0, boolean[] inheritedFootprint) {
+        int width = gridWidth;
+        int height = gridHeight;
+        boolean[] stairFootprint = inheritedFootprint;
+        for (int iteration = 0; iteration < MAX_DOORWAY_ITERATIONS_PER_FLOOR; iteration++) {
+            boolean[] walkMask = buildStairwellWalkMask(z0);
+            int[] zoneByCell = labelFloorZones(walkMask);
+            int zoneCount = maxZoneId(zoneByCell) + 1;
+            if (zoneCount == 0) return stairFootprint;
+
+            // ---- 识别楼梯间连通域 ----
+            // 首选：包含"楼梯可站立格"（脚层是楼梯，或脚层空气正下方是楼梯）
+            // 最多的组件；顶层带内无楼梯格时退化为与下层足迹重叠最多的组件。
+            int[] zoneStairCells = new int[zoneCount];
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int zoneId = zoneByCell[y * width + x];
+                    if (zoneId < 0) continue;
+                    boolean onStair =
+                            obstacleGrid.get(x, y, z0) == TYPE_STAIR ||
+                                    (z0 > 0 && obstacleGrid.get(x, y, z0 - 1) == TYPE_STAIR);
+                    if (onStair) zoneStairCells[zoneId]++;
+                }
+            }
+            int stairZone = -1;
+            int bestStairCells = 0;
+            for (int zoneId = 0; zoneId < zoneCount; zoneId++) {
+                if (zoneStairCells[zoneId] > bestStairCells) {
+                    bestStairCells = zoneStairCells[zoneId];
+                    stairZone = zoneId;
+                }
+            }
+            if (stairZone < 0 && stairFootprint != null) {
+                stairZone = findZoneOverlappingFootprint(
+                        zoneByCell, zoneCount, stairFootprint);
+            }
+            if (stairZone < 0) {
+                System.out.println("[门户修复] z=" + z0 + " 未识别到楼梯间连通域，跳过");
+                return stairFootprint;
+            }
+            stairFootprint = collectZoneMask(zoneByCell, stairZone);
+
+            // ---- 收集未与楼梯间连通的大型区域（按规模从大到小） ----
+            int[] zoneSizes = new int[zoneCount];
+            for (int zoneId : zoneByCell) {
+                if (zoneId >= 0) zoneSizes[zoneId]++;
+            }
+            int minZoneCells = minLinkZoneCells();
+            List<Integer> disconnected = new ArrayList<>();
+            for (int zoneId = 0; zoneId < zoneCount; zoneId++) {
+                if (zoneId != stairZone && zoneSizes[zoneId] >= minZoneCells) {
+                    disconnected.add(zoneId);
+                }
+            }
+            if (disconnected.isEmpty()) {
+                System.out.println("[门户修复] z=" + z0 + " 所有大型区域均已与楼梯间连通"
+                        + (iteration == 0 ? "（无需修复）" : "，共开洞 " + iteration + " 处"));
+                return stairFootprint;
+            }
+            disconnected.sort((a, b) -> zoneSizes[b] - zoneSizes[a]);
+
+            // ---- 在所有断开区域中寻找全局最便宜的穿墙路径并开洞 ----
+            int bestRunStart = -1;
+            int bestRunEnd = -1;
+            double bestCost = Double.MAX_VALUE;
+            int[] bestPath = null;
+            for (int zoneId : disconnected) {
+                int[][] crossing = findCheapestWallCrossing(
+                        zoneByCell, zoneId, stairZone, walkMask, z0);
+                if (crossing == null) continue;
+                int[] run = firstCarvableWallRun(crossing[0], z0);
+                if (run == null) continue;
+                double cost = crossing[1][0];
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    bestRunStart = run[0];
+                    bestRunEnd = run[1];
+                    bestPath = crossing[0];
+                }
+            }
+            if (bestPath == null) {
+                System.out.println("[门户修复] z=" + z0 + " 剩余 " + disconnected.size()
+                        + " 个区域无法打通（墙厚超上限 " + MAX_DOORWAY_WALL_THICKNESS
+                        + " 格或无实体墙），保留现状");
+                return stairFootprint;
+            }
+            int carved = carveDoorway(bestPath, bestRunStart, bestRunEnd, z0);
+            if (carved <= 0) {
+                System.out.println("[门户修复] z=" + z0 + " 门洞开凿失败，终止本层迭代");
+                return stairFootprint;
+            }
+            System.out.println("[门户修复] z=" + z0 + " 开凿门洞: 墙厚 "
+                    + (bestRunEnd - bestRunStart + 1) + " 格, 共改写 "
+                    + carved + " 个体素为 TYPE_DOOR（开洞后自动重扫剩余区域）");
+        }
+        return stairFootprint;
+    }
+
+    /**
+     * 穿墙 Dijkstra：从源区域所有格出发（代价 0），行走格代价 0，
+     * 实体墙/未标记空气代价 1（计入墙厚），柱体等不可凿格代价极高。
+     * 总代价超过厚度上限即剪枝。返回 {路径格索引序列, 总代价}，无路返回 null。
+     */
+    private int[][] findCheapestWallCrossing(int[] zoneByCell, int sourceZone,
+                                             int targetZone, boolean[] walkMask,
+                                             int z0) {
+        int width = gridWidth;
+        int height = gridHeight;
+        int cellCount = width * height;
+        double[] dist = new double[cellCount];
+        Arrays.fill(dist, Double.MAX_VALUE);
+        int[] prev = new int[cellCount];
+        Arrays.fill(prev, -1);
+        PriorityQueue<double[]> open = new PriorityQueue<>(
+                (a, b) -> Double.compare(a[0], b[0]));
+        for (int index = 0; index < cellCount; index++) {
+            if (zoneByCell[index] == sourceZone) {
+                dist[index] = 0;
+                open.add(new double[]{0, index});
+            }
+        }
+        int[][] directions = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        while (!open.isEmpty()) {
+            double[] node = open.remove();
+            double d = node[0];
+            int index = (int) node[1];
+            if (d > dist[index]) continue;
+            if (zoneByCell[index] == targetZone) {
+                // 回溯完整路径（含源与目标），供后续提取墙段
+                List<Integer> path = new ArrayList<>();
+                for (int cur = index; cur >= 0; cur = prev[cur]) {
+                    path.add(cur);
+                }
+                Collections.reverse(path);
+                return new int[][]{path.stream().mapToInt(Integer::intValue).toArray(),
+                        {(int) Math.round(d)}};
+            }
+            int x = index % width;
+            int y = index / width;
+            for (int[] dir : directions) {
+                int nx = x + dir[0];
+                int ny = y + dir[1];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int nextIndex = ny * width + nx;
+                double step = crossingCellCost(nx, ny, z0, walkMask);
+                double nd = d + step;
+                if (nd > MAX_DOORWAY_WALL_THICKNESS + 1e-9) continue;
+                if (nd < dist[nextIndex]) {
+                    dist[nextIndex] = nd;
+                    prev[nextIndex] = index;
+                    open.add(new double[]{nd, nextIndex});
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 穿墙代价：可行走格中走廊格 0、楼梯实体格 STAIR_PENALTY（高代价）；
+     * 墙/窗/未标记空气 1（计墙厚）；柱等不可凿格极高。
+     *
+     * 楼梯实体格额外代价确保 Dijkstra 优先选择"房间→走廊"的穿墙路径，
+     * 而非"房间→楼梯间"直达路径。只有当房间不与走廊共享墙、只能向
+     * 楼梯间开凿时，才接受直达路径（代价仍在上限内）。
+     */
+    private double crossingCellCost(int x, int y, int z0, boolean[] walkMask) {
+        if (walkMask[y * gridWidth + x]) {
+            // 可行走格：楼梯实体格给额外代价，避免直接从房间凿门到楼梯间，
+            // 优先经过走廊再到楼梯间（符合现实疏散动线）。
+            int type = obstacleGrid.get(x, y, z0);
+            if (type == TYPE_STAIR) return STAIRWELL_CROSSING_PENALTY;
+            return 0;
+        }
+        int type = obstacleGrid.get(x, y, z0);
+        if (type == TYPE_WALL || type == TYPE_WINDOW || type == TYPE_EMPTY) return 1;
+        return DOORWAY_UNCARVABLE_COST;
+    }
+
+    /**
+     * 从穿墙路径中取第一段"可开凿实体墙"：段内脚层必须全部是 WALL/WINDOW
+     * （纯空气间隙无墙可凿，例如一层楼板缺失区，直接放弃防止造出悬空门）。
+     * 返回长度 2 数组 {路径起点索引, 路径终点索引}，不可凿返回 null。
+     */
+    private int[] firstCarvableWallRun(int[] path, int z0) {
+        int runStart = -1;
+        for (int i = 0; i <= path.length; i++) {
+            boolean carvable = false;
+            if (i < path.length) {
+                int x = path[i] % gridWidth;
+                int y = path[i] / gridWidth;
+                int type = obstacleGrid.get(x, y, z0);
+                carvable = type == TYPE_WALL || type == TYPE_WINDOW;
+            }
+            if (carvable && runStart < 0) {
+                runStart = i;
+            } else if (!carvable && runStart >= 0) {
+                return new int[]{runStart, i - 1};
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 沿墙段开凿门洞：墙段为穿越方向（厚度），切向加宽到 2 格形成可通行
+     * 门宽；竖向从脚层向上改写 WALL/WINDOW 为 TYPE_DOOR，遇到"上方是空气
+     * 的墙"（即楼板天花）立即停止，保证不凿穿上下楼层间隔。
+     */
+    private int carveDoorway(int[] path, int runStart, int runEnd, int z0) {
+        int width = gridWidth;
+        // 穿墙轴向：由墙段首尾格的位移决定；切向即门洞宽度方向
+        int sx = path[runStart] % width;
+        int sy = path[runStart] / width;
+        int ex = path[runEnd] % width;
+        int ey = path[runEnd] / width;
+        boolean alongX = ex != sx;
+        // 切向加宽：优先 +1 方向，要求候选格在脚层与带中层都是墙体（对齐墙），
+        // 避免两侧同时开洞造成 3 格以上大洞
+        int midZ = Math.min(z0 + 3, gridDepth - 1);
+        int tx = alongX ? sx : sx + 1;
+        int ty = alongX ? sy + 1 : sy;
+        if (!isSolidWallColumn(tx, ty, z0, midZ)) {
+            tx = alongX ? sx : sx - 1;
+            ty = alongX ? sy - 1 : sy;
+            if (!isSolidWallColumn(tx, ty, z0, midZ)) {
+                tx = -1;   // 两侧都无法加宽时保留单格门宽（0.25m，仍可通行）
+                ty = -1;
+            }
+        }
+        int carved = 0;
+        int[] cellsX = new int[(runEnd - runStart + 1) * 2];
+        int[] cellsY = new int[cellsX.length];
+        int cells = 0;
+        for (int i = runStart; i <= runEnd; i++) {
+            cellsX[cells] = path[i] % width;
+            cellsY[cells] = path[i] / width;
+            cells++;
+        }
+        if (tx >= 0) {
+            cellsX[cells] = tx;
+            cellsY[cells] = ty;
+            cells++;
+        }
+        // 逐格竖向开洞：WALL/WINDOW→DOOR；遇"上空是空气的墙"（楼板）即停
+        for (int i = 0; i < cells; i++) {
+            int x = cellsX[i];
+            int y = cellsY[i];
+            for (int z = z0; z < Math.min(z0 + DOORWAY_HEIGHT_CELLS, gridDepth); z++) {
+                int type = obstacleGrid.get(x, y, z);
+                if (type != TYPE_WALL && type != TYPE_WINDOW) continue;
+                boolean ceilingSlab = z + 1 < gridDepth &&
+                        obstacleGrid.get(x, y, z + 1) == TYPE_EMPTY;
+                if (ceilingSlab && z > z0) break;   // 到达天花楼板，停止向上
+                obstacleGrid.set(x, y, z, TYPE_DOOR);
+                carved++;
+            }
+        }
+        return carved;
+    }
+
+    /** 判断 (x,y) 在脚层与带中层是否都是墙体（用于门洞切向加宽校验）。 */
+    private boolean isSolidWallColumn(int x, int y, int z0, int midZ) {
+        if (x < 0 || x >= gridWidth || y < 0 || y >= gridHeight) return false;
+        int base = obstacleGrid.get(x, y, z0);
+        int mid = obstacleGrid.get(x, y, midZ);
+        return (base == TYPE_WALL || base == TYPE_WINDOW) &&
+                (mid == TYPE_WALL || mid == TYPE_WINDOW);
+    }
+
+    /**
+     * 构建单层脚层可行走掩码（与 Person.isFloorGraphNavigationCell 对齐）：
+     * 楼梯/门/出口直接通行；空气需室内(insideGrid==1)或楼梯正上方过渡格。
+     */
+    private boolean[] buildStairwellWalkMask(int z0) {
+        int width = gridWidth;
+        int height = gridHeight;
+        boolean[] mask = new boolean[width * height];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int type = obstacleGrid.get(x, y, z0);
+                if (type == TYPE_STAIR || type == TYPE_DOOR || type == TYPE_EXIT) {
+                    mask[y * width + x] = true;
+                } else if (type == TYPE_EMPTY) {
+                    boolean aboveStair = z0 > 0 &&
+                            obstacleGrid.get(x, y, z0 - 1) == TYPE_STAIR;
+                    mask[y * width + x] =
+                            insideGrid.get(x, y, z0) == 1 || aboveStair;
+                }
+            }
+        }
+        return mask;
+    }
+
+    /** 4 邻接连通域标记，返回每格所属组件号（未通行格为 -1）。 */
+    private int[] labelFloorZones(boolean[] walkMask) {
+        int width = gridWidth;
+        int height = gridHeight;
+        int[] zoneByCell = new int[width * height];
+        Arrays.fill(zoneByCell, -1);
+        int[] queue = new int[width * height];
+        int[][] directions = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        int zoneId = 0;
+        for (int start = 0; start < walkMask.length; start++) {
+            if (!walkMask[start] || zoneByCell[start] >= 0) continue;
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = start;
+            zoneByCell[start] = zoneId;
+            while (head < tail) {
+                int index = queue[head++];
+                int x = index % width;
+                int y = index / width;
+                for (int[] dir : directions) {
+                    int nx = x + dir[0];
+                    int ny = y + dir[1];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int nextIndex = ny * width + nx;
+                    if (!walkMask[nextIndex] || zoneByCell[nextIndex] >= 0) continue;
+                    zoneByCell[nextIndex] = zoneId;
+                    queue[tail++] = nextIndex;
+                }
+            }
+            zoneId++;
+        }
+        return zoneByCell;
+    }
+
+    /**
+     * 楼层行走面识别：直接复用 Person 的出生楼层识别（连续楼板支撑面积 +
+     * 净空 + 顶板校验），保证门户开凿与人员出生基于同一套楼层基准。
+     * 不再自建"楼板夹层"启发式——IFC 楼板常为多体素厚（下表面贴墙），
+     * "上下皆空气"的夹层特征会漏判 z=2/18/47 等楼层，只有 z=32 被识别。
+     */
+    private List<Integer> detectSlabWalkingLevels() {
+        return Person.detectValidFloors(this);
+    }
+
+    /** 最小参与区域格数：真实大楼 200 格；小模型（单元测试）自动放宽。 */
+    private int minLinkZoneCells() {
+        return Math.max(20, Math.min(MIN_STAIRWELL_LINK_ZONE_CELLS,
+                gridWidth * gridHeight / 50));
+    }
+
+    private int maxZoneId(int[] zoneByCell) {
+        int max = -1;
+        for (int zoneId : zoneByCell) max = Math.max(max, zoneId);
+        return max;
+    }
+
+    /** 提取指定组件的二维格掩码（作为楼梯间足迹供上层继承）。 */
+    private boolean[] collectZoneMask(int[] zoneByCell, int zoneId) {
+        boolean[] mask = new boolean[gridWidth * gridHeight];
+        for (int index = 0; index < mask.length; index++) {
+            mask[index] = zoneByCell[index] == zoneId;
+        }
+        return mask;
+    }
+
+    /** 找与足迹（切比雪夫距离 ≤2 膨胀后）重叠格数最多的大型组件。 */
+    private int findZoneOverlappingFootprint(int[] zoneByCell, int zoneCount,
+                                             boolean[] footprint) {
+        int width = gridWidth;
+        int height = gridHeight;
+        int[] overlap = new int[zoneCount];
+        int[] size = new int[zoneCount];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int index = y * width + x;
+                int zoneId = zoneByCell[index];
+                if (zoneId < 0) continue;
+                size[zoneId]++;
+                if (footprintNear(footprint, x, y, 2)) overlap[zoneId]++;
+            }
+        }
+        int minZoneCells = minLinkZoneCells();
+        int best = -1;
+        int bestOverlap = 0;
+        for (int zoneId = 0; zoneId < zoneCount; zoneId++) {
+            if (size[zoneId] < minZoneCells) continue;
+            if (overlap[zoneId] > bestOverlap) {
+                bestOverlap = overlap[zoneId];
+                best = zoneId;
+            }
+        }
+        return best;
+    }
+
+    private boolean footprintNear(boolean[] footprint, int x, int y, int radius) {
+        for (int dy = -radius; dy <= radius; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                int nx = x + dx;
+                int ny = y + dy;
+                if (nx < 0 || nx >= gridWidth || ny < 0 || ny >= gridHeight) continue;
+                if (footprint[ny * gridWidth + nx]) return true;
+            }
+        }
+        return false;
+    }
+
+
     /**
      * 从六个网格边界标记所有可达空气为室外，剩余封闭空气为室内。
      * 门、出口和楼梯只在室内掩码生成期间作为封闭体，完成后恢复为可通行区域。
@@ -544,6 +988,16 @@ public class FireEscape extends SimState {
         if (!loaded) {
             System.out.println("[Init] 回退至内建测试地图！");
             fallbackInitRealisticObstacles();
+        } else {
+            // ★ 体素加载成功后打通"翼区走廊 ↔ 楼梯间"门户。
+            // 必须先修复封闭楼梯间的室内标记，再打通门户，顺序不能颠倒：
+            // IFC 楼梯井常被 3D 洪水漏标为室外，行走掩码缺楼梯间内部空气时，
+            // 穿墙 Dijkstra 会因代价超限漏凿所有楼层（顶层甚至识别不到楼梯间）。
+            // start() 是 GUI 与 HTTP(initModel) 的公共入口，两处行为保持一致。
+            Person.repairEnclosedStairwellIndoorStatus(this);
+            // IFC 缺失楼梯间门导致各翼区被墙隔断，人物无法走到楼梯；
+            // 此修复把最薄隔墙改写为 TYPE_DOOR（数据层修复，详见方法注释）。
+            repairStairwellDoorways();
         }
 
         }

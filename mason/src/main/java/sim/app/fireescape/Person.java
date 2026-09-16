@@ -31,13 +31,33 @@ public class Person implements Steppable {
     private static final int BLOCKED_REPLAN_ATTEMPTS = 8;
     private static final int ROUTE_LOCK_TICKS = 20;
     private static final int NO_PATH_RETRY_TICKS = 10;
+
+    // ===== 伤害剂量参数（按 SFPE 消防工程手册 / Purser FED 烟气毒性模型标定）=====
+    // 每个时间步 deltaT=0.5s，即每分钟 120 tick；剂量 0→1，攒满即死亡。
+    // 烟气毒性：满烟（代理 CO≈8000ppm）约 8 分钟（960 tick）致死；速率与烟浓度
+    // 平方成正比（烟浓一倍、毒性涨速四倍）；烟浓度低于阈值时短时穿过无害。
+    private static final double SMOKE_DOSE_TICKS_AT_FULL = 960.0;
+    private static final double SMOKE_DOSE_IGNORE_BELOW = 0.15;
+    // 高温灼伤：70°C(343K) 以下干热空气可长时间耐受；100°C 约 7.5 分钟、
+    // 150°C 约 1 分钟致死（速率按超温幅度平方累积）；≥200°C(T_DEATH) 立即死亡。
+    private static final double HEAT_DOSE_T_LOW = 343.0;    // 70°C，低于此温度不累积
+    private static final double HEAT_DOSE_T_SPAN = 130.0;   // 343K → 473K(200°C)
+    private static final double HEAT_DOSE_RATE_DIVISOR = 48.0;
+    // 能见度减速（Jin 烟中行走实验）：能见度(米)≈1/烟浓度，速度从 10 米全速
+    // 线性降到 1 米时的 30%（摸黑扶墙挪步，但不会完全停下）。
+    private static final double VIS_SPEED_MIN = 0.3;
+    private static final double VIS_CLEAR_METERS = 10.0;
+
     private static final Map<FireEscape, NavigationData> NAVIGATION_CACHE =
             Collections.synchronizedMap(new WeakHashMap<FireEscape, NavigationData>());
 
     public boolean alive;
     public boolean escaped;
     public String deathCause;
-    private double smokeExposure;
+    // 两种累积伤害剂量（0=无, 1=致死），只增不减：CO 吸入后血液半衰期长达数小时，
+    // 灼伤损伤同样不可逆，离开危险区只会停止累积、不会消退。
+    private double toxicDose;   // 烟气毒性剂量（FED）
+    private double heatDose;    // 高温灼伤剂量
     private int x, y, z;
     private FireEscape model;
     private int moveCooldown = 0;
@@ -62,7 +82,8 @@ public class Person implements Steppable {
         this.z = z;
         this.alive = true;
         this.escaped = false;
-        this.smokeExposure = 0.0;
+        this.toxicDose = 0.0;
+        this.heatDose = 0.0;
         this.deathCause = null;
         this.evacuationPhase = null;
         this.phaseBeforeQueue = null;
@@ -284,10 +305,382 @@ public class Person implements Steppable {
     }
 
     /**
+     * 封闭楼梯间室内状态修复的独立入口（供门户修复在人员出生前调用）。
+     * IFC 楼梯井常被 3D 室外洪水漏标为室外（楼梯间内部空气 insideGrid=0）。
+     * 若不先修复，门户修复的行走掩码会缺失楼梯间内部空气：楼梯体素成为
+     * 互不相连的穿行孤岛，走廊翼区到楼梯的穿墙代价超上限，导致所有楼层的
+     * 门户开凿失败（顶层还会因楼梯足迹无重叠而整层跳过）。
+     * 这里复用出生流程的楼梯间平台修复逻辑；spawnPopulation 内会再次执行，
+     * insideGrid 已为 1 的格不会有任何改动，幂等安全。
+     */
+    public static void repairEnclosedStairwellIndoorStatus(FireEscape model) {
+        List<Integer> floors = detectValidFloors(model);
+        int totalRepaired = 0;
+        for (int floorIndex = 0; floorIndex < floors.size(); floorIndex++) {
+            int z = floors.get(floorIndex);
+            int lowerStairZ = floorIndex > 0 ? floors.get(floorIndex - 1) : z;
+            int upperStairZ = floorIndex + 1 < floors.size() ?
+                    floors.get(floorIndex + 1) : z;
+            int[] stairwellDistances = buildFloorStairwellDistanceMap(
+                    model, z, lowerStairZ, upperStairZ);
+            totalRepaired += repairStairwellPlatformsForSpawning(
+                    model, z, stairwellDistances);
+        }
+        if (totalRepaired > 0) {
+            System.out.println("[Person] 楼梯间室内预修复: 共将 " + totalRepaired +
+                    " 个被误标为室外的楼梯间空气格改回室内（供门户修复使用）");
+        }
+    }
+
+    // ===== 走廊-楼梯间交汇处门洞恢复 =====
+    // IFC 体素化时，走廊和楼梯间交界处本应是门洞/开口的格子可能被误标为
+    // TYPE_WALL。以下方法不"凿穿"墙体，而是识别这些物理交汇格（一侧邻
+    // 走廊可行走区、另一侧邻楼梯间可行走区），将其类型恢复为 TYPE_DOOR，
+    // 使人员能从走廊自然走到楼梯间，而不会在非交汇处造出不合理的门洞。
+
+    /**
+     * 交汇处射线扫描穿透墙体的最大厚度（格）：与 FireEscape 的
+     * MAX_DOORWAY_WALL_THICKNESS 一致，设为独立常量以保持 Person 修复
+     * 逻辑自包含。
+     */
+    private static final int JUNCTION_MAX_WALL_THICKNESS = 4;
+
+    /**
+     * 打通各层走廊与楼梯间的物理交汇处。幂等：门洞恢复后原墙格已变为
+     * TYPE_DOOR（可通行格），再次调用时两侧已连通，不会重复开洞。
+     */
+    public static void repairStairwellJunctions(FireEscape model) {
+        if (model.obstacleGrid == null || model.gridWidth <= 0 ||
+                model.gridHeight <= 0) return;
+        List<Integer> walkingLevels = detectValidFloors(model);
+        if (walkingLevels.isEmpty()) {
+            System.out.println("[交汇处修复] 未识别到楼层行走面，跳过");
+            return;
+        }
+        System.out.println("[交汇处修复] 识别到楼层行走面 z=" + walkingLevels);
+        // 顶层楼梯间足迹继承：顶层楼梯止于下层，站立带内无楼梯格时，
+        // 靠下层楼梯间足迹重叠来识别楼梯间连通域。
+        boolean[] inheritedStairFootprint = null;
+        for (int z0 : walkingLevels) {
+            inheritedStairFootprint = repairFloorJunctions(model, z0, inheritedStairFootprint);
+        }
+    }
+
+    /**
+     * 修复单层交汇处：迭代"识别连通域→找交界墙格→恢复为门"，
+     * 直到所有交汇格都已打通或无新门洞产生。返回本层楼梯间足迹供上层继承。
+     */
+    private static boolean[] repairFloorJunctions(FireEscape model,
+                                                   int z0,
+                                                   boolean[] inheritedFootprint) {
+        int width = model.gridWidth;
+        int height = model.gridHeight;
+
+        for (int iteration = 0; iteration < 8; iteration++) {
+            // 构建行走掩码：标记每格是否可行走
+            boolean[] walkMask = buildJunctionWalkMask(model, z0);
+            // 4 邻接连通域标记
+            int[] zoneByCell = labelJunctionZones(walkMask, width, height);
+            int zoneCount = maxJunctionZoneId(zoneByCell) + 1;
+            if (zoneCount == 0) return inheritedFootprint;
+
+            // 识别楼梯间连通域：包含最多"楼梯可站立格"的区域
+            int stairZone = findJunctionStairZone(model, zoneByCell, zoneCount, z0);
+            if (stairZone < 0 && inheritedFootprint != null) {
+                // 顶层无楼梯格时，靠下层楼梯间足迹重叠识别
+                stairZone = findZoneOverlappingFootprint(
+                        zoneByCell, zoneCount, width, height, inheritedFootprint);
+            }
+            if (stairZone < 0) {
+                System.out.println("[交汇处修复] z=" + z0 + " 未识别到楼梯间连通域，跳过");
+                return inheritedFootprint;
+            }
+            // 记录本层楼梯间足迹供上层继承
+            inheritedFootprint = collectJunctionZoneMask(
+                    zoneByCell, stairZone, width, height);
+
+            // 找交界格：不在行走掩码中（非可行走），且沿 4 方向射线穿透墙体
+            // 后两侧到达不同连通域。IFC 体素化后墙体常为 2+ 格厚，4 邻域只
+            // 能看到 1 格距离，无法发现 2 格墙另一侧的连通域；改用射线扫描
+            // （最多 MAX_DOORWAY_WALL_THICKNESS 格）穿透整面墙后判定。
+            // 两侧分别为楼梯间连通域和非楼梯间连通域时，把整条墙段恢复为
+            // 门洞（情况1）或恢复室内空气标记（情况2）。
+            int opened = 0;
+            int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int index = y * width + x;
+                    if (walkMask[index]) continue;  // 已可行走的格子不是交界格
+                    int type = model.obstacleGrid.get(x, y, z0);
+                    // 只处理墙/窗/室外空气格；柱体不凿穿
+                    if (type != FireEscape.TYPE_WALL &&
+                            type != FireEscape.TYPE_WINDOW &&
+                            type != FireEscape.TYPE_EMPTY) continue;
+
+                    // 沿 4 方向射线扫描，记录到达的连通域
+                    boolean hasStairNeighbor = false;
+                    boolean hasCorridorNeighbor = false;
+                    int[] stairDir = null;  // 记录到达楼梯间连通域的方向
+                    for (int[] dir : dirs) {
+                        for (int step = 1;
+                             step <= JUNCTION_MAX_WALL_THICKNESS; step++) {
+                            int nx = x + dir[0] * step;
+                            int ny = y + dir[1] * step;
+                            if (nx < 0 || nx >= width ||
+                                    ny < 0 || ny >= height) break;
+                            int nIndex = ny * width + nx;
+                            if (!walkMask[nIndex]) continue;  // 墙内继续穿透
+                            // 到达可行走格，判定连通域归属
+                            if (zoneByCell[nIndex] == stairZone) {
+                                hasStairNeighbor = true;
+                                if (stairDir == null) stairDir = dir;
+                            } else if (zoneByCell[nIndex] >= 0) {
+                                hasCorridorNeighbor = true;
+                            }
+                            break;  // 到达可行走格，停止此方向射线
+                        }
+                    }
+                    if (!hasStairNeighbor || !hasCorridorNeighbor) continue;
+
+                    if (type == FireEscape.TYPE_WALL ||
+                            type == FireEscape.TYPE_WINDOW) {
+                        // 情况1：墙体被误标，恢复为门洞。
+                        // 沿到达楼梯间的方向把整条墙段都改为门洞，
+                        // 保证 2+ 格厚墙也能贯通。
+                        openJunctionDoorwayRay(model, x, y, z0,
+                                stairDir, JUNCTION_MAX_WALL_THICKNESS);
+                        opened++;
+                    } else if (type == FireEscape.TYPE_EMPTY &&
+                            model.insideGrid.get(x, y, z0) != 1) {
+                        // 情况2：空气被误标为室外，恢复室内标记。
+                        // 竖向恢复：从 z0 向上，将连续的室外空气格改回室内，
+                        // 提供站立净空，遇到墙/楼板停止。
+                        restoreJunctionIndoor(model, x, y, z0);
+                        opened++;
+                    }
+                }
+            }
+            if (opened == 0) {
+                System.out.println("[交汇处修复] z=" + z0 + " 交汇处已全部打通"
+                        + (iteration == 0 ? "（无需修复）" :
+                        "，共恢复 " + iteration + " 批门洞"));
+                return inheritedFootprint;
+            }
+            System.out.println("[交汇处修复] z=" + z0 + " 恢复交汇通道 " + opened + " 处"
+                    + "（恢复后自动重扫剩余区域）");
+        }
+        return inheritedFootprint;
+    }
+
+    /**
+     * 行走掩码：楼梯/门/出口格可行走；空气格在室内、二维边界洪水确认封闭、
+     * 或楼梯顶面上方时可行走。与 NavigationData 的 floorWalkable 判定一致：
+     * 同时接受 3D insideGrid==1 和二维 planarInterior，否则被 3D 洪水误标为
+     * 室外的房间格会被排除在掩码外，房间不形成独立连通域，房间-走廊交界墙
+     * 的 4 邻域只有走廊一侧是可行走格，不满足"两侧不同连通域"的交界条件，
+     * 导致交汇处修复漏掉所有房间-走廊门洞。
+     */
+    private static boolean[] buildJunctionWalkMask(FireEscape model, int z0) {
+        int width = model.gridWidth;
+        int height = model.gridHeight;
+        boolean[] planarInterior = buildPlanarInteriorMask(model, z0);
+        boolean[] mask = new boolean[width * height];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int type = model.obstacleGrid.get(x, y, z0);
+                if (type == FireEscape.TYPE_STAIR ||
+                        type == FireEscape.TYPE_DOOR ||
+                        type == FireEscape.TYPE_EXIT) {
+                    mask[y * width + x] = true;
+                } else if (type == FireEscape.TYPE_EMPTY) {
+                    boolean aboveStair = z0 > 0 &&
+                            model.obstacleGrid.get(x, y, z0 - 1) == FireEscape.TYPE_STAIR;
+                    // 与 NavigationData.floorWalkable 一致：3D 室内标记或
+                    // 二维边界洪水确认封闭的空格都算可行走，避免房间被 3D
+                    // 洪水误标为室外时漏修复房间-走廊交界墙。
+                    mask[y * width + x] =
+                            model.insideGrid.get(x, y, z0) == 1 ||
+                                    planarInterior[y * width + x] || aboveStair;
+                }
+            }
+        }
+        return mask;
+    }
+
+    /** 4 邻接连通域标记，返回每格所属组件号（未通行格为 -1）。 */
+    private static int[] labelJunctionZones(boolean[] walkMask,
+                                            int width, int height) {
+        int[] zoneByCell = new int[width * height];
+        Arrays.fill(zoneByCell, -1);
+        int[] queue = new int[width * height];
+        int[][] directions = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        int zoneId = 0;
+        for (int start = 0; start < walkMask.length; start++) {
+            if (!walkMask[start] || zoneByCell[start] >= 0) continue;
+            int head = 0, tail = 0;
+            queue[tail++] = start;
+            zoneByCell[start] = zoneId;
+            while (head < tail) {
+                int index = queue[head++];
+                int x = index % width;
+                int y = index / width;
+                for (int[] dir : directions) {
+                    int nx = x + dir[0];
+                    int ny = y + dir[1];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int nextIndex = ny * width + nx;
+                    if (!walkMask[nextIndex] || zoneByCell[nextIndex] >= 0) continue;
+                    zoneByCell[nextIndex] = zoneId;
+                    queue[tail++] = nextIndex;
+                }
+            }
+            zoneId++;
+        }
+        return zoneByCell;
+    }
+
+    private static int maxJunctionZoneId(int[] zoneByCell) {
+        int max = -1;
+        for (int z : zoneByCell) max = Math.max(max, z);
+        return max;
+    }
+
+    /** 识别楼梯间连通域：包含最多"脚层是楼梯或脚层空气正下方是楼梯"格的区域。 */
+    private static int findJunctionStairZone(FireEscape model,
+                                             int[] zoneByCell,
+                                             int zoneCount, int z0) {
+        int width = model.gridWidth;
+        int height = model.gridHeight;
+        int[] zoneStairCells = new int[zoneCount];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int zoneId = zoneByCell[y * width + x];
+                if (zoneId < 0) continue;
+                boolean onStair =
+                        model.obstacleGrid.get(x, y, z0) == FireEscape.TYPE_STAIR ||
+                                (z0 > 0 && model.obstacleGrid.get(x, y, z0 - 1) == FireEscape.TYPE_STAIR);
+                if (onStair) zoneStairCells[zoneId]++;
+            }
+        }
+        int stairZone = -1, best = 0;
+        for (int z = 0; z < zoneCount; z++) {
+            if (zoneStairCells[z] > best) {
+                best = zoneStairCells[z];
+                stairZone = z;
+            }
+        }
+        return stairZone;
+    }
+
+    /** 在下层楼梯间足迹中找重叠最多的区域，用于顶层无楼梯格时识别楼梯间。 */
+    private static int findZoneOverlappingFootprint(int[] zoneByCell,
+                                                    int zoneCount,
+                                                    int width, int height,
+                                                    boolean[] footprint) {
+        int[] overlap = new int[zoneCount];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int index = y * width + x;
+                if (footprint.length > index && footprint[index]) {
+                    int zoneId = zoneByCell[index];
+                    if (zoneId >= 0) overlap[zoneId]++;
+                }
+            }
+        }
+        int bestZone = -1, bestOverlap = 0;
+        for (int z = 0; z < zoneCount; z++) {
+            if (overlap[z] > bestOverlap) {
+                bestOverlap = overlap[z];
+                bestZone = z;
+            }
+        }
+        return bestZone;
+    }
+
+    private static boolean[] collectJunctionZoneMask(int[] zoneByCell,
+                                                     int targetZone,
+                                                     int width, int height) {
+        boolean[] mask = new boolean[width * height];
+        for (int i = 0; i < zoneByCell.length; i++) {
+            if (zoneByCell[i] == targetZone) mask[i] = true;
+        }
+        return mask;
+    }
+
+    /**
+     * 恢复交汇处门洞：从脚层向上改写 WALL/WINDOW 为 TYPE_DOOR，提供站立
+     * 净空；遇到"上方是空气的墙"（楼板天花）立即停止，保证不凿穿楼层间隔。
+     */
+    private static void openJunctionDoorway(FireEscape model,
+                                            int x, int y, int z0) {
+        int maxZ = Math.min(z0 + 7, model.gridDepth - 1);
+        for (int z = z0; z <= maxZ; z++) {
+            int type = model.obstacleGrid.get(x, y, z);
+            if (type != FireEscape.TYPE_WALL &&
+                    type != FireEscape.TYPE_WINDOW) break;
+            // 天花判定：当前墙格上方是空气 → 这是楼板下表面，改写后停止
+            if (z > z0 && z + 1 < model.gridDepth) {
+                int aboveType = model.obstacleGrid.get(x, y, z + 1);
+                if (aboveType == FireEscape.TYPE_EMPTY) {
+                    model.obstacleGrid.set(x, y, z, FireEscape.TYPE_DOOR);
+                    break;
+                }
+            }
+            model.obstacleGrid.set(x, y, z, FireEscape.TYPE_DOOR);
+        }
+    }
+
+    /**
+     * 沿指定方向射线开凿门洞：从 (x,y) 沿 dir 方向逐格改写 WALL/WINDOW 为
+     * TYPE_DOOR，直到到达非墙格或超出 maxStep。处理 IFC 体素化中 2+ 格厚墙：
+     * 整条墙段都改为门洞，保证走廊与房间之间贯通。竖向仍复用 openJunctionDoorway
+     * 的天花停止逻辑，不凿穿楼板。
+     */
+    private static void openJunctionDoorwayRay(FireEscape model,
+                                               int x, int y, int z0,
+                                               int[] dir, int maxStep) {
+        for (int step = 0; step <= maxStep; step++) {
+            int cx = x + dir[0] * step;
+            int cy = y + dir[1] * step;
+            if (cx < 0 || cx >= model.gridWidth ||
+                    cy < 0 || cy >= model.gridHeight) break;
+            int type = model.obstacleGrid.get(cx, cy, z0);
+            if (type != FireEscape.TYPE_WALL &&
+                    type != FireEscape.TYPE_WINDOW) break;  // 到达非墙格停止
+            // 竖向开凿此格门洞（含站立净空 + 天花停止）
+            openJunctionDoorway(model, cx, cy, z0);
+        }
+    }
+
+    /**
+     * 恢复交汇处室内空气标记：从脚层向上，将连续的"室外空气格"
+     * （TYPE_EMPTY 且 insideGrid != 1）改回室内（insideGrid = 1），
+     * 提供站立净空，使走廊-楼梯间交汇处的开口被正确识别为可通行。
+     * 遇到墙/楼板（非 EMPTY）立即停止；上方是墙时作为天花停止，
+     * 避免竖向穿透到上层楼板。
+     */
+    private static void restoreJunctionIndoor(FireEscape model,
+                                              int x, int y, int z0) {
+        int maxZ = Math.min(z0 + 7, model.gridDepth - 1);
+        for (int z = z0; z <= maxZ; z++) {
+            int type = model.obstacleGrid.get(x, y, z);
+            if (type != FireEscape.TYPE_EMPTY) break;  // 遇到墙/楼板停止
+            model.insideGrid.set(x, y, z, 1);          // 恢复为室内
+            // 天花判定：当前空气格上方是墙 → 这是楼板下表面，改写后停止
+            if (z + 1 < model.gridDepth &&
+                    model.obstacleGrid.get(x, y, z + 1) == FireEscape.TYPE_WALL) {
+                break;
+            }
+        }
+    }
+
+    /**
      * 按连续楼板支撑面积识别站立层，再用上方大面积结构层排除屋顶。
      * 相邻高度的小支撑面会被归入同一组，只保留支撑面积最大的 z 层。
+     * 设为 public 供 FireEscape 的楼梯间门户修复复用：门户开凿与人员出生
+     * 必须基于同一套楼层基准，避免两套启发式对楼层的判定出现分歧。
      */
-    private static List<Integer> detectValidFloors(FireEscape model) {
+    public static List<Integer> detectValidFloors(FireEscape model) {
         int[] supportCounts = new int[model.gridDepth];
         for (int z = 1; z + 1 < model.gridDepth; z++) {
             for (int x = 0; x < model.gridWidth; x++) {
@@ -680,19 +1073,19 @@ public class Person implements Steppable {
         double fire = fm.fireGrid.get(x, y, z);
         double smoke = fm.getSmokeAt(x, y, z);
 
-        // 1. 高温死亡判定
+        // 1. 高温即时死亡：温度达到致死阈值（473K/200°C）相当于被火焰/灼热烟气
+        //    直接裹住，现实中数十秒内致命，不再走累积过程。
         if (fire >= FireEscape.T_DEATH) {
-            alive = false; deathCause = "fire";
-            fm.personGrid.remove(this); fm.recordDeath(deathCause); return;
+            die(fm, "fire");
+            return;
         }
 
-        // 2. 烟雾死亡判定
-        double exposureIncrement = smoke * 0.1;
-        if (smoke > 0.9) exposureIncrement += 0.3;
-        smokeExposure += exposureIncrement;
-        if (smokeExposure >= 1.0) {
-            alive = false; deathCause = "smoke";
-            fm.personGrid.remove(this); fm.recordDeath(deathCause); return;
+        // 2. 累积伤害剂量（烟气毒性 + 高温灼伤）。剂量只增不减，任一攒满即死亡。
+        accumulateInjuryDoses(fire, smoke);
+        if (toxicDose >= 1.0 || heatDose >= 1.0) {
+            // 先攒满的剂量决定死因统计口径；两者接近时取剂量更高者。
+            die(fm, toxicDose >= heatDose ? "smoke" : "fire");
+            return;
         }
 
         ensureNavigation();
@@ -704,8 +1097,16 @@ public class Person implements Steppable {
             return;
         }
 
-        // 4. 烟气会降低移动概率；路径和排队状态仍保留到下一次移动机会。
-        double moveProb = fm.moveProbability * (1.0 - smoke * 0.7);
+        // 4. 移动概率 = 基础概率 × 呛咳刺激 × 能见度 × 受伤程度；路径和排队状态
+        //    仍保留到下一次移动机会。三个因子各管一种现实减速原因，互不重复：
+        //    - 呛咳刺激（轻罚，满烟保留 70%）：浓烟呛得睁不开眼、剧烈咳嗽；
+        //    - 能见度（Jin 实验，满烟低至 30%）：看不清路只能扶墙慢挪；
+        //    - 受伤程度（剂量满时减半）：中毒头晕、灼伤疼痛导致腿软。
+        double injuryFactor = 1.0 - 0.5 * Math.max(toxicDose, heatDose);
+        double moveProb = fm.moveProbability
+                * (1.0 - smoke * 0.3)
+                * visibilitySpeedFactor(smoke)
+                * injuryFactor;
         if (moveCooldown > 0 || fm.random.nextDouble() >= moveProb) {
             moveCooldown = Math.max(0, moveCooldown - 1);
             if (routeLockTicks > 0) routeLockTicks--;
@@ -768,9 +1169,49 @@ public class Person implements Steppable {
         // 移动后再次检查高温，避免人物进入刚刚恶化的火场格后多存活一个时间步。
         fire = fm.fireGrid.get(x, y, z);
         if (fire >= FireEscape.T_DEATH) {
-            alive = false; deathCause = "fire";
-            fm.personGrid.remove(this); fm.recordDeath(deathCause);
+            die(fm, "fire");
         }
+    }
+
+    /** 死亡统一收口：设置死因、移出网格并计入统计（火灾死亡只有 fire/smoke 两类）。 */
+    private void die(FireEscape fm, String cause) {
+        alive = false;
+        deathCause = cause;
+        fm.personGrid.remove(this);
+        fm.recordDeath(cause);
+    }
+
+    /**
+     * 累积本时间步的伤害剂量。两种剂量都只增不减：CO 吸入后在血液中的半衰期
+     * 长达数小时，灼伤损伤同样不可逆，因此离开危险区后剂量保持，只会停止
+     * 上涨、不会消退。
+     */
+    private void accumulateInjuryDoses(double temperature, double smoke) {
+        // 烟气毒性：超过轻烟阈值后按烟浓度平方累积（Purser FED 时间尺度），
+        // 烟浓一倍、单位时间吸入的毒物约四倍。
+        if (smoke > SMOKE_DOSE_IGNORE_BELOW) {
+            toxicDose += smoke * smoke / SMOKE_DOSE_TICKS_AT_FULL;
+        }
+        // 高温灼伤：70°C 起按超温幅度平方累积（SFPE 干热空气耐受曲线：
+        // 100°C 约 7.5 分钟、150°C 约 1 分钟致死）；≥T_DEATH 已在上方即时判定。
+        if (temperature >= HEAT_DOSE_T_LOW && temperature < FireEscape.T_DEATH) {
+            double scaled = (temperature - HEAT_DOSE_T_LOW) / HEAT_DOSE_T_SPAN;
+            heatDose += scaled * scaled / HEAT_DOSE_RATE_DIVISOR;
+        }
+    }
+
+    /**
+     * 能见度对移动速度的影响（Jin 烟中行走实验 / SFPE 手册）：
+     * 烟粒子挡光，能见度（米）≈ 1/烟浓度（满烟约 1 米、五成烟约 2 米、
+     * 一成烟约 10 米）。行走速度随能见度近似线性下降，但浓烟中人会扶墙
+     * 摸黑挪步而不是完全停下，故设 30% 下限。
+     */
+    private static double visibilitySpeedFactor(double smoke) {
+        if (smoke < 0.05) return 1.0;   // 基本无烟，视线不受影响
+        double visibility = Math.min(1.0 / smoke, VIS_CLEAR_METERS);
+        double factor = VIS_SPEED_MIN +
+                (1.0 - VIS_SPEED_MIN) * (visibility - 1.0) / (VIS_CLEAR_METERS - 1.0);
+        return Math.max(VIS_SPEED_MIN, Math.min(1.0, factor));
     }
 
     private void ensureNavigation() {
@@ -1633,22 +2074,19 @@ public class Person implements Steppable {
             int x,
             int y,
             int floorZ) {
+        // 只检查格子本身是否是楼梯过渡格，不扫描 3×3 邻域。
+        // 3×3 邻域会让贴墙的房间格子扫到墙另一侧的楼梯实体，
+        // 导致整个房间区域被误判为"已到疏散点"(egressDistance=0)，
+        // 人物跳过 SEEK_ROOM_DOOR 阶段直接 A* 寻路到楼梯，
+        // 若墙体有 IFC 体素化缝隙则表现为穿墙。
         for (Stairwell stairwell : stairwells) {
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    int stairX = x + dx;
-                    int stairY = y + dy;
-                    if (isStairTransitionCell(
-                            model, stairwell, stairX, stairY, floorZ)) {
-                        return true;
-                    }
-                    // 顶层站立面可能比最后一级楼梯高一格；只允许相邻的真实楼梯
-                    // 过渡格建立连接，不能把整片楼梯二维投影都当作入口。
-                    if (isStairTransitionCell(
-                            model, stairwell, stairX, stairY, floorZ - 1)) {
-                        return true;
-                    }
-                }
+            if (isStairTransitionCell(model, stairwell, x, y, floorZ)) {
+                return true;
+            }
+            // 顶层站立面可能比最后一级楼梯高一格；只允许真实楼梯过渡格
+            // 建立连接，不能把整片楼梯二维投影都当作入口。
+            if (isStairTransitionCell(model, stairwell, x, y, floorZ - 1)) {
+                return true;
             }
         }
         return false;
@@ -1954,6 +2392,34 @@ public class Person implements Steppable {
                                         planarInterior[index]);
                     }
                 }
+                // 封堵 IFC 体素化中的墙体缝隙：若某空气格 4 邻域中 ≥3 格是
+                // 墙体或柱体，说明它是一条不该被通行的墙缝（体素化精度导致
+                // 墙体中残留 TYPE_EMPTY 格子），从可行走掩码中排除，防止
+                // A* 寻路利用这些缝隙穿墙。
+                int[][] wallCheckDirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+                for (int y = 0; y < height; y++) {
+                    for (int x = 0; x < width; x++) {
+                        int index = y * width + x;
+                        if (!walkable[index]) continue;
+                        int wallNeighbors = 0;
+                        for (int[] dir : wallCheckDirs) {
+                            int nx = x + dir[0];
+                            int ny = y + dir[1];
+                            if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                                wallNeighbors++;
+                                continue;
+                            }
+                            int ntype = model.obstacleGrid.get(nx, ny, floorZ);
+                            if (ntype == FireEscape.TYPE_WALL ||
+                                    ntype == FireEscape.TYPE_COLUMN) {
+                                wallNeighbors++;
+                            }
+                        }
+                        if (wallNeighbors >= 3) {
+                            walkable[index] = false;
+                        }
+                    }
+                }
                 floorWalkableMasks.put(floorZ, walkable);
             }
             this.floorDoorGraphs = new TreeMap<>();
@@ -2093,7 +2559,10 @@ public class Person implements Steppable {
 
         boolean requiresDoorTraversal(int x, int y) {
             int zoneId = resolveZoneAt(x, y);
-            return zoneId >= 0 && egressDistance[zoneId] != 0;
+            // 只对"有门路到疏散点但需穿门"的区域（egressDistance > 0）返回 true。
+            // 不连通区域 egressDistance=-1，返回 false，避免误进入 SEEK_ROOM_DOOR
+            // 后因 movesTowardEgress 永远 false 而原地卡死。
+            return zoneId >= 0 && egressDistance[zoneId] > 0;
         }
 
         int egressDistance(int zoneId) {
@@ -2284,7 +2753,10 @@ public class Person implements Steppable {
     public int getX() { return x; }
     public int getY() { return y; }
     public int getZ() { return z; }
-    public double getSmokeExposure() { return smokeExposure; }
+    /** 烟气毒性累积剂量（0=无, 1=致死），供外部观察中毒进度。 */
+    public double getSmokeExposure() { return toxicDose; }
+    /** 高温灼伤累积剂量（0=无, 1=致死）。 */
+    public double getHeatDose() { return heatDose; }
     public String getEvacuationPhase() {
         return evacuationPhase == null ? "UNINITIALIZED" : evacuationPhase.name();
     }

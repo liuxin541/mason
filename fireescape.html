@@ -1847,6 +1847,13 @@
 
         loader.load(glbPath, function (gltf) {
             buildingGroup = gltf.scene;
+            // ★ z 轴镜像补偿: IfcConvert --y-up 将 IFC(x,y,z) 转为 glTF(x,z,-y)，
+            // 即 glTF_z = -ifcY，与体素网格 worldZ = ifcY - oy 方向相反。
+            // three.js 变换顺序为先缩放后平移，因此最终世界坐标为:
+            //   (gx-ox, gy-oz, -gz-oy) = (ifcX-ox, ifcZ-oz, ifcY-oy)
+            // 与人员/火/烟的体素世界坐标完全一致，人物即可正确显示在建筑内部。
+            // 注: 负缩放会翻转三角形绕序，但下方已将外壳材质设为 DoubleSide，不会被背面剔除。
+            buildingGroup.scale.set(1, 1, -1);
             // 将 glTF 模型平移，使其原点与体素网格原点对齐（Y-Z 互换后）
             buildingGroup.position.set(-originOffset[0], -originOffset[2], -originOffset[1]);
             // ★ 建筑外壳半透明: 外部视角也能看到内部烟雾, 无需剖面模式
