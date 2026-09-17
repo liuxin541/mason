@@ -78,10 +78,10 @@ public class FireEscape extends SimState {
     public double burnRatePerArea = 0.010;
     public double smokeYield = 0.05;
     public int fuelCapacity = 80;
-    public double baseSmokeSpread = 0.05;
+    public double baseSmokeSpread = 0.1;  // 优化: 平衡扩散系数  // 优化: 增大烟雾扩散系数
     public double smokeDecayRate = 0.005;
-    public double smokeDriftCoeff = 0.08;
-    public double smokeDriftMaxSpeed = 0.5;
+    public double smokeDriftCoeff = 0.1;  // 优化: 平衡漂移系数  // 优化: 增大烟雾漂移系数
+    public double smokeDriftMaxSpeed = 0.7;  // 优化: 平衡最大漂移速度  // 优化: 增大最大漂移速度
     public double exhaustRate = 0.15;
     public double smokeAbsorptionCoeff = 0.5;
     public static final double MAX_SMOKE = 1.0;

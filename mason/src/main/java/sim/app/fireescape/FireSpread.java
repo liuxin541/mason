@@ -26,7 +26,7 @@ public class FireSpread implements Steppable {
     private static final double SMOKE_FLOOR            = 0.002;
     private static final double SMOKE_CEIL             = 1.0;
     // ===== 方案1:火源烟气注入速率(单位浓度/秒),控制产烟强度 =====
-    private static final double SMOKE_SOURCE_RATE      = 2.0;
+    private static final double SMOKE_SOURCE_RATE      = 20.0;  // 优化: 平衡产烟量,避免浓度过高  // 优化: 大幅增大产烟量  // 优化: 增大产烟量,确保烟雾能蔓延到整个建筑
     private static final int    EXIT_RADIUS            = 2;
     private static final double KILOWATT_TO_WATT       = 1000.0;
     private static final double CONV_RADIUS_METERS     = 1.0;
@@ -553,7 +553,7 @@ public class FireSpread implements Steppable {
                         }
                         double D_eff = _D_smoke_base * stratFactor;
                         // 修复: 顶棚层水平扩散增强5倍, 模拟顶棚射流的水平推进(烟雾能蔓延到整个建筑)
-                        if (ceilingNearLayer[z]) D_eff *= 5.0;
+                        if (ceilingNearLayer[z]) D_eff *= 10.0;  // 优化: 顶棚层扩散增强10倍,模拟强顶棚射流水平推进
                         double diff = D_eff * (laplacianC / totalW - nextC[x][y][z]) * DT_FINAL / dxSq;
                         C_afterDiff[x][y][z] = nextC[x][y][z] + diff;
                     }
@@ -598,7 +598,7 @@ public class FireSpread implements Steppable {
 
                     // ===== 优化项 1: 修正垂直烟气漂移方向 =====
                     // z=0 地板, z=d-1 顶棚,烟往 +z 方向漂移(向上)
-                    double vz = _smkCoeff * excessT / T_AMB;
+                    double vz = _smkCoeff * Math.max(excessT / T_AMB, 0.5);  // 优化: 烟雾最低上升速度保底,冷却后仍保持浮力
                     if (vz > _maxDrift) vz = _maxDrift;
                     if (vz > VEL_EPS) {
                         // 迎风格式: 从 z-1 向 z 输运,当 z-1 浓度更高时,输运到 z
@@ -623,56 +623,67 @@ public class FireSpread implements Steppable {
                     // ===== 水平漂移 =====
                     double gradX = (nextT[x+1][y][z] - nextT[x-1][y][z]) / twoDx;
                     double gradMagX = Math.abs(gradX);
+                    // 优化: 基础水平漂移(温度驱动,不依赖浓度梯度,始终执行)
+                    double baseDriftX = _smkCoeff * Math.max(excessT / T_AMB, 0.5) * (fire.random.nextDouble() - 0.5) * 2.0;
+                    double vx = baseDriftX;
                     if (gradMagX > GRAD_EPS) {
-                        double vx = _smkCoeff * 0.5 * gradX / gradMagX * Math.max(excessT / T_AMB, 0.15);
-                        if (vx > _maxDrift) vx = _maxDrift;
-                        if (vx < -_maxDrift) vx = -_maxDrift;
-                        double abs_vx = Math.abs(vx);
-                        if (abs_vx > VEL_EPS) {
-                            double frac = Math.min(1.0, abs_vx * DT_FINAL / dx);
-                            if (vx > 0) {
-                                // 往 +x 方向输运:从 x 搬到 x+1
-                                double deltaC_x = C_afterDiff[x][y][z] * frac;
-                                double deltaT_x = T_afterAdvection[x][y][z] * frac;
-                                C_afterAdvection[x][y][z] -= deltaC_x;
-                                C_afterAdvection[x+1][y][z] += deltaC_x;
-                                T_afterAdvection[x][y][z] -= deltaT_x;
-                                T_afterAdvection[x+1][y][z] += deltaT_x;
-                            } else {
-                                double deltaC_x = C_afterDiff[x][y][z] * frac;
-                                double deltaT_x = T_afterAdvection[x][y][z] * frac;
-                                C_afterAdvection[x][y][z] -= deltaC_x;
-                                C_afterAdvection[x-1][y][z] += deltaC_x;
-                                T_afterAdvection[x][y][z] -= deltaT_x;
-                                T_afterAdvection[x-1][y][z] += deltaT_x;
-                            }
+                        // 梯度驱动的附加漂移(沿温度梯度方向)
+                        double gradDriftX = _smkCoeff * 0.5 * gradX / gradMagX * Math.max(excessT / T_AMB, 0.15);
+                        vx += gradDriftX;
+                    }
+                    // 优化: 水平输运执行移到条件外,基础漂移始终生效
+                    if (vx > _maxDrift) vx = _maxDrift;
+                    if (vx < -_maxDrift) vx = -_maxDrift;
+                    double abs_vx = Math.abs(vx);
+                    if (abs_vx > VEL_EPS) {
+                        double frac = Math.min(1.0, abs_vx * DT_FINAL / dx);
+                        if (vx > 0) {
+                            double deltaC_x = C_afterDiff[x][y][z] * frac;
+                            double deltaT_x = T_afterAdvection[x][y][z] * frac;
+                            C_afterAdvection[x][y][z] -= deltaC_x;
+                            C_afterAdvection[x+1][y][z] += deltaC_x;
+                            T_afterAdvection[x][y][z] -= deltaT_x;
+                            T_afterAdvection[x+1][y][z] += deltaT_x;
+                        } else {
+                            double deltaC_x = C_afterDiff[x][y][z] * frac;
+                            double deltaT_x = T_afterAdvection[x][y][z] * frac;
+                            C_afterAdvection[x][y][z] -= deltaC_x;
+                            C_afterAdvection[x-1][y][z] += deltaC_x;
+                            T_afterAdvection[x][y][z] -= deltaT_x;
+                            T_afterAdvection[x-1][y][z] += deltaT_x;
                         }
                     }
 
                     double gradY = (nextT[x][y+1][z] - nextT[x][y-1][z]) / twoDx;
                     double gradMagY = Math.abs(gradY);
+                    // 优化: 基础水平漂移(温度驱动,不依赖浓度梯度,始终执行)
+                    double baseDriftY = _smkCoeff * Math.max(excessT / T_AMB, 0.5) * (fire.random.nextDouble() - 0.5) * 2.0;
+                    double vy = baseDriftY;
                     if (gradMagY > GRAD_EPS) {
-                        double vy = _smkCoeff * 0.5 * gradY / gradMagY * Math.max(excessT / T_AMB, 0.15);
-                        if (vy > _maxDrift) vy = _maxDrift;
-                        if (vy < -_maxDrift) vy = -_maxDrift;
-                        double abs_vy = Math.abs(vy);
-                        if (abs_vy > VEL_EPS) {
-                            double frac = Math.min(1.0, abs_vy * DT_FINAL / dx);
-                            if (vy > 0) {
-                                double deltaC_y = C_afterDiff[x][y][z] * frac;
-                                double deltaT_y = T_afterAdvection[x][y][z] * frac;
-                                C_afterAdvection[x][y][z] -= deltaC_y;
-                                C_afterAdvection[x][y+1][z] += deltaC_y;
-                                T_afterAdvection[x][y][z] -= deltaT_y;
-                                T_afterAdvection[x][y+1][z] += deltaT_y;
-                            } else {
-                                double deltaC_y = C_afterDiff[x][y][z] * frac;
-                                double deltaT_y = T_afterAdvection[x][y][z] * frac;
-                                C_afterAdvection[x][y][z] -= deltaC_y;
-                                C_afterAdvection[x][y-1][z] += deltaC_y;
-                                T_afterAdvection[x][y][z] -= deltaT_y;
-                                T_afterAdvection[x][y-1][z] += deltaT_y;
-                            }
+                        // 梯度驱动的附加漂移(沿温度梯度方向)
+                        double gradDriftY = _smkCoeff * 0.5 * gradY / gradMagY * Math.max(excessT / T_AMB, 0.15);
+                        vy += gradDriftY;
+                    }
+                    // 优化: 水平输运执行移到条件外,基础漂移始终生效
+                    if (vy > _maxDrift) vy = _maxDrift;
+                    if (vy < -_maxDrift) vy = -_maxDrift;
+                    double abs_vy = Math.abs(vy);
+                    if (abs_vy > VEL_EPS) {
+                        double frac = Math.min(1.0, abs_vy * DT_FINAL / dx);
+                        if (vy > 0) {
+                            double deltaC_y = C_afterDiff[x][y][z] * frac;
+                            double deltaT_y = T_afterAdvection[x][y][z] * frac;
+                            C_afterAdvection[x][y][z] -= deltaC_y;
+                            C_afterAdvection[x][y+1][z] += deltaC_y;
+                            T_afterAdvection[x][y][z] -= deltaT_y;
+                            T_afterAdvection[x][y+1][z] += deltaT_y;
+                        } else {
+                            double deltaC_y = C_afterDiff[x][y][z] * frac;
+                            double deltaT_y = T_afterAdvection[x][y][z] * frac;
+                            C_afterAdvection[x][y][z] -= deltaC_y;
+                            C_afterAdvection[x][y-1][z] += deltaC_y;
+                            T_afterAdvection[x][y][z] -= deltaT_y;
+                            T_afterAdvection[x][y-1][z] += deltaT_y;
                         }
                     }
 

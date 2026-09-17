@@ -1,0 +1,1 @@
+{"audience":"论文作者（投稿人）","reader_task":"判断论文是否达到投稿标准，按严重度逐条修复问题","genre_contract":"strategy-and-analysis","adapter":null,"presentation_mode":"rich","visual_plan":{"reason":"策略与分析｜藏青主色｜核心判断：投前需大改；问题严重度分层（CRITICAL/MAJOR/MINOR）及修改动作均来自对论文全文的逐段审阅；表格呈现问题清单与修复动作，callout 高亮核心结论与最该先修的三件事","blocks":[]}}
