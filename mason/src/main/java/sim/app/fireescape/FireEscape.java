@@ -29,6 +29,7 @@ public class FireEscape extends SimState {
     public IntGrid3D obstacleGrid;
     public IntGrid3D fuelGrid;
     public IntGrid3D insideGrid;
+    public java.util.List<int[]> insideCells = new java.util.ArrayList<>();
     public List<int[]> exits = new ArrayList<>();
     public int groundFloorMinZ = 0;
     public int groundFloorMaxZ = 0;
@@ -77,10 +78,10 @@ public class FireEscape extends SimState {
     public double burnRatePerArea = 0.010;
     public double smokeYield = 0.05;
     public int fuelCapacity = 80;
-    public double baseSmokeSpread = 0.02;
+    public double baseSmokeSpread = 0.05;
     public double smokeDecayRate = 0.005;
     public double smokeDriftCoeff = 0.08;
-    public double smokeDriftMaxSpeed = 0.3;
+    public double smokeDriftMaxSpeed = 0.5;
     public double exhaustRate = 0.15;
     public double smokeAbsorptionCoeff = 0.5;
     public static final double MAX_SMOKE = 1.0;
@@ -782,6 +783,14 @@ public class FireEscape extends SimState {
         updateGroundFloorRange();
         System.out.println("[BIM] 室内外洪水填充完成: outside=" + outsideCount +
                 ", inside=" + insideCount + ", exits=" + exits.size());
+        // ★ 预计算内部格列表,供 FireSpread 性能优化使用
+        insideCells.clear();
+        for (int x = 0; x < width; x++)
+            for (int y = 0; y < height; y++)
+                for (int z = 0; z < depth; z++)
+                    if (insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) != TYPE_WALL)
+                        insideCells.add(new int[]{x, y, z});
+        System.out.println("[BIM] insideCells 预计算: " + insideCells.size() + " 个内部格");
     }
 
     private boolean isEnclosureBarrier(int type) {

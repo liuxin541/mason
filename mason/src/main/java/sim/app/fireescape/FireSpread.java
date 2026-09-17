@@ -57,6 +57,51 @@ public class FireSpread implements Steppable {
     private int[] scratchNeighbors3x3_y = null;
     private int cachedNeighborSize = -1;
 
+    // ===== 修复: 动态检测每层实际顶棚(替代硬编码 ceilingZ=d-1) =====
+    private int[] ceilingZs = null;
+    private boolean[] ceilingNearLayer = null;
+    private int cachedCeilW = -1, cachedCeilH = -1, cachedCeilD = -1;
+
+    private int[] detectCeilings(int w, int h, int d, int[][][] obstacle, int[][][] inside) {
+        java.util.List<Integer> ceilings = new java.util.ArrayList<>();
+        int[] wallByZ = new int[d];
+        int[] insideByZ = new int[d];
+        for (int z = 0; z < d; z++) {
+            int wc = 0, ic = 0;
+            for (int x = 0; x < w; x++)
+                for (int y = 0; y < h; y++) {
+                    if (obstacle[x][y][z] == TYPE_WALL) wc++;
+                    if (inside[x][y][z] == 1) ic++;
+                }
+            wallByZ[z] = wc;
+            insideByZ[z] = ic;
+        }
+        for (int z = 2; z < d - 1; z++) {
+            int cur = insideByZ[z];
+            int above = insideByZ[z + 1];
+            int below = insideByZ[z - 1];
+            if (cur > 0 && cur < (above + below) * 0.4 && wallByZ[z] > cur) {
+                int ceilZ = z - 1;
+                if (ceilZ >= 0 && (ceilings.isEmpty() || ceilZ - ceilings.get(ceilings.size() - 1) > 3)) {
+                    ceilings.add(ceilZ);
+                }
+            }
+        }
+        if (ceilings.isEmpty()) ceilings.add(d - 1);
+        int[] result = new int[ceilings.size()];
+        for (int i = 0; i < ceilings.size(); i++) result[i] = ceilings.get(i);
+        return result;
+    }
+
+    private void rebuildCeilingNearLayer(int d, int[] cz, int nearBelow) {
+        ceilingNearLayer = new boolean[d];
+        for (int c : cz) {
+            for (int k = 0; k <= nearBelow && c - k >= 0; k++) {
+                ceilingNearLayer[c - k] = true;
+            }
+        }
+    }
+
     private boolean hasLineOfSight(int x1, int y1, int z1,
                                     int x2, int y2, int z2,
                                     int[][][] obstacle) {
@@ -171,6 +216,16 @@ public class FireSpread implements Steppable {
         final List<int[]> fireSources = fire.getFireSourcePositions();
         final int nSources = fireSources.size();
 
+        // ===== 修复: 动态检测每层实际顶棚(只在尺寸变化时重算) =====
+        if (cachedCeilW != w || cachedCeilH != h || cachedCeilD != d) {
+            ceilingZs = detectCeilings(w, h, d, obstacle, inside);
+            rebuildCeilingNearLayer(d, ceilingZs, 3);
+            cachedCeilW = w; cachedCeilH = h; cachedCeilD = d;
+            StringBuilder sb = new StringBuilder("[Smoke] 检测到顶棚层 z=");
+            for (int c : ceilingZs) sb.append(c).append(" ");
+            System.out.println(sb.toString());
+        }
+
         final double T_AMB = FireEscape.T_AMBIENT;
         final double T_FLAME = FireEscape.T_FLAME;
         final double T_IGN = FireEscape.T_IGNITION;
@@ -215,18 +270,16 @@ public class FireSpread implements Steppable {
         final double rho = _rho;
         final double cp = _cp;
 
-        for (int x = 0; x < w; x++) {
+        // 性能优化: 先全部设默认值(用 Arrays.fill 更快), 再只遍历内部格拷贝当前值
+        for (int x = 0; x < w; x++)
             for (int y = 0; y < h; y++) {
-                for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) {
-                        nextT[x][y][z] = T_AMB;
-                        nextC[x][y][z] = 0.0;
-                    } else {
-                        nextT[x][y][z] = T[x][y][z];
-                        nextC[x][y][z] = C[x][y][z];
-                    }
-                }
+                java.util.Arrays.fill(nextT[x][y], T_AMB);
+                java.util.Arrays.fill(nextC[x][y], 0.0);
             }
+        for (int[] cell : fire.insideCells) {
+            int cx = cell[0], cy = cell[1], cz = cell[2];
+            nextT[cx][cy][cz] = T[cx][cy][cz];
+            nextC[cx][cy][cz] = C[cx][cy][cz];
         }
 
         // ===== 优化项 6: 缓存数组扩展 =====
@@ -499,6 +552,8 @@ public class FireSpread implements Steppable {
                             }
                         }
                         double D_eff = _D_smoke_base * stratFactor;
+                        // 修复: 顶棚层水平扩散增强5倍, 模拟顶棚射流的水平推进(烟雾能蔓延到整个建筑)
+                        if (ceilingNearLayer[z]) D_eff *= 5.0;
                         double diff = D_eff * (laplacianC / totalW - nextC[x][y][z]) * DT_FINAL / dxSq;
                         C_afterDiff[x][y][z] = nextC[x][y][z] + diff;
                     }
@@ -528,7 +583,7 @@ public class FireSpread implements Steppable {
         double cjR2_05 = cjR_eff * cjR_eff * GAUSSIAN_SIGMA_FACTOR;
         double cjStrengthEff = _cjStrength * DT_FINAL;
         // ===== 性能优化: 顶棚射流在最顶3层处理,降低温度和浓度门限 =====
-        final int CJ_Z_MIN = ceilingZ - 2;
+        final int CJ_Z_MIN = 0;  // 修复: 不再用网格顶部, 改用 ceilingNearLayer 动态判断
         final double CJ_EXCESS_T = 30.0;
         final double CJ_MIN_C = 0.002;
 
@@ -569,7 +624,7 @@ public class FireSpread implements Steppable {
                     double gradX = (nextT[x+1][y][z] - nextT[x-1][y][z]) / twoDx;
                     double gradMagX = Math.abs(gradX);
                     if (gradMagX > GRAD_EPS) {
-                        double vx = _smkCoeff * 0.5 * gradX / gradMagX * (excessT / T_AMB);
+                        double vx = _smkCoeff * 0.5 * gradX / gradMagX * Math.max(excessT / T_AMB, 0.15);
                         if (vx > _maxDrift) vx = _maxDrift;
                         if (vx < -_maxDrift) vx = -_maxDrift;
                         double abs_vx = Math.abs(vx);
@@ -597,7 +652,7 @@ public class FireSpread implements Steppable {
                     double gradY = (nextT[x][y+1][z] - nextT[x][y-1][z]) / twoDx;
                     double gradMagY = Math.abs(gradY);
                     if (gradMagY > GRAD_EPS) {
-                        double vy = _smkCoeff * 0.5 * gradY / gradMagY * (excessT / T_AMB);
+                        double vy = _smkCoeff * 0.5 * gradY / gradMagY * Math.max(excessT / T_AMB, 0.15);
                         if (vy > _maxDrift) vy = _maxDrift;
                         if (vy < -_maxDrift) vy = -_maxDrift;
                         double abs_vy = Math.abs(vy);
@@ -623,7 +678,7 @@ public class FireSpread implements Steppable {
 
                     // ===== 优化项 10: 顶棚射流 (Ceiling Jet) =====
                     // 当烟接近/到达顶棚时,将垂直动量转为水平径向扩散
-                    if (z >= CJ_Z_MIN && excessT > CJ_EXCESS_T) {
+                    if (ceilingNearLayer[z] && excessT > CJ_EXCESS_T) {
                         double zNearCeil = 1.0;
                         double curC = C_afterDiff[x][y][z];
                         double curT = T_afterAdvection[x][y][z];
@@ -657,21 +712,17 @@ public class FireSpread implements Steppable {
         // ===================================================================
         // 回写烟 + 温度
         // ===================================================================
-        for (int x = 0; x < w; x++)
-            for (int y = 0; y < h; y++)
-                for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
-                    nextC[x][y][z] = C_afterAdvection[x][y][z];
-                    nextT[x][y][z] = T_afterAdvection[x][y][z];
-                }
+        for (int[] cell : fire.insideCells) {
+            int x = cell[0], y = cell[1], z = cell[2];
+            nextC[x][y][z] = C_afterAdvection[x][y][z];
+            nextT[x][y][z] = T_afterAdvection[x][y][z];
+        }
 
         // ===================================================================
         // (9) 冷却衰减 + 优化项 14: 高温烟 Stefan-Boltzmann 辐射
         // ===================================================================
-        for (int x = 0; x < w; x++)
-            for (int y = 0; y < h; y++)
-                for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
+        for (int[] cell : fire.insideCells) {
+            int x = cell[0], y = cell[1], z = cell[2];
                     nextT[x][y][z] -= _cooling * DT_FINAL * (nextT[x][y][z] - T_AMB);
                     if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
 
