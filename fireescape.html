@@ -1608,9 +1608,11 @@
                 float temp = 293.15 + sampleField(uTempTex, uvw) * 880.0;
                 float excessT = max(0.0, temp - 293.15);
 
-                // === 深灰色体积烟雾 (低密度浅灰, 高密度深黑, 参考FDS Smokeview) ===
-                // 颜色渐变: 极淡(0.45) → 淡灰(0.25) → 深灰(0.10) → 近黑(0.03)
-                vec3 smokeColor = mix(vec3(0.42, 0.41, 0.43), vec3(0.03, 0.03, 0.04), smoothstep(0.0, 0.6, density));
+                // === 真实火灾烟雾颜色 (暖灰棕: 不完全燃烧碳颗粒, 参考FDS Smokeview) ===
+                // 低密度: 暖灰白(被环境光照亮) → 高密度: 深棕黑(遮挡光线)
+                vec3 smokeColor = mix(vec3(0.56, 0.53, 0.49), vec3(0.10, 0.085, 0.07), smoothstep(0.0, 0.55, density));
+                // 中密度带一点棕褐色调, 模拟未燃尽碳烟
+                smokeColor = mix(smokeColor, vec3(0.30, 0.24, 0.19), smoothstep(0.25, 0.75, density) * 0.35);
                 // 高温烟雾带橙红色(被火焰照亮/自身高温)
                 float heatGlow = smoothstep(350.0, 700.0, excessT);
                 smokeColor = mix(smokeColor, vec3(0.55, 0.25, 0.08), heatGlow * 0.6);
@@ -1618,7 +1620,7 @@
                 // === 光照: 主方向光散射 (Henyey-Greenstein) ===
                 float lightTrans = exp(-density * uAbsorption * 0.7);
                 float cosT = dot(rd, uLightDir);
-                float phase = hgPhase(cosT, 0.55);
+                float phase = hgPhase(cosT, 0.62);  // 前向散射增强: 光从光源方向穿过时烟雾更亮
                 // 各向同性项(背光柔和)
                 float phaseIso = 0.05 + 0.1 * density;
 
@@ -1737,8 +1739,8 @@
                         uLightDir: { value: new THREE.Vector3(0.3, 0.9, 0.2).normalize() },
                         uLightColor: { value: new THREE.Color(0.95, 0.90, 0.80) },
                         uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
-                        uAbsorption: { value: 22.0 },
-                        uScattering: { value: 4.5 },
+                        uAbsorption: { value: 16.0 },  // 吸收略降: 烟雾更通透
+                        uScattering: { value: 6.5 },  // 散射增强: 体积光感更明显
                         // ★ 性能：默认 72 步/0.3m（覆盖 21.6m），低帧率时 applyQuality 自动再降级
                         uStepSize: { value: 0.3 },
                         uMaxSteps: { value: 72 },
@@ -1775,9 +1777,10 @@
         applyQuality(fps) {
             if (!this.material || fps < 0) return;
             const u = this.material.uniforms;
-            if (fps < 18)      { u.uMaxSteps.value = 32;  u.uStepSize.value = 0.5; }
-            else if (fps < 30) { u.uMaxSteps.value = 48;  u.uStepSize.value = 0.4; }
-            else               { u.uMaxSteps.value = 72;  u.uStepSize.value = 0.3; }
+            if (fps < 12)      { u.uMaxSteps.value = 24;  u.uStepSize.value = 0.65; u.uDensityThreshold.value = 0.01; }
+            else if (fps < 18) { u.uMaxSteps.value = 32;  u.uStepSize.value = 0.5;  u.uDensityThreshold.value = 0.008; }
+            else if (fps < 30) { u.uMaxSteps.value = 48;  u.uStepSize.value = 0.4;  u.uDensityThreshold.value = 0.005; }
+            else               { u.uMaxSteps.value = 72;  u.uStepSize.value = 0.3;  u.uDensityThreshold.value = 0.003; }
         }
 
         setVisible(v) {
@@ -1921,6 +1924,17 @@
             fpsFrames = 0;
             fpsWindowStart = _fpsTime;
             if (volumeSmoke) volumeSmoke.applyQuality(currentFps);
+            // ★ 动态像素比: 低帧率降分辨率提帧率, 高帧率恢复清晰度
+            const targetPR = currentFps < 12 ? 0.75 : currentFps < 20 ? 1.0 : 1.25;
+            const _curPR = renderer.getPixelRatio();
+            if (Math.abs(_curPR - targetPR) > 0.01) {
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, targetPR));
+                renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+            }
+            // ★ 火焰粒子自适应: 低帧率减少发射
+            if (fireParticles) {
+                fireParticles.emissionScale = currentFps < 12 ? 0.4 : currentFps < 20 ? 0.7 : 1.0;
+            }
         }
 
         // ★ GPU 粒子系统更新（火焰/烟雾）
@@ -3424,7 +3438,7 @@
                     if (obs !== undefined && obs === 1) {
                         if (buildingGroup) continue;
                         if (clipMode && y === 0) continue;
-                        color = new THREE.Color(0.55, 0.55, 0.60);
+                        color = new THREE.Color(0.72, 0.70, 0.67);  // 暖米色墙体, 贴近真实建筑
                         draw = true;
                     }
                     else if (temp > T_AMB + 1.0) {
@@ -3772,10 +3786,11 @@
             if (volumeSmoke) volumeSmoke.update(data, dx, dz);
         } catch (e) { /* 静默失败 */ }
     }
-    // ★ 递归 setTimeout, 上一个请求完成后再等500ms发起下一个
+    // ★ 递归 setTimeout, 上一个请求完成后再等下一轮(帧率低时降频, 减少纹理上传压力)
     function pollSmokeVolume() {
         fetchSmokeVolume().finally(() => {
-            setTimeout(pollSmokeVolume, 500);
+            const interval = (typeof currentFps === 'number' && currentFps > 0 && currentFps < 20) ? 1000 : 500;
+            setTimeout(pollSmokeVolume, interval);
         });
     }
     pollSmokeVolume();
@@ -3792,6 +3807,15 @@
     const cm = document.getElementById('currentModel');
     if (cm) cm.textContent = '简单矩形房间';
     fetch('/command', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=map_simple' });
+    // ★ URL参数支持: ?model=building 直接进入BIM模式 (供headless截图/快捷访问)
+    try {
+        const _urlModel = new URLSearchParams(window.location.search).get('model');
+        if (_urlModel === 'building' && ms) {
+            ms.value = 'building';
+            ms.dispatchEvent(new Event('change'));
+            addLog('🏢 URL参数: 已自动切换到BIM大楼模型', 'info');
+        }
+    } catch (e) { /* 静默 */ }
 
     // ★ 强制设置相机位置: 延迟2秒确保数据加载完成, 简单房间(15x10x5m)全貌可见
     setTimeout(() => {
