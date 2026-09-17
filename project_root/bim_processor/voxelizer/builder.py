@@ -8,6 +8,7 @@ TYPE_NAME_TO_CONST = {
     'COLUMN': VoxelGrid.COLUMN,
     'DOOR':   VoxelGrid.DOOR,
     'STAIR':  VoxelGrid.STAIR,
+    'WINDOW': VoxelGrid.WINDOW,
 }
 
 # 实体类型需要内部填充；薄片类型(DOOR)不需要
@@ -25,7 +26,7 @@ PROCESS_ORDER = [
     ('curtainwalls', True),   # 幕墙
     ('stairs',       True),   # 楼梯（可通行垂直通道）
     ('doors',        False),  # 门（薄片，覆盖墙上门洞为可通行）
-    ('windows',      False),  # 窗（薄片，覆盖墙上窗洞为可通行）
+    ('windows',      False),  # 窗（薄片，按 WINDOW 写入并封闭窗洞）
 ]
 
 
@@ -137,7 +138,7 @@ def build_from_elements(grid, elements, origin_shift=(0.0, 0.0, 0.0)):
     处理顺序（后写覆盖先写）：
         slabs → walls → columns → beams/members/plates/railings/curtainwalls
         → stairs → doors → windows
-    门/窗最后写入，覆盖墙上门洞窗洞为 DOOR（可通行）。
+    门最后写入为 DOOR（可通行）；窗最后写入为 WINDOW（围护边界、不可通行）。
     """
     voxel_size = grid.voxel_size
 
