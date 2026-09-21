@@ -36,6 +36,11 @@ public class FireEscape extends SimState {
     public Person[] persons;
     private FireSpread fireSpread;
 
+    // ===== LES 烟雾求解器（显式速度场 + 压力投影 + Smagorinsky + Semi-Lagrangian）=====
+    // 来源: feature/floorplan-optimization 分支整合, 默认关闭(经验模型已调优验证), 可手动开启实验
+    public SmokeLESolver smokeLESolver;
+    public boolean useLESSmoke = false;  // true=LES求解器, false=原有经验模型(默认)
+
     public int deadByFire = 0;
     public int deadBySmoke = 0;
 
@@ -868,6 +873,16 @@ public class FireEscape extends SimState {
         insideGrid = new IntGrid3D(width, height, depth, 1);
 
         System.out.println("[Grid] 3D 网格已动态分配: " + width + "x" + height + "x" + depth);
+        // 初始化 LES 烟雾求解器（dx=dy=deltaX, dz=deltaZ），仅在 useLESSmoke=true 时
+        if (useLESSmoke) {
+            smokeLESolver = new SmokeLESolver(width, height, depth, deltaX, deltaX, deltaZ);
+            smokeLESolver.setRho(rhoAir);
+            smokeLESolver.setG(g);
+            smokeLESolver.setTAmb(T_AMBIENT);
+            smokeLESolver.setPressureIters(40);
+            System.out.println("[LESolver] 烟雾求解器已初始化，网格: " + width + "x" + height + "x" + depth
+                    + ", Δ=" + String.format("%.3f", Math.cbrt(deltaX * deltaX * deltaZ)) + "m");
+        }
     }
 
     // ★ 强健回退方案：即使没有体素文件，也能硬生成 3 层测试建筑

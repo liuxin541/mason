@@ -563,6 +563,26 @@ public class FireSpread implements Steppable {
         }  // end doConduction
 
         long _tI = System.nanoTime();  // 注入段结束(扩散前)
+        long _tD0, _tD1, _tB;  // 扩散/平流计时(LES与经验模式分别赋值)
+        // ===================================================================
+        // (7)(8) 烟雾输运：LES 求解器 或 原有经验模型
+        // ===================================================================
+        if (fire.useLESSmoke && fire.smokeLESolver != null) {
+            // ===== LES 模式：显式速度场 + 压力投影 + Smagorinsky + Semi-Lagrangian =====
+            // 求解器直接更新 nextT（温度平流）和 nextC（烟雾平流+扩散）
+            // 羽流、顶棚射流由浮力驱动的速度场自然产生，无需经验模型
+            fire.smokeLESolver.step(nextT, nextC, obstacle, inside, DT_FINAL);
+            // 同步到 afterAdvection 场（回写段用这些变量），一次 insideCells 遍历
+            for (int[] sc : fire.insideCells) {
+                int cx = sc[0], cy = sc[1], cz = sc[2];
+                C_afterAdvection[cx][cy][cz] = nextC[cx][cy][cz];
+                T_afterAdvection[cx][cy][cz] = nextT[cx][cy][cz];
+                C_afterDiff[cx][cy][cz] = nextC[cx][cy][cz];
+            }
+            _tD0 = _tI;  // LES模式无扩散段, 计时归零
+            _tD1 = _tI;
+            _tB = System.nanoTime();
+        } else {
         // ===================================================================
         // (7) 烟气扩散 - 优化项 13: 分层抑制(Richardson 数)
         // 方案A性能: 快照+收集合并为一次insideCells遍历, 避免77万全网格快照与26万收集两遍
@@ -575,7 +595,7 @@ public class FireSpread implements Steppable {
             T_afterAdvection[cx][cy][cz] = nextT[cx][cy][cz];  // 初值=nextT
             if (cv > 0.002) smokeCells.add(sc);  // 方案A微调6: 阈值0.002(性能), 烟铺开由溢出+射流维持高浓度
         }
-        long _tD0 = System.nanoTime();  // 烟格收集结束
+        _tD0 = System.nanoTime();  // 烟格收集结束
         if ((_stepCount & 31) == 0) System.out.println("[DBG6] smokeCells.size=" + smokeCells.size());
         for (int[] sc : smokeCells) {
             int x = sc[0], y = sc[1], z = sc[2];
@@ -618,8 +638,8 @@ public class FireSpread implements Steppable {
                     }
         }
 
-        long _tD1 = System.nanoTime();  // 烟格扩散结束
-    long _tB = System.nanoTime();  // 扩散结束
+        _tD1 = System.nanoTime();  // 烟格扩散结束
+    _tB = System.nanoTime();  // 扩散结束
 
         int dbgV = 0; double dbgVA = 0;
         // ===================================================================
@@ -808,7 +828,8 @@ public class FireSpread implements Steppable {
         }
 
     if ((_stepCount & 31) == 0) System.out.println("[DBG] step=" + _stepCount + " vMoves=" + dbgV + " vAmt=" + String.format("%.2f", dbgVA));
-    long _tC = System.nanoTime();  // 平流+顶棚射流结束
+        } // end of else (非LES模式)
+    long _tC = System.nanoTime();  // 平流+顶棚射流结束(LES模式=LES求解结束)
         // ===================================================================
         // 回写烟 + 温度
         if ((_stepCount & 31) == 0) System.out.println("[DBG4] insideCells.size=" + fire.insideCells.size() + " fireSources=" + fireSources.size());
