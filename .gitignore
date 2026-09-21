@@ -61,3 +61,8 @@ __pycache__/
 # SVN pristine / backup dirs
 .svn/
 .backup_*/
+
+# Build temp / scratch
+build_tmp/
+*.bak_*
+

@@ -5,6 +5,11 @@ import sim.field.grid.*;
 import java.util.List;
 
 public class FireSpread implements Steppable {
+    private long _stepCount = 0;  // 方案A: 性能计时
+    private int[][] windowCells = null;
+    private int[][] fuelCells = null;
+    private int[][] exitColumns = null;
+    private int cacheW = -1, cacheH = -1, cacheD = -1;
     private static final long serialVersionUID = 1L;
 
     private static final int TYPE_EMPTY  = 0;
@@ -18,7 +23,7 @@ public class FireSpread implements Steppable {
     private static final double SIGMA_SB               = 5.670374419e-8;
     private static final double EMISSIVITY             = 0.8;
     private static final double MIN_DIST               = 0.1;
-    private static final double CFL_SAFETY             = 0.5;
+    private static final double CFL_SAFETY             = 1.0;  // 方案A微调: 搬移式平流 frac<=1 即守恒稳定, 放宽后 DT 翻倍(仿真提速)
     private static final double DIFFUSION_SAFETY       = 0.4;
     private static final double GAUSSIAN_SIGMA_FACTOR  = 0.5;
     private static final double TEMP_FACTOR_MIN        = 0.1;
@@ -26,11 +31,11 @@ public class FireSpread implements Steppable {
     private static final double SMOKE_FLOOR            = 0.002;
     private static final double SMOKE_CEIL             = 1.0;
     // ===== 方案1:火源烟气注入速率(单位浓度/秒),控制产烟强度 =====
-    private static final double SMOKE_SOURCE_RATE      = 20.0;  // 优化: 平衡产烟量,避免浓度过高  // 优化: 大幅增大产烟量  // 优化: 增大产烟量,确保烟雾能蔓延到整个建筑
+    private static final double SMOKE_SOURCE_RATE      = 35.0;  // 方案A微调: 增强产烟, 烟形更饱满  // 优化: 平衡产烟量,避免浓度过高  // 优化: 大幅增大产烟量  // 优化: 增大产烟量,确保烟雾能蔓延到整个建筑
     private static final int    EXIT_RADIUS            = 2;
     private static final double KILOWATT_TO_WATT       = 1000.0;
     private static final double CONV_RADIUS_METERS     = 1.0;
-    private static final double MIN_SMOKE_FOR_ADVECT   = 0.001;
+    private static final double MIN_SMOKE_FOR_ADVECT   = 0.002;  // 方案A微调6: 与收集阈值一致;  // 方案A: 平流只处理真实烟区(SMOKE_FLOOR=0.002 的全建筑格跳过), 性能提升10x+
     private static final double SMALL_DT_EPS           = 1e-6;
     private static final double VEL_EPS                = 1e-6;
     private static final double GRAD_EPS               = 1e-6;
@@ -50,6 +55,18 @@ public class FireSpread implements Steppable {
     private double[][][] C_afterDiff_buf = null;
     private double[][][] C_afterAdvection_buf = null;
     private double[][][] T_afterAdvection_buf = null;
+
+    // ===== 方案B: Stable Fluids 简化流场 (粗网格 stride=4, 1m格子) =====
+    private double[] flowU = null, flowV = null, flowW = null;  // 粗网格速度场 (m/s) 一维拍平 idx=(cz*ch+cy)*cw+cx
+    private int cachedFlowW = 0, cachedFlowH = 0, cachedFlowD = 0;
+    private static final int FLOW_STRIDE = 4;
+    private static final double FLOW_BUOY_COEFF = 0.05;   // 浮力系数 (T-K → m/s²) 方案B微调: 增强卷吸
+    private static final double FLOW_DAMP = 0.985;        // 每步速度衰减
+    private static final int FLOW_PROJ_ITERS = 8;   // 方案B优化: 粗网格CFL小, 8次投影足够        // 压力投影迭代
+    private static final double FLOW_MAX_V = 1.0;          // 速度上限 m/s 方案B微调: 降低水平速度, 避免烟柱被水平打散
+    private static final double FLOW_DT = 0.25;           // 流场时间步(粗网格CFL安全)
+    private double[] flowP = null;  // 压力场(一维)
+    private boolean[] flowOpenCache = null;  // 流通掩码缓存(网格不变复用)
     private int cachedW = 0, cachedH = 0, cachedD = 0;
 
     // ===== 优化项 6: 预分配辐射/羽流辅助数组 =====
@@ -202,6 +219,7 @@ public class FireSpread implements Steppable {
     public void step(SimState state) {
         FireEscape fire = (FireEscape) state;
         fire.currentTime += fire.deltaT;
+        long _t0 = System.nanoTime();
 
         final int w = fire.gridWidth;
         final int h = fire.gridHeight;
@@ -224,6 +242,32 @@ public class FireSpread implements Steppable {
             StringBuilder sb = new StringBuilder("[Smoke] 检测到顶棚层 z=");
             for (int c : ceilingZs) sb.append(c).append(" ");
             System.out.println(sb.toString());
+        // 方案A性能: 缓存窗户格与出口列(网格变化时重建)
+        if (windowCells == null || cacheW != w || cacheH != h || cacheD != d) {
+            int wcN = 0, ecN = 0, fcN = 0;
+            for (int x = 0; x < w; x++) for (int y = 0; y < h; y++) {
+                boolean hasExitCol = false;
+                for (int z = 0; z < d; z++) {
+                    if (obstacle[x][y][z] == 6) wcN++;
+                    if (obstacle[x][y][z] == TYPE_FUEL) fcN++;
+                    if (obstacle[x][y][z] == TYPE_EXIT) hasExitCol = true;
+                }
+                if (hasExitCol) ecN++;
+            }
+            windowCells = new int[wcN][3]; exitColumns = new int[ecN][2]; fuelCells = new int[fcN][3];
+            int wi = 0, ei = 0, fi = 0;
+            for (int x = 0; x < w; x++) for (int y = 0; y < h; y++) {
+                boolean hasExitCol = false;
+                for (int z = 0; z < d; z++) {
+                    if (obstacle[x][y][z] == 6) { windowCells[wi][0]=x; windowCells[wi][1]=y; windowCells[wi][2]=z; wi++; }
+                    if (obstacle[x][y][z] == TYPE_FUEL) { fuelCells[fi][0]=x; fuelCells[fi][1]=y; fuelCells[fi][2]=z; fi++; }
+                    if (obstacle[x][y][z] == TYPE_EXIT) hasExitCol = true;
+                }
+                if (hasExitCol) { exitColumns[ei][0]=x; exitColumns[ei][1]=y; ei++; }
+            }
+            cacheW = w; cacheH = h; cacheD = d;
+            System.out.println("[Perf] 缓存: 窗户格=" + wcN + " 出口列=" + ecN + " 燃料格=" + fcN);
+        }
         }
 
         final double T_AMB = FireEscape.T_AMBIENT;
@@ -310,10 +354,11 @@ public class FireSpread implements Steppable {
 
         double Q_total = fire.t2FireGrowth * fire.currentTime * fire.currentTime;
         Q_total = Math.min(Q_total, fire.Q_steady);
+        if (Q_total < 40.0) Q_total = 40.0;  // 方案A微调: 最小功率40kW, 火一启动即可见烟
         double Q_ratio = Q_total / fire.Q_steady;
         int srcRadius = 1 + (int)(Math.floor((fire.maxSourceRadius - 1) * Math.sqrt(Q_ratio)));
         if (srcRadius > fire.maxSourceRadius) srcRadius = fire.maxSourceRadius;
-        double T_source = T_AMB + Q_ratio * (T_FLAME - T_AMB);
+        double T_source = T_FLAME;  // 方案A微调: 火源核心恒为火焰温度(功率只影响烟量/辐射), 否则初期浮力不足烟无法上升
         double srcRadiusSq05 = (double)srcRadius * srcRadius * GAUSSIAN_SIGMA_FACTOR;
 
         // ===== 火焰物理参数输出（Heskestad 火焰高度公式）=====
@@ -332,6 +377,9 @@ public class FireSpread implements Steppable {
 
         // ===================================================================
         // (2) 火灾源注入 + 优化项 11: 羽流卷吸 (Plume Entrainment)
+        // 方案A性能: 辐射/对流/热传导统一每4步执行一次(等效4*DT), 均为慢传热过程
+        boolean doConduction = ((_stepCount & 3) == 0);
+
         // ===================================================================
         for (int idx = 0; idx < nSources; idx++) {
             int[] fp = fireSources.get(idx);
@@ -353,7 +401,11 @@ public class FireSpread implements Steppable {
                             // ===== 方案1:火源持续注入烟气(不修改火,只加烟) =====
                             // 烟气产量与火势 Q_ratio 成正比,高斯衰减分布,确保火在烟就在
                             double smokeInject = Q_ratio * factor * SMOKE_SOURCE_RATE * DT_FINAL;
-                            if (smokeInject > 0) nextC[nx][ny][nz] += smokeInject;
+                            if (smokeInject > 0) {
+                                // 方案C: 火焰核心(火源格附近)少产烟, 烟在火焰上方/外围成羽, 避免火焰被烟糊死
+                                double coreW = (dx2 == 0 && dy2 == 0 && dz2 == 0) ? 0.25 : 1.0;
+                                nextC[nx][ny][nz] += smokeInject * coreW;
+                            }
                         }
                     }
                 }
@@ -393,10 +445,9 @@ public class FireSpread implements Steppable {
         // ===================================================================
         // (3) 可燃物燃烧释热
         // ===================================================================
-        for (int x = 0; x < w; x++) {
-            for (int y = 0; y < h; y++) {
-                for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][z] != TYPE_FUEL || fuel[x][y][z] <= 0) continue;
+        for (int[] fc : fuelCells) {
+            int x = fc[0], y = fc[1], z = fc[2];
+                    if (fuel[x][y][z] <= 0) continue;
                     if (T[x][y][z] < T_IGN) continue;
 
                     double tempFactor = Math.min(TEMP_FACTOR_MAX,
@@ -416,23 +467,24 @@ public class FireSpread implements Steppable {
                             obstacle[x][y][z] = TYPE_EMPTY;
                         }
                     }
-                }
-            }
         }
 
         // ===================================================================
         // (4) 热辐射
         // ===================================================================
+        if (doConduction) {
         double Q_per_source = Q_total / nSources;
         double Q_rad_source = _radFrac * Q_per_source;
         for (int idx = 0; idx < nSources; idx++) {
             int[] fp = fireSources.get(idx);
             addRadiation(fp[0], fp[1], fp[2], Q_rad_source, fire.radiationRadius, fire, nextT);
         }
+        }
 
         // ===================================================================
         // (5) 对流换热 - 优化项 2: 用 nextT 而非 T
         // ===================================================================
+        if (doConduction) {
         double convRadius = CONV_RADIUS_METERS;
         int convR = (int)(convRadius / dx), convZ = (int)(convRadius / dz);
         for (int idx = 0; idx < nSources; idx++) {
@@ -454,16 +506,17 @@ public class FireSpread implements Steppable {
                         double h_eff = _hConv * distFactor;
                         // ===== 优化项 2: nextT[nx] 替代 T[nx],使本步已加热的格子可立即参与换热 =====
                         double q_conv = h_eff * (T_FLAME - nextT[nx][ny][nz]) * (dx * dz);
-                        double deltaT_conv = q_conv * DT_FINAL / (rho * cp * cellVolume);
+                        double deltaT_conv = q_conv * (4.0 * DT_FINAL) / (rho * cp * cellVolume);
                         if (!Double.isNaN(deltaT_conv)) nextT[nx][ny][nz] += deltaT_conv;
                     }
         }
+        }  // end doConduction 对流
 
         // ===================================================================
         // (6) 热传导 - 优化项 4: Laplacian 动态权重(各向异性 + 墙体修正)
         // ===================================================================
         double alpha_eff = _alphaAir * _condBoost;
-        double Fo = alpha_eff * DT_FINAL / dxSq;
+        double Fo = alpha_eff * (doConduction ? 4.0 * DT_FINAL : 0.0) / dxSq;
         // ===== 优化项 4: 各向异性网格比 =====
         double anisotropyZ = dx / dz;  // z 方向细,权重调整
         double anisotropyFace = anisotropyZ;
@@ -471,6 +524,7 @@ public class FireSpread implements Steppable {
         // ===== 优化项 4: 6 面邻居静态表(避免循环内反复 new 数组) =====
         final int[][] NB6_FACES = new int[][] { {-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1} };
 
+        if (doConduction) {
         for (int x = 1; x < w-1; x++) {
             for (int y = 1; y < h-1; y++) {
                 for (int z = 1; z < d-1; z++) {
@@ -506,20 +560,25 @@ public class FireSpread implements Steppable {
                 }
             }
         }
+        }  // end doConduction
 
+        long _tI = System.nanoTime();  // 注入段结束(扩散前)
         // ===================================================================
         // (7) 烟气扩散 - 优化项 13: 分层抑制(Richardson 数)
-        // ===================================================================
-        for (int x = 0; x < w; x++)
-            for (int y = 0; y < h; y++)
-                for (int z = 0; z < d; z++) {
-                    C_afterDiff[x][y][z] = nextC[x][y][z];
-                }
-
-        for (int x = 1; x < w-1; x++) {
-            for (int y = 1; y < h-1; y++) {
-                for (int z = 1; z < d-1; z++) {
-                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
+        // 方案A性能: 快照+收集合并为一次insideCells遍历, 避免77万全网格快照与26万收集两遍
+        java.util.ArrayList<int[]> smokeCells = new java.util.ArrayList<int[]>();
+        for (int[] sc : fire.insideCells) {
+            int cx = sc[0], cy = sc[1], cz = sc[2];
+            double cv = nextC[cx][cy][cz];
+            C_afterDiff[cx][cy][cz] = cv;
+            C_afterAdvection[cx][cy][cz] = cv;  // 初值=nextC(扩散前), 平流在其上增量更新
+            T_afterAdvection[cx][cy][cz] = nextT[cx][cy][cz];  // 初值=nextT
+            if (cv > 0.002) smokeCells.add(sc);  // 方案A微调6: 阈值0.002(性能), 烟铺开由溢出+射流维持高浓度
+        }
+        long _tD0 = System.nanoTime();  // 烟格收集结束
+        if ((_stepCount & 31) == 0) System.out.println("[DBG6] smokeCells.size=" + smokeCells.size());
+        for (int[] sc : smokeCells) {
+            int x = sc[0], y = sc[1], z = sc[2];
                     double laplacianC = 0.0;
                     double totalW = 0.0;
                     // ===== 优化项 4+13: 烟气扩散 6 面邻居 + Richardson 分层 =====
@@ -551,31 +610,25 @@ public class FireSpread implements Steppable {
                                 stratFactor = 1.0 / (1.0 + STRAT_RI_COEFF * Ri_simp);
                             }
                         }
-                        double D_eff = _D_smoke_base * stratFactor;
-                        // 修复: 顶棚层水平扩散增强5倍, 模拟顶棚射流的水平推进(烟雾能蔓延到整个建筑)
-                        if (ceilingNearLayer[z]) D_eff *= 10.0;  // 优化: 顶棚层扩散增强10倍,模拟强顶棚射流水平推进
+                        double D_eff = _D_smoke_base * stratFactor * 2.0;  // 水平扩散x2: 慢一点更真实
+                        // 方案A: 顶棚层扩散从×10降到×2.5, 避免"被子"效果; 水平推进交给顶棚射流
+                        if (ceilingNearLayer[z]) D_eff *= 4.0;  // 方案C: 顶棚层水平扩散加强, 烟层铺满整层
                         double diff = D_eff * (laplacianC / totalW - nextC[x][y][z]) * DT_FINAL / dxSq;
                         C_afterDiff[x][y][z] = nextC[x][y][z] + diff;
                     }
-                }
-            }
         }
 
-        // ===== 同时初始化 T_afterAdvection (用于温度对流) =====
-        for (int x = 0; x < w; x++)
-            for (int y = 0; y < h; y++)
-                for (int z = 0; z < d; z++) {
-                    C_afterAdvection[x][y][z] = C_afterDiff[x][y][z];
-                    T_afterAdvection[x][y][z] = nextT[x][y][z];
-                }
+        long _tD1 = System.nanoTime();  // 烟格扩散结束
+    long _tB = System.nanoTime();  // 扩散结束
 
+        int dbgV = 0; double dbgVA = 0;
         // ===================================================================
         // (8) 烟气平流 + 温度对流 - 优化项 1: 修正方向;优化项 3: 顶棚射流水平增强
         // ===================================================================
         final int ceilingZ = d - 1;
         double cjR = _cjRadius / dx;
-        // ===== 性能修正: 限制顶棚射流搜索半径上限 6 格 =====
-        final int CJ_MAX_RI = 6;
+        // ===== 性能修正: 限制顶棚射流搜索半径上限 =====
+        final int CJ_MAX_RI = 14;  // 方案C: 10→14格(7m), 烟层水平铺展+顶棚扩散加强; 半径20格性能爆炸(2471ms/步)
         int cjRi = (int)Math.ceil(cjR);
         if (cjRi > CJ_MAX_RI) cjRi = CJ_MAX_RI;
         if (cjRi < 2) cjRi = 2;
@@ -584,102 +637,109 @@ public class FireSpread implements Steppable {
         double cjStrengthEff = _cjStrength * DT_FINAL;
         // ===== 性能优化: 顶棚射流在最顶3层处理,降低温度和浓度门限 =====
         final int CJ_Z_MIN = 0;  // 修复: 不再用网格顶部, 改用 ceilingNearLayer 动态判断
-        final double CJ_EXCESS_T = 30.0;
-        final double CJ_MIN_C = 0.002;
+        final double CJ_EXCESS_T = 10.0;  // 方案A微调6: 放宽射流温度门限, 冷却烟层也参与水平铺展
+        final double CJ_MIN_C = 0.02;  // 方案A: 只对真实顶棚烟触发射流, 避免全建筑两遍循环
 
-        for (int x = 1; x < w-1; x++) {
-            for (int y = 1; y < h-1; y++) {
-                for (int z = 1; z < d-1; z++) {
-                    if (obstacle[x][y][z] == TYPE_WALL || inside[x][y][z] == 0) continue;
+        // ===== 方案B: Stable Fluids 简化流场 (每步更新粗网格速度场) =====
+        long _tF0 = System.nanoTime();
+        solveCoarseFlow(w, h, d, obstacle, inside, nextT, C_afterDiff, smokeCells);
+        long _tF1 = System.nanoTime();
+        double flowMs = (_tF1 - _tF0) / 1e6;
+
+        // 方案A性能: 平流只遍历有烟格(烟区格数, 非77万全网格)
+        for (int[] sc : smokeCells) {  // 复用扩散段收集的烟格, 省一次26万遍历
+            int x = sc[0], y = sc[1], z = sc[2];
                     if (C_afterDiff[x][y][z] < MIN_SMOKE_FOR_ADVECT) continue;
 
                     double T_cell = nextT[x][y][z];
                     double excessT = Math.max(0.0, T_cell - T_AMB);
 
-                    // ===== 优化项 1: 修正垂直烟气漂移方向 =====
-                    // z=0 地板, z=d-1 顶棚,烟往 +z 方向漂移(向上)
-                    double vz = _smkCoeff * Math.max(excessT / T_AMB, 0.5);  // 优化: 烟雾最低上升速度保底,冷却后仍保持浮力
+                    // === 方案A: Boussinesq 浮力驱动, 热烟整体上升, 冷却后停止 ===
+                    // vz ∝ ΔT, 去掉 0.5 下限保底(冷却烟不应持续上升)
+                    double vz = _smkCoeff * 12.0 * (excessT / T_AMB);  // 方案A微调: 浮力增强, 烟柱更快到达顶棚
+                    // 方案B微调: 浓烟格即使温度冷却也持续上升到层顶(烟比空气轻, 密度差驱动, 烟柱直到撞楼板才停)
+                    if (C_afterAdvection[x][y][z] > 0.02 && vz < 0.8) vz = 0.8;  // 上升速度0.8m/s, 慢一点更真实
+                    if ((_stepCount & 7) == 0 && !fireSources.isEmpty()) { int[] dbgFp = fireSources.get(0); if (x==dbgFp[0] && y==dbgFp[1] && z>=dbgFp[2]-1 && z<=dbgFp[2]+12) System.out.println("[DBG5] step=" + _stepCount + " z=" + z + " T=" + T_cell + " excessT=" + excessT + " Cdiff=" + C_afterDiff[x][y][z] + " Cadv=" + C_afterAdvection[x][y][z] + " vz=" + vz + " frac=" + Math.min(1.0, Math.min(vz, _maxDrift) * DT_FINAL / dz)); }
                     if (vz > _maxDrift) vz = _maxDrift;
-                    if (vz > VEL_EPS) {
-                        // 迎风格式: 从 z-1 向 z 输运,当 z-1 浓度更高时,输运到 z
-                        double grad = (C_afterDiff[x][y][z] - C_afterDiff[x][y][z-1]) / dz;
-                        double advZ = -vz * grad;
-                        // ===== 修正:烟向上走,如果上层(当前格)浓度比下层低,则下层向上补充 =====
-                        // 保证: 如果 C[z-1] > C[z],则从 z-1 搬到 z(正增量)
-                        double C_lo = C_afterDiff[x][y][z-1];
-                        double C_hi = C_afterDiff[x][y][z];
-                        double deltaC = Math.max(0, C_lo - C_hi) * Math.min(1.0, vz * DT_FINAL / dz);
-                        C_afterAdvection[x][y][z] += deltaC;
-                        C_afterAdvection[x][y][z-1] -= deltaC;
-
-                        // ===== 温度同样对流 =====
-                        double T_lo = T_afterAdvection[x][y][z-1];
-                        double T_hi = T_afterAdvection[x][y][z];
-                        double deltaT_trans = Math.max(0, T_lo - T_hi) * Math.min(1.0, vz * DT_FINAL / dz);
-                        T_afterAdvection[x][y][z] += deltaT_trans;
-                        T_afterAdvection[x][y][z-1] -= deltaT_trans;
+                    if (vz < 0) vz = 0;
+                    if (vz > VEL_EPS && z < d - 1) {
+                        // 真实火灾: 烟柱往上穿非wall格(楼梯井通道), 遇wall(楼板)就停
+                        double frac = Math.min(1.0, vz * DT_FINAL / dz);
+                        double deltaC2 = C_afterAdvection[x][y][z] * frac;
+                        double deltaT2 = (T_afterAdvection[x][y][z] - T_AMB) * frac;
+                        int nz = z + 1;
+                        double decay = 1.0;
+                        int maxRise = 24;  // 方案C: 24层(0.95^24≈0.29仍可达顶), 烟囱效应让烟窜到整栋楼; 40层循环开销大
+                        int steps = 0;
+                        while (nz < d && steps < maxRise) {
+                            int obN = obstacle[x][y][nz];
+                            boolean passUp = (obN != TYPE_WALL && obN != 7) && (inside[x][y][nz] == 1 || obN == TYPE_STAIR);
+                            if (!passUp) break;
+                            decay *= 0.95;  // 方案C: 0.75→0.95, 烟囱效应烟几乎不衰减上窜(真实楼梯井), 烟能蔓延整楼
+                            C_afterAdvection[x][y][nz] += deltaC2 * decay;
+                            T_afterAdvection[x][y][nz] += deltaT2 * decay;
+                            nz++; steps++;
+                        }
+                        C_afterAdvection[x][y][z] -= deltaC2;
+                        T_afterAdvection[x][y][z] -= deltaT2;
+                        dbgV++; dbgVA += deltaC2;
+                    }
+                    // === 方案A微调: 烟层沉降 - 冷却烟缓慢下沉, 烟层增厚、界面清晰 ===
+                    if (z > 1 && excessT < 45.0 && C_afterDiff[x][y][z] > 0.04) {
+                        double sinkCoef = (C_afterDiff[x][y][z] > 0.15) ? 0.018 : 0.008;
+                        double sinkFrac = Math.min(1.0, sinkCoef * DT_FINAL / dz);
+                        if (inside[x][y][z-1] == 1 && obstacle[x][y][z-1] != TYPE_WALL) {
+                            double deltaC = C_afterDiff[x][y][z] * sinkFrac;
+                            C_afterAdvection[x][y][z] -= deltaC;
+                            C_afterAdvection[x][y][z-1] += deltaC;
+                            double deltaT = (T_afterAdvection[x][y][z] - T_AMB) * sinkFrac * 0.5;
+                            T_afterAdvection[x][y][z] -= deltaT;
+                            T_afterAdvection[x][y][z-1] += deltaT;
+                        }
                     }
 
-                    // ===== 水平漂移 =====
-                    double gradX = (nextT[x+1][y][z] - nextT[x-1][y][z]) / twoDx;
-                    double gradMagX = Math.abs(gradX);
-                    // 优化: 基础水平漂移(温度驱动,不依赖浓度梯度,始终执行)
-                    double baseDriftX = _smkCoeff * Math.max(excessT / T_AMB, 0.5) * (fire.random.nextDouble() - 0.5) * 2.0;
-                    double vx = baseDriftX;
-                    if (gradMagX > GRAD_EPS) {
-                        // 梯度驱动的附加漂移(沿温度梯度方向)
-                        double gradDriftX = _smkCoeff * 0.5 * gradX / gradMagX * Math.max(excessT / T_AMB, 0.15);
-                        vx += gradDriftX;
-                    }
-                    // 优化: 水平输运执行移到条件外,基础漂移始终生效
+                    // === 方案B: 粗网格 Stable Fluids 流场驱动水平平流 (替代温度梯度+伪湍流) ===
+                    double invS2 = 1.0 / (double)FLOW_STRIDE;
+                    // 方案B微调: 垂直上升中的烟格(vz>0.5)先跳过水平搬移, 让烟柱冲到顶棚再水平铺展
+                    boolean risingColumn = (vz > 0.5);  // ★ 修复: 上升中的烟柱(vz>0.5m/s)跳过水平搬移, 先垂直冲到顶棚再水平铺展(真实火灾羽流→顶棚射流)
+                    double vx = risingColumn ? 0 : triLinearFlow(flowU, x * invS2, y * invS2, z * invS2);
+                    double vy = risingColumn ? 0 : triLinearFlow(flowV, x * invS2, y * invS2, z * invS2);
                     if (vx > _maxDrift) vx = _maxDrift;
                     if (vx < -_maxDrift) vx = -_maxDrift;
                     double abs_vx = Math.abs(vx);
                     if (abs_vx > VEL_EPS) {
                         double frac = Math.min(1.0, abs_vx * DT_FINAL / dx);
-                        if (vx > 0) {
+                        if (vx > 0 && x < w-1 && inside[x+1][y][z] == 1 && obstacle[x+1][y][z] != TYPE_WALL) {
                             double deltaC_x = C_afterDiff[x][y][z] * frac;
-                            double deltaT_x = T_afterAdvection[x][y][z] * frac;
+                            double deltaT_x = (T_afterAdvection[x][y][z] - T_AMB) * frac;
                             C_afterAdvection[x][y][z] -= deltaC_x;
                             C_afterAdvection[x+1][y][z] += deltaC_x;
                             T_afterAdvection[x][y][z] -= deltaT_x;
                             T_afterAdvection[x+1][y][z] += deltaT_x;
-                        } else {
+                        } else if (vx < 0 && x > 0 && inside[x-1][y][z] == 1 && obstacle[x-1][y][z] != TYPE_WALL) {
                             double deltaC_x = C_afterDiff[x][y][z] * frac;
-                            double deltaT_x = T_afterAdvection[x][y][z] * frac;
+                            double deltaT_x = (T_afterAdvection[x][y][z] - T_AMB) * frac;
                             C_afterAdvection[x][y][z] -= deltaC_x;
                             C_afterAdvection[x-1][y][z] += deltaC_x;
                             T_afterAdvection[x][y][z] -= deltaT_x;
                             T_afterAdvection[x-1][y][z] += deltaT_x;
                         }
                     }
-
-                    double gradY = (nextT[x][y+1][z] - nextT[x][y-1][z]) / twoDx;
-                    double gradMagY = Math.abs(gradY);
-                    // 优化: 基础水平漂移(温度驱动,不依赖浓度梯度,始终执行)
-                    double baseDriftY = _smkCoeff * Math.max(excessT / T_AMB, 0.5) * (fire.random.nextDouble() - 0.5) * 2.0;
-                    double vy = baseDriftY;
-                    if (gradMagY > GRAD_EPS) {
-                        // 梯度驱动的附加漂移(沿温度梯度方向)
-                        double gradDriftY = _smkCoeff * 0.5 * gradY / gradMagY * Math.max(excessT / T_AMB, 0.15);
-                        vy += gradDriftY;
-                    }
-                    // 优化: 水平输运执行移到条件外,基础漂移始终生效
                     if (vy > _maxDrift) vy = _maxDrift;
                     if (vy < -_maxDrift) vy = -_maxDrift;
                     double abs_vy = Math.abs(vy);
                     if (abs_vy > VEL_EPS) {
                         double frac = Math.min(1.0, abs_vy * DT_FINAL / dx);
-                        if (vy > 0) {
+                        if (vy > 0 && y < h-1 && inside[x][y+1][z] == 1 && obstacle[x][y+1][z] != TYPE_WALL) {
                             double deltaC_y = C_afterDiff[x][y][z] * frac;
-                            double deltaT_y = T_afterAdvection[x][y][z] * frac;
+                            double deltaT_y = (T_afterAdvection[x][y][z] - T_AMB) * frac;
                             C_afterAdvection[x][y][z] -= deltaC_y;
                             C_afterAdvection[x][y+1][z] += deltaC_y;
                             T_afterAdvection[x][y][z] -= deltaT_y;
                             T_afterAdvection[x][y+1][z] += deltaT_y;
-                        } else {
+                        } else if (vy < 0 && y > 0 && inside[x][y-1][z] == 1 && obstacle[x][y-1][z] != TYPE_WALL) {
                             double deltaC_y = C_afterDiff[x][y][z] * frac;
-                            double deltaT_y = T_afterAdvection[x][y][z] * frac;
+                            double deltaT_y = (T_afterAdvection[x][y][z] - T_AMB) * frac;
                             C_afterAdvection[x][y][z] -= deltaC_y;
                             C_afterAdvection[x][y-1][z] += deltaC_y;
                             T_afterAdvection[x][y][z] -= deltaT_y;
@@ -688,12 +748,26 @@ public class FireSpread implements Steppable {
                     }
 
                     // ===== 优化项 10: 顶棚射流 (Ceiling Jet) =====
+                    // 方案C性能: 每2步执行一次(半径14格开销大), 铺展速度靠顶棚扩散×4补偿
+                    boolean doCeilingJet = ((_stepCount & 1) == 0);
                     // 当烟接近/到达顶棚时,将垂直动量转为水平径向扩散
-                    if (ceilingNearLayer[z] && excessT > CJ_EXCESS_T) {
-                        double zNearCeil = 1.0;
-                        double curC = C_afterDiff[x][y][z];
-                        double curT = T_afterAdvection[x][y][z];
+                    double curC = C_afterDiff[x][y][z];
+                    double curT = T_afterAdvection[x][y][z];
+                    boolean smokeTop = curC > 0.05;
+                    if (smokeTop) {
+                        for (int dz2 = 1; dz2 <= 3; dz2++) {
+                            int nz2 = z + dz2;
+                            if (nz2 >= d) break;
+                            if (inside[x][y][nz2] == 1 && obstacle[x][y][nz2] != TYPE_WALL && C_afterAdvection[x][y][nz2] > 0.05) { smokeTop = false; break; }
+                        }
+                    }
+                    // 方案A微调3: 顶棚射流触发 = 楼顶 OR 烟层顶(局部空间顶棚), 火源层烟到顶后水平铺展
+                    // 方案A微调7: 浓烟(curC>0.3)即使温度低也触发水平铺展(烟层重力流, 与温度解耦)
+                    if (doCeilingJet && ceilingNearLayer[z] && (excessT > CJ_EXCESS_T || curC > 0.3)) {
                         if (curC > CJ_MIN_C) {
+                            // 方案A修复: 先统计有效邻居的总权重; 无处可去则不扣烟(守恒)
+                            double totalDecay = 0.0;
+                            int validN = 0;
                             for (int dx2 = -cjRi; dx2 <= cjRi; dx2++) {
                                 for (int dy2 = -cjRi; dy2 <= cjRi; dy2++) {
                                     if (dx2 == 0 && dy2 == 0) continue;
@@ -702,13 +776,28 @@ public class FireSpread implements Steppable {
                                     if (inside[nx][ny][z] == 0 || obstacle[nx][ny][z] == TYPE_WALL) continue;
                                     double r2 = (double)dx2*dx2 + (double)dy2*dy2;
                                     if (r2 > cjRi * cjRi) continue;
-                                    double decay = Math.exp(-r2 / cjR2_05);
-                                    double amountC = curC * cjStrengthEff * decay * zNearCeil;
-                                    double amountT = (curT - T_AMB) * cjStrengthEff * decay * zNearCeil;
-                                    C_afterAdvection[x][y][z] -= amountC;
-                                    C_afterAdvection[nx][ny][z] += amountC;
-                                    T_afterAdvection[x][y][z] -= amountT;
-                                    T_afterAdvection[nx][ny][z] += amountT;
+                                    totalDecay += 1.0 / (1.0 + r2 / cjR2_05);  // 方案A微调5: 洛伦兹权重, 烟层均匀铺展
+                                    validN++;
+                                }
+                            }
+                            if (validN > 0 && totalDecay > 0) {
+                                double outFrac = Math.min(cjStrengthEff, 0.9);
+                                for (int dx2 = -cjRi; dx2 <= cjRi; dx2++) {
+                                    for (int dy2 = -cjRi; dy2 <= cjRi; dy2++) {
+                                        if (dx2 == 0 && dy2 == 0) continue;
+                                        int nx = x + dx2, ny = y + dy2;
+                                        if (nx < 1 || nx >= w-1 || ny < 1 || ny >= h-1) continue;
+                                        if (inside[nx][ny][z] == 0 || obstacle[nx][ny][z] == TYPE_WALL) continue;
+                                        double r2 = (double)dx2*dx2 + (double)dy2*dy2;
+                                        if (r2 > cjRi * cjRi) continue;
+                                        double share = (1.0 / (1.0 + r2 / cjR2_05)) / totalDecay;  // 方案A微调5
+                                        double amountC = curC * outFrac * share;
+                                        double amountT = (curT - T_AMB) * outFrac * share;
+                                        C_afterAdvection[x][y][z] -= amountC;
+                                        C_afterAdvection[nx][ny][z] += amountC;
+                                        T_afterAdvection[x][y][z] -= amountT;
+                                        T_afterAdvection[nx][ny][z] += amountT;
+                                    }
                                 }
                             }
                         }
@@ -716,56 +805,86 @@ public class FireSpread implements Steppable {
 
                     if (C_afterAdvection[x][y][z] < 0) C_afterAdvection[x][y][z] = 0;
                     if (T_afterAdvection[x][y][z] < T_AMB) T_afterAdvection[x][y][z] = T_AMB;
-                }
-            }
         }
 
+    if ((_stepCount & 31) == 0) System.out.println("[DBG] step=" + _stepCount + " vMoves=" + dbgV + " vAmt=" + String.format("%.2f", dbgVA));
+    long _tC = System.nanoTime();  // 平流+顶棚射流结束
         // ===================================================================
         // 回写烟 + 温度
+        if ((_stepCount & 31) == 0) System.out.println("[DBG4] insideCells.size=" + fire.insideCells.size() + " fireSources=" + fireSources.size());
         // ===================================================================
         for (int[] cell : fire.insideCells) {
             int x = cell[0], y = cell[1], z = cell[2];
-            nextC[x][y][z] = C_afterAdvection[x][y][z];
+            double cv = C_afterAdvection[x][y][z];
+            if ((_stepCount & 15) == 0 && !fireSources.isEmpty()) { int[] dbgF = fireSources.get(0); if (x==dbgF[0] && y==dbgF[1] && z==dbgF[2]) System.out.println("[DBG3] 回写火源格 cv=" + cv); }
+            if (cv > 1.0) {
+                // 方案A微调6: 烟不可压缩 - 超额浓度向6邻居推挤(波前传播), 烟层能以高浓度铺满空间
+                double excess = cv - 1.0;
+                cv = 1.0;
+                double share = excess / 6.0;
+                if (share > 1e-6) {
+                    for (int n2 = 0; n2 < 6; n2++) {
+                        int nx2 = x + NB6_FACES[n2][0], ny2 = y + NB6_FACES[n2][1], nz2 = z + NB6_FACES[n2][2];
+                        if (nx2 >= 0 && nx2 < w && ny2 >= 0 && ny2 < h && nz2 >= 0 && nz2 < d
+                            && obstacle[nx2][ny2][nz2] != TYPE_WALL && inside[nx2][ny2][nz2] == 1) {
+                            double cap = 1.0 - nextC[nx2][ny2][nz2];  // 方案A微调6: 溢出按剩余容量截断, 浓度不超1.0
+                            if (cap > 0) nextC[nx2][ny2][nz2] += Math.min(share, cap);
+                        }
+                    }
+                }
+            }
+            if (cv < 0.0) cv = 0.0;
+            nextC[x][y][z] = cv;
             nextT[x][y][z] = T_afterAdvection[x][y][z];
+            // ===== 方案A性能: 回写+冷却+clamp合并为一次遍历 =====
+            if (nextT[x][y][z] <= T_AMB + 0.01 && nextC[x][y][z] <= SMOKE_FLOOR + 1e-9) {
+                nextC[x][y][z] = SMOKE_FLOOR;
+            } else {
+                nextT[x][y][z] -= _cooling * DT_FINAL * (nextT[x][y][z] - T_AMB);
+                if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
+                if (nextT[x][y][z] > HOT_SMOKE_T_THRESHOLD) addRadiativeCooling(nextT, x, y, z, T_AMB, DT_FINAL, _smkAbsorb, rho, cp, dxSq, dz);
+                if (nextT[x][y][z] > T_MAX) nextT[x][y][z] = T_MAX;
+                if (Double.isNaN(nextT[x][y][z])) nextT[x][y][z] = T_AMB;
+                nextC[x][y][z] *= (1.0 - _smokeDecay * DT_FINAL);
+                if (nextC[x][y][z] < SMOKE_FLOOR) nextC[x][y][z] = SMOKE_FLOOR;
+                if (nextC[x][y][z] > SMOKE_CEIL) nextC[x][y][z] = SMOKE_CEIL;
+                if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0.0;
+            }
+        }
+        // 方案A修复: 火源格可能不在 insideCells(重建时机与随机火源不同步), 补处理保证回写/clamp/冷却生效
+        // 方案A修复: 火源格可能不在 insideCells(重建时机与随机火源不同步), 补处理保证回写/clamp/冷却生效
+        for (int[] fp : fireSources) {
+            int x = fp[0], y = fp[1], z = fp[2];
+            double cv = C_afterAdvection[x][y][z];
+            if (cv > 1.0) cv = 1.0;
+            if (cv < 0.0) cv = 0.0;
+            nextC[x][y][z] = cv;
+            nextT[x][y][z] = T_afterAdvection[x][y][z];
+            nextT[x][y][z] -= _cooling * DT_FINAL * (nextT[x][y][z] - T_AMB);
+            if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
+            nextC[x][y][z] *= (1.0 - _smokeDecay * DT_FINAL);
+            if (nextC[x][y][z] > SMOKE_CEIL) nextC[x][y][z] = SMOKE_CEIL;
+            if (nextC[x][y][z] < SMOKE_FLOOR) nextC[x][y][z] = SMOKE_FLOOR;
         }
 
         // ===================================================================
         // (9) 冷却衰减 + 优化项 14: 高温烟 Stefan-Boltzmann 辐射
         // ===================================================================
-        for (int[] cell : fire.insideCells) {
-            int x = cell[0], y = cell[1], z = cell[2];
-                    nextT[x][y][z] -= _cooling * DT_FINAL * (nextT[x][y][z] - T_AMB);
-                    if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
-
-                    // ===== 优化项 14: 高温烟 Stefan-Boltzmann 辐射冷却 =====
-                    if (nextT[x][y][z] > HOT_SMOKE_T_THRESHOLD) {
-                        addRadiativeCooling(nextT, x, y, z, T_AMB, DT_FINAL, _smkAbsorb, rho, cp, dxSq, dz);
-                    }
-
-                    if (nextT[x][y][z] > T_MAX) nextT[x][y][z] = T_MAX;
-                    if (Double.isNaN(nextT[x][y][z])) nextT[x][y][z] = T_AMB;
-
-                    nextC[x][y][z] *= (1.0 - _smokeDecay * DT_FINAL);
-                    if (nextC[x][y][z] < SMOKE_FLOOR) nextC[x][y][z] = SMOKE_FLOOR;
-                    if (nextC[x][y][z] > SMOKE_CEIL) nextC[x][y][z] = SMOKE_CEIL;
-                    if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0.0;
-                }
 
         // ===================================================================
         // 优化项 12: 开口流动 (Doorway Flow)
         // ===================================================================
+        // 方案C修复: 门高不能用整栋楼高(d*dz=34m), 必须用实际层高, 否则中性面/热压差完全失真
+        double floorH = computeFloorHeight(ceilingZs, d, dz);
         applyDoorwayFlow(nextT, nextC, obstacle, inside,
                 w, h, d, T_AMB, T_FLAME, dx, dz, DT_FINAL,
-                rho, _cp, _g, _cdCoef);
+                rho, _cp, _g, _cdCoef, floorH, cachedDoorColumns(fire));
 
         // ===================================================================
         // (10) 排烟口处理
         // ===================================================================
-        for (int x = 0; x < w; x++) {
-            for (int y = 0; y < h; y++) {
-                boolean hasExit = false;
-                for (int zz = 0; zz < d; zz++) { if (obstacle[x][y][zz] == TYPE_EXIT) { hasExit = true; break; } }
-                if (!hasExit) continue;
+        for (int[] ec : exitColumns) {
+            int x = ec[0], y = ec[1];
                 for (int dx2 = -EXIT_RADIUS; dx2 <= EXIT_RADIUS; dx2++) {
                     for (int dy2 = -EXIT_RADIUS; dy2 <= EXIT_RADIUS; dy2++) {
                         int nx = x + dx2, ny = y + dy2;
@@ -782,31 +901,18 @@ public class FireSpread implements Steppable {
                         }
                     }
                 }
-            }
         }
 
-        // ===== 最终安全钳制 =====
-        for (int x = 0; x < w; x++)
-            for (int y = 0; y < h; y++)
-                for (int z = 0; z < d; z++) {
-                    if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
-                    if (nextT[x][y][z] > T_MAX) nextT[x][y][z] = T_MAX;
-                    if (Double.isNaN(nextT[x][y][z])) nextT[x][y][z] = T_AMB;
-                    if (nextC[x][y][z] < 0) nextC[x][y][z] = 0;
-                    if (nextC[x][y][z] > SMOKE_CEIL) nextC[x][y][z] = SMOKE_CEIL;
-                    if (Double.isNaN(nextC[x][y][z])) nextC[x][y][z] = 0;
-                }
 
-        // ★ 烟雾从窗户涌出: 先在建筑内扩散, 浓度足够高时才从窗户挤出, 然后柱状上升
-        for (int x = 0; x < w; x++) {
-            for (int y = 0; y < h; y++) {
-                for (int z = 0; z < d; z++) {
-                    if (obstacle[x][y][z] != 6) continue;
+        // ★ 烟雾从窗户涌出 (方案A性能: 只遍历缓存的窗户格, 不再扫77万格)
+        for (int[] wc : windowCells) {
+            int x = wc[0], y = wc[1], z = wc[2];
                     int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
 
                     // === 1. 窗户挤出: 只有当窗户内侧浓度足够高(>0.15)时才向外侧挤出 ===
                     // 真实火灾: 烟雾先充满房间, 内部压力/浓度足够高时才从窗户涌出
-                    if (nextC[x][y][z] > 0.15) {
+                    // === 方案A微调: 蓄烟-溢流 - 房间先蓄烟, 浓度足够高才从窗户涌出 ===
+                    if (nextC[x][y][z] > 0.25) {
                         for (int[] dir : dirs) {
                             int nx = x+dir[0], ny = y+dir[1], nz = z+dir[2];
                             if (nx<0||nx>=w||ny<0||ny>=h||nz<0||nz>=d) continue;
@@ -815,7 +921,7 @@ public class FireSpread implements Steppable {
                             double diff = nextC[x][y][z] - nextC[nx][ny][nz];
                             if (diff > 0.02) {
                                 // 挤出系数: 水平方向0.45(比之前0.7降低), 垂直0.2
-                                double coeff = (dir[2] == 0) ? 0.45 : 0.2;
+                                double coeff = (dir[2] == 0) ? 0.30 : 0.15;
                                 double transfer = diff * coeff * DT_FINAL;
                                 nextC[x][y][z] -= transfer;
                                 nextC[nx][ny][nz] += transfer;
@@ -830,6 +936,8 @@ public class FireSpread implements Steppable {
                     }
 
                     // === 2. 柱状上升: 窗户外侧±5体素区域, 增强向上浮力(只有当该区域有烟雾时) ===
+                    // 方案A性能: 窗户格本身无烟则跳过柱状上升(大部分窗户无烟)
+                    if (nextC[x][y][z] < 0.08) continue;
                     for (int hx = -5; hx <= 5; hx++) {
                         for (int hy = -5; hy <= 5; hy++) {
                             if (hx == 0 && hy == 0) continue;
@@ -879,14 +987,202 @@ public class FireSpread implements Steppable {
                             }
                         }
                     }
-                }
-            }
         }
 
         swapBuffers(fire, nextT, nextC);
+        long _t1 = System.nanoTime();
+        _stepCount++;
+        if (_stepCount % 50 == 0) {
+            long _wall = System.currentTimeMillis();
+            System.out.printf("[Perf] step %d: %.1f ms (注入%.1f 快照%.1f 烟格%.1f 平流%.1f 尾段%.1f) t=%.1fs wall=%d%n", _stepCount, (_t1-_t0)/1e6, (_tI-_t0)/1e6, (_tD0-_tI)/1e6, (_tD1-_tD0)/1e6, (_tC-_tB)/1e6, (_t1-_tC)/1e6, fire.currentTime, _wall);
+        }
+    }
+
+    // 方案A性能: 缓存门柱列(obstacle==TYPE_DOOR 的 x,y,z), 避免 applyDoorwayFlow 每步扫77万格
+    private int[][] cachedDoorCols = null;
+    private int[][] cachedDoorColumns(FireEscape fire) {
+        if (cachedDoorCols != null) return cachedDoorCols;
+        java.util.ArrayList<int[]> dc = new java.util.ArrayList<int[]>();
+        for (int x = 0; x < fire.gridWidth; x++)
+            for (int y = 0; y < fire.gridHeight; y++)
+                for (int z = 0; z < fire.gridDepth; z++)
+                    if (fire.obstacleGrid.get(x, y, z) == TYPE_DOOR) { dc.add(new int[]{x, y, z}); break; }
+        cachedDoorCols = dc.toArray(new int[0][]);
+        System.out.println("[Perf] 缓存: 门柱列=" + cachedDoorCols.length);
+        return cachedDoorCols;
     }
 
     // ======================================================================
+    // ======================================================================
+    // 方案B: Stable Fluids 简化流场 (粗网格 stride=4) — 不可压缩速度场
+    // 迎风 advect + 浮力外力 + 压力投影, 驱动细网格烟水平运动(卷吸/回流/顶棚射流)
+    // ======================================================================
+    private void solveCoarseFlow(int w, int h, int d, int[][][] obstacle, int[][][] inside,
+                                 double[][][] T, double[][][] C, java.util.List<int[]> smokeCells) {
+        int S = FLOW_STRIDE;
+        int cw = (w + S - 1) / S, ch = (h + S - 1) / S, cd = (d + S - 1) / S;
+        int total = cw * ch * cd;
+        if (flowU == null || cachedFlowW != cw || cachedFlowH != ch || cachedFlowD != cd) {
+            flowU = new double[total];
+            flowV = new double[total];
+            flowW = new double[total];
+            flowP = new double[total];
+            cachedFlowW = cw; cachedFlowH = ch; cachedFlowD = cd;
+        }
+        double[] U = flowU, V = flowV, W = flowW, P = flowP;
+        double dt = FLOW_DT;
+        int chw = ch * cw;
+
+        // 流通掩码: 块内是否有内部格(非纯墙) — 网格不变时缓存复用
+        boolean[] open;
+        if (flowOpenCache != null && flowOpenCache.length == total) {
+            open = flowOpenCache;
+        } else {
+            open = new boolean[total];
+            for (int cz = 0; cz < cd; cz++)
+                for (int cy = 0; cy < ch; cy++)
+                    for (int cx = 0; cx < cw; cx++) {
+                        boolean any = false;
+                        int x0 = cx * S, y0 = cy * S, z0 = cz * S;
+                        outer:
+                        for (int k = 0; k < S && z0 + k < d; k++)
+                            for (int j = 0; j < S && y0 + j < h; j++)
+                                for (int i = 0; i < S && x0 + i < w; i++)
+                                    if (inside[x0+i][y0+j][z0+k] == 1) { any = true; break outer; }
+                        open[cz * chw + cy * cw + cx] = any;
+                    }
+            flowOpenCache = open;
+        }
+
+        // === 1) 一阶迎风 advect 速度场 (Gauss-Seidel 原地更新, 隐式更稳) ===
+        for (int cz = 0; cz < cd; cz++)
+            for (int cy = 0; cy < ch; cy++)
+                for (int cx = 0; cx < cw; cx++) {
+                    int idx = cz * chw + cy * cw + cx;
+                    if (!open[idx]) { U[idx] = 0; V[idx] = 0; W[idx] = 0; continue; }
+                    int xm = Math.max(cx-1, 0), xp = Math.min(cx+1, cw-1);
+                    int ym = Math.max(cy-1, 0), yp = Math.min(cy+1, ch-1);
+                    int zm = Math.max(cz-1, 0), zp = Math.min(cz+1, cd-1);
+                    int im = cz * chw + cy * cw + xm, ip = cz * chw + cy * cw + xp;
+                    int jm = cz * chw + ym * cw + cx, jp = cz * chw + yp * cw + cx;
+                    int km = zm * chw + cy * cw + cx, kp = zp * chw + cy * cw + cx;
+                    double u = U[idx], v = V[idx], wz = W[idx];
+                    // U 分量 advect (被 u,v,wz 共同搬运)
+                    double advU = u - dt * (u * (u - ((u > 0) ? U[im] : U[ip]))
+                                          + v * (u - ((v > 0) ? U[jm] : U[jp]))
+                                          + wz * (u - ((wz > 0) ? U[km] : U[kp])));
+                    // V 分量
+                    double advV = v - dt * (u * (v - ((u > 0) ? V[im] : V[ip]))
+                                          + v * (v - ((v > 0) ? V[jm] : V[jp]))
+                                          + wz * (v - ((wz > 0) ? V[km] : V[kp])));
+                    // W 分量
+                    double advW = wz - dt * (u * (wz - ((u > 0) ? W[im] : W[ip]))
+                                           + v * (wz - ((v > 0) ? W[jm] : W[jp]))
+                                           + wz * (wz - ((wz > 0) ? W[km] : W[kp])));
+                    U[idx] = advU; V[idx] = advV; W[idx] = advW;
+                }
+
+        // === 2) 浮力外力: 含烟块内最高温度 → 垂直升力 (高温烟柱上升, 周围空气补充形成卷吸) ===
+        boolean[] hotBlock = new boolean[total];
+        for (int[] sc2 : smokeCells) {
+            int bx = sc2[0] / S, by = sc2[1] / S, bz = sc2[2] / S;
+            if (bx < cw && by < ch && bz < cd) hotBlock[bz * chw + by * cw + bx] = true;
+        }
+        double amb = FireEscape.T_AMBIENT;
+        for (int cz = 0; cz < cd; cz++)
+            for (int cy = 0; cy < ch; cy++)
+                for (int cx = 0; cx < cw; cx++) {
+                    int idx = cz * chw + cy * cw + cx;
+                    if (!open[idx]) continue;
+                    if (hotBlock[idx]) {
+                        int x0 = cx * S, y0 = cy * S, z0 = cz * S;
+                        double tMax = amb;
+                        for (int k = 0; k < S && z0 + k < d; k++)
+                            for (int j = 0; j < S && y0 + j < h; j++)
+                                for (int i = 0; i < S && x0 + i < w; i++) {
+                                    int xx = x0+i, yy = y0+j, zz = z0+k;
+                                    if (inside[xx][yy][zz] == 1 && obstacle[xx][yy][zz] != TYPE_WALL) {
+                                        double tt = T[xx][yy][zz];
+                                        if (tt > tMax) tMax = tt;
+                                    }
+                                }
+                        double excess = tMax - amb;
+                        if (excess > 3.0) W[idx] += FLOW_BUOY_COEFF * excess * dt;
+                        else W[idx] -= 0.02 * dt;  // 冷却烟微下沉
+                    } else {
+                        W[idx] -= 0.02 * dt;  // 无烟块: 仅轻微衰减下沉
+                    }
+                }
+
+        // === 3) 压力投影: Poisson 迭代消散度 (不可压缩) ===
+        for (int i = 0; i < total; i++) P[i] = 0;
+        for (int it = 0; it < FLOW_PROJ_ITERS; it++) {
+            for (int cz = 0; cz < cd; cz++)
+                for (int cy = 0; cy < ch; cy++)
+                    for (int cx = 0; cx < cw; cx++) {
+                        int idx = cz * chw + cy * cw + cx;
+                        if (!open[idx]) continue;
+                        int xm = Math.max(cx-1, 0), xp = Math.min(cx+1, cw-1);
+                        int ym = Math.max(cy-1, 0), yp = Math.min(cy+1, ch-1);
+                        int zm = Math.max(cz-1, 0), zp = Math.min(cz+1, cd-1);
+                        int im = cz * chw + cy * cw + xm, ip = cz * chw + cy * cw + xp;
+                        int jm = cz * chw + ym * cw + cx, jp = cz * chw + yp * cw + cx;
+                        int km = zm * chw + cy * cw + cx, kp = zp * chw + cy * cw + cx;
+                        double div = (U[ip] - U[im]) + (V[jp] - V[jm]) + (W[kp] - W[km]);
+                        P[idx] = (P[im] + P[ip] + P[jm] + P[jp] + P[km] + P[kp] - div) / 6.0;
+                    }
+        }
+        // 速度修正: u -= grad(p)
+        for (int cz = 0; cz < cd; cz++)
+            for (int cy = 0; cy < ch; cy++)
+                for (int cx = 0; cx < cw; cx++) {
+                    int idx = cz * chw + cy * cw + cx;
+                    if (!open[idx]) { U[idx] = 0; V[idx] = 0; W[idx] = 0; continue; }
+                    int xm = Math.max(cx-1, 0), xp = Math.min(cx+1, cw-1);
+                    int ym = Math.max(cy-1, 0), yp = Math.min(cy+1, ch-1);
+                    int zm = Math.max(cz-1, 0), zp = Math.min(cz+1, cd-1);
+                    int im = cz * chw + cy * cw + xm, ip = cz * chw + cy * cw + xp;
+                    int jm = cz * chw + ym * cw + cx, jp = cz * chw + yp * cw + cx;
+                    int km = zm * chw + cy * cw + cx, kp = zp * chw + cy * cw + cx;
+                    U[idx] -= (P[ip] - P[im]) * 0.5;
+                    V[idx] -= (P[jp] - P[jm]) * 0.5;
+                    W[idx] -= (P[kp] - P[km]) * 0.5;
+                }
+
+        // === 4) 衰减 + 速度上限 ===
+        for (int i = 0; i < total; i++) {
+            if (!open[i]) continue;
+            double u = U[i] * FLOW_DAMP;
+            double v = V[i] * FLOW_DAMP;
+            double wz = W[i] * FLOW_DAMP;
+            if (u > FLOW_MAX_V) u = FLOW_MAX_V; else if (u < -FLOW_MAX_V) u = -FLOW_MAX_V;
+            if (v > FLOW_MAX_V) v = FLOW_MAX_V; else if (v < -FLOW_MAX_V) v = -FLOW_MAX_V;
+            if (wz > FLOW_MAX_V) wz = FLOW_MAX_V; else if (wz < -FLOW_MAX_V) wz = -FLOW_MAX_V;
+            U[i] = u; V[i] = v; W[i] = wz;
+        }
+    }
+
+    // 三线性插值粗网格速度场 (细网格坐标 → 粗网格速度, 一维拍平)
+    private double triLinearFlow(double[] f, double fx, double fy, double fz) {
+        int cw = cachedFlowW, ch = cachedFlowH, cd = cachedFlowD;
+        if (cw <= 0) return 0;
+        int chw = ch * cw;
+        int x0 = (int)fx; if (x0 < 0) x0 = 0; if (x0 > cw-1) x0 = cw-1;
+        int y0 = (int)fy; if (y0 < 0) y0 = 0; if (y0 > ch-1) y0 = ch-1;
+        int z0 = (int)fz; if (z0 < 0) z0 = 0; if (z0 > cd-1) z0 = cd-1;
+        int x1 = Math.min(x0+1, cw-1), y1 = Math.min(y0+1, ch-1), z1 = Math.min(z0+1, cd-1);
+        double tx = fx - x0, ty = fy - y0, tz = fz - z0;
+        int i000 = z0 * chw + y0 * cw + x0, i100 = z0 * chw + y0 * cw + x1;
+        int i010 = z0 * chw + y1 * cw + x0, i110 = z0 * chw + y1 * cw + x1;
+        int i001 = z1 * chw + y0 * cw + x0, i101 = z1 * chw + y0 * cw + x1;
+        int i011 = z1 * chw + y1 * cw + x0, i111 = z1 * chw + y1 * cw + x1;
+        double c000 = f[i000], c100 = f[i100], c010 = f[i010], c110 = f[i110];
+        double c001 = f[i001], c101 = f[i101], c011 = f[i011], c111 = f[i111];
+        double c00 = c000 + (c100 - c000) * tx, c10 = c010 + (c110 - c010) * tx;
+        double c01 = c001 + (c101 - c001) * tx, c11 = c011 + (c111 - c011) * tx;
+        double c0 = c00 + (c10 - c00) * ty, c1 = c01 + (c11 - c01) * ty;
+        return c0 + (c1 - c0) * tz;
+    }
     // 辅助方法: 优化项 5/14 — Stefan-Boltzmann 辐射冷却
     // ======================================================================
     private static void addRadiativeCooling(double[][][] nextT, int x, int y, int z,
@@ -903,6 +1199,21 @@ public class FireSpread implements Steppable {
         if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
     }
 
+    // 方案C: 由顶棚检测结果推算平均层高(门高应取层高而非整楼高)
+    private static double computeFloorHeight(int[] ceilingZs, int d, double dz) {
+        if (ceilingZs == null || ceilingZs.length < 2) return 3.0;  // 兜底3m门高
+        double sum = 0;
+        int cnt = 0;
+        for (int i = 1; i < ceilingZs.length; i++) {
+            int gap = ceilingZs[i] - ceilingZs[i - 1];
+            if (gap >= 4 && gap <= 40) { sum += gap * dz; cnt++; }
+        }
+        if (cnt == 0) return 3.0;
+        double h = sum / cnt;
+        // 门高取层高(不超过3.5m, 真实门高约2-3m), 避免把整层当门
+        return Math.max(2.0, Math.min(3.5, h * 0.5));
+    }
+
     // ======================================================================
     // 辅助方法: 优化项 12 — 开口流动 (Doorway Flow)
     // ======================================================================
@@ -911,19 +1222,20 @@ public class FireSpread implements Steppable {
                                           int w, int h, int d,
                                           double T_AMB, double T_FLAME,
                                           double dx, double dz, double dt,
-                                          double rho, double cp, double g, double Cd) {
-        double h_door = (double)d * dz;
-        for (int x = 0; x < w; x++) {
-            for (int y = 0; y < h; y++) {
-                boolean hasDoor = false;
-                for (int zz = 0; zz < d; zz++) { if (obstacle[x][y][zz] == TYPE_DOOR) { hasDoor = true; break; } }
-                if (!hasDoor) continue;
-                if (inside[x][y][0] == 0) continue;
+                                          double rho, double cp, double g, double Cd, double h_door, int[][] doorCols) {
+        if (doorCols.length == 0) return;  // 方案A性能: 无门柱直接跳过
+        // 方案C: 门洞流动只作用于门格所在楼层段(以门格z为中心, 高度=门高), 而非整栋楼
+        int zSpan = (int)Math.ceil(h_door / dz);
+        for (int[] dc : doorCols) {
+            int x = dc[0], y = dc[1], dzDoor = dc[2];
+                if (inside[x][y][dzDoor] == 0) continue;
+                int zLo = Math.max(0, dzDoor - zSpan);
+                int zHi = Math.min(d - 1, dzDoor + zSpan);
 
                 double T_in_max = T_AMB;
                 double T_in_avg = 0.0;
                 int count = 0;
-                for (int z = 0; z < d; z++) {
+                for (int z = zLo; z <= zHi; z++) {
                     if (inside[x][y][z] == 0) continue;
                     T_in_max = Math.max(T_in_max, nextT[x][y][z]);
                     T_in_avg += nextT[x][y][z];
@@ -938,9 +1250,9 @@ public class FireSpread implements Steppable {
                 double deltaP = rho * g * deltaT * h_door / (2.0 * T_AMB);
                 double area = dx * dz;
                 double Q_door = Cd * area * Math.sqrt(Math.max(0.0, 2.0 * deltaP / rho));
-                double z_neutral = h_door / 2.0 * T_AMB / Math.sqrt(Math.max(T_eff * T_AMB, 1.0));
+                double z_neutral = dzDoor * dz + h_door / 2.0 * T_AMB / Math.sqrt(Math.max(T_eff * T_AMB, 1.0));
 
-                for (int z = 0; z < d; z++) {
+                for (int z = zLo; z <= zHi; z++) {
                     if (inside[x][y][z] == 0) continue;
                     double z_height = z * dz;
                     double profile = 1.0 - Math.abs(z_height - z_neutral) / (h_door * 0.5 + 1e-6);
@@ -966,7 +1278,6 @@ public class FireSpread implements Steppable {
                     }
                 }
             }
-        }
     }
 
     private void swapBuffers(FireEscape fire, double[][][] nextT, double[][][] nextC) {
