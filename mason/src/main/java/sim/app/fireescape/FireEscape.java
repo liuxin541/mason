@@ -66,22 +66,22 @@ public class FireEscape extends SimState {
     public double radiationFraction = 0.38;
     public double Cd = 0.65;
     public double g = 9.81;
-    public double t2FireGrowth = 0.0117;
+    public double t2FireGrowth = 0.04;  // 方案A微调: 加快火势发展(t=100s 达400kW), 实时仿真可见烟
     public double Q_steady = 500.0;
     public int maxSourceRadius = 3;
     public double radiationRadius = 6.0;
     public double fuelRadiationRadius = 4.0;
     public double ceilingHeight = 3.0;
-    public double ceilingJetRadius = 8.0;
-    public double ceilingJetStrength = 0.5;
+    public double ceilingJetRadius = 12.0;  // 方案A微调4: 射流半径加大
+    public double ceilingJetStrength = 2.5;  // 方案A微调6: 射流再增强, 烟层铺满楼层
     public double fuelHeatValue = 18.0e6;
     public double burnRatePerArea = 0.010;
     public double smokeYield = 0.05;
     public int fuelCapacity = 80;
-    public double baseSmokeSpread = 0.1;  // 优化: 平衡扩散系数  // 优化: 增大烟雾扩散系数
+    public double baseSmokeSpread = 0.25;  // 方案A微调4: 烟层水平扩散再增强(0.15→0.25)
     public double smokeDecayRate = 0.005;
-    public double smokeDriftCoeff = 0.1;  // 优化: 平衡漂移系数  // 优化: 增大烟雾漂移系数
-    public double smokeDriftMaxSpeed = 0.7;  // 优化: 平衡最大漂移速度  // 优化: 增大最大漂移速度
+    public double smokeDriftCoeff = 0.15;  // 方案A: 增强浮力驱动
+    public double smokeDriftMaxSpeed = 2.5;  // 方案A微调2: 羽流速度上限略升(真实羽流1-3m/s)
     public double exhaustRate = 0.15;
     public double smokeAbsorptionCoeff = 0.5;
     public static final double MAX_SMOKE = 1.0;
@@ -1024,6 +1024,17 @@ public class FireEscape extends SimState {
         initMultipleFireSources();
         initExits();
 
+        // 方案A修复: 楼梯间修复改变了部分格的 inside/obstacle, 火源格可能是修复后才可用的内部格,
+        // 需在火源确定后重建 insideCells, 否则回写/冷却/clamp 会跳过火源格导致烟浓度无限累积
+        insideCells.clear();
+        for (int x = 0; x < gridWidth; x++)
+            for (int y = 0; y < gridHeight; y++)
+                for (int z = 0; z < gridDepth; z++)
+                    if (insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) != TYPE_WALL)
+                        insideCells.add(new int[]{x, y, z});
+        System.out.println("[BIM] insideCells 重建(火源后): " + insideCells.size() + " 个内部格");
+        if (!fireSourcePositions.isEmpty()) { int[] fp0 = fireSourcePositions.get(0); boolean hasFp = false; for (int[] c : insideCells) { if (c[0]==fp0[0] && c[1]==fp0[1] && c[2]==fp0[2]) { hasFp = true; break; } } System.out.println("[BIM] 火源格 (" + fp0[0] + "," + fp0[1] + "," + fp0[2] + ") inInsideCells=" + hasFp + " inside=" + insideGrid.get(fp0[0],fp0[1],fp0[2]) + " obstacle=" + obstacleGrid.get(fp0[0],fp0[1],fp0[2])); }
+
         // 4. 人员出生规则统一由 Person 维护。
         Person.spawnPopulation(this);
     }
@@ -1093,8 +1104,8 @@ public class FireEscape extends SimState {
                     for (int dz = 0; dz <= r; dz++) {  // 只往低层及当前层找火源
                         int x = cx + dx, y = cy + dy, z = cz + dz;
                         if (x < 0 || x >= gridWidth || y < 0 || y >= gridHeight || z < 0 || z >= gridDepth) continue;
-                        if (insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) != FireEscape.TYPE_WALL
-                                && obstacleGrid.get(x, y, z) != FireEscape.TYPE_EXIT) {
+                        if (insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) == FireEscape.TYPE_EMPTY
+                                && isOpenInteriorPoint(x, y, z)) {
                             return new int[]{x, y, z};
                         }
                     }
@@ -1102,6 +1113,30 @@ public class FireEscape extends SimState {
             }
         }
         return null;
+    }
+
+    /** 方案C修复: 前端画布设火源时, 找该 (x,y) 列最低的室内格(z>=0), 避免火源落在楼板/地下。返回 z 或 -1。 */
+    public int findLowestInteriorZ(int x, int y) {
+        if (x < 0 || x >= gridWidth || y < 0 || y >= gridHeight) return -1;
+        for (int z = 0; z < gridDepth; z++) {
+            if (insideGrid.get(x, y, z) == 1 && obstacleGrid.get(x, y, z) == FireEscape.TYPE_EMPTY) return z;
+        }
+        return -1;
+    }
+
+    /** 方案A修复: 火源点必须水平开阔(至少3个水平邻居为室内可通行格), 避免火源落在竖井/门柱里 */
+    private boolean isOpenInteriorPoint(int x, int y, int z) {
+        int open = 0;
+        int[][] dirs = {{1,0},{-1,0},{0,1},{0,-1}};
+        for (int[] d : dirs) {
+            int nx = x + d[0], ny = y + d[1];
+            if (nx < 0 || nx >= gridWidth || ny < 0 || ny >= gridHeight) continue;
+            if (insideGrid.get(nx, ny, z) == 1 && obstacleGrid.get(nx, ny, z) == FireEscape.TYPE_EMPTY) open++;
+        }
+        // 要求至少3个水平空房间邻居, 且上方一格也是空房间(有垂直蓄烟空间)
+        if (open < 3) return false;
+        if (z + 1 < gridDepth && insideGrid.get(x, y, z+1) == 1 && obstacleGrid.get(x, y, z+1) == FireEscape.TYPE_EMPTY) return true;
+        return false;
     }
 
     public void initExits() {

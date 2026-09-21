@@ -88,7 +88,9 @@ public class FireEscapeHttpServer {
         }
         autoStepRunning = true;
         stepScheduler.scheduleAtFixedRate(() -> {
-            if (autoStepRunning) model.schedule.step(model);
+            try {
+                if (autoStepRunning) model.schedule.step(model);
+            } catch (Throwable t) { System.out.println("[STEP-EX] " + t + " @ " + java.util.Arrays.toString(t.getStackTrace())); }
         }, 0, stepIntervalMs, TimeUnit.MILLISECONDS);
     }
 
@@ -175,8 +177,10 @@ public class FireEscapeHttpServer {
         } else if (customFireSources != null && !customFireSources.isEmpty()) {
             model.fireSourcePositions.clear();
             for (int[] p : customFireSources) {
-                if (model.insideGrid.get(p[0],p[1],0)==1 && model.obstacleGrid.get(p[0],p[1],0)==0)
-                    model.fireSourcePositions.add(new int[]{p[0], p[1], 0});
+                // 方案C修复: 火源z不再写死0(可能在地下/楼板下), 改为找该列最低室内格
+                int zf = model.findLowestInteriorZ(p[0], p[1]);
+                if (zf >= 0)
+                    model.fireSourcePositions.add(new int[]{p[0], p[1], zf});
             }
             if (model.fireSourcePositions.isEmpty()) model.generateRandomFireSources();
             model.initMultipleFireSources();
@@ -186,6 +190,89 @@ public class FireEscapeHttpServer {
             model.initMultipleFireSources();
         }
         model.initExits();
+        // 方案A微调2: 楼板开竖井(模拟楼梯井/竖井, 烟可向上层蔓延, 多层冒烟更真实)
+        // 找楼板层(墙占比>55%的水平层), 在若干位置打通竖井列
+        List<Integer> slabZs = new ArrayList<Integer>();
+        for (int z = 1; z < model.gridDepth - 1; z++) {
+            int wallCount = 0, total = 0;
+            for (int x = 0; x < model.gridWidth; x++) for (int y = 0; y < model.gridHeight; y++) {
+                if (model.obstacleGrid.get(x, y, z) == FireEscape.TYPE_WALL) wallCount++;
+                total++;
+            }
+            if (wallCount * 100 / total > 55) slabZs.add(z);
+        }
+                // 方案B微调: 竖井选点重写 — 只选"上下层都是楼内(inside=1)、中间是楼板墙"的列, 确保竖井真在楼内贯通
+        List<int[]> candidates = new ArrayList<int[]>();
+        for (int sx = 4; sx < model.gridWidth - 4; sx++) {
+            for (int sy = 4; sy < model.gridHeight - 4; sy++) {
+                for (int z : slabZs) {
+                    if (z - 1 < 0 || z + 1 >= model.gridDepth) continue;
+                    if (model.obstacleGrid.get(sx, sy, z) != FireEscape.TYPE_WALL) continue;
+                    if (model.insideGrid.get(sx, sy, z-1) != 1) continue;
+                    if (model.insideGrid.get(sx, sy, z+1) != 1) continue;
+                    candidates.add(new int[]{sx, sy, z});
+                    break;
+                }
+            }
+        }
+        // ★ 修复: 楼梯间整截面打通楼板 — 找到所有TYPE_STAIR的(x,y)投影, 在所有楼板层打通
+        // 真实火灾中楼梯间是完整垂直井道, 烟可在整个楼梯间截面上升(原实现只开3个1x1小洞, 烟根本上不去)
+        List<int[]> stairXYList = new ArrayList<int[]>();
+        boolean[][] stairXYFlag = new boolean[model.gridWidth][model.gridHeight];
+        for (int x = 0; x < model.gridWidth; x++) {
+            for (int y = 0; y < model.gridHeight; y++) {
+                for (int z = 0; z < model.gridDepth; z++) {
+                    if (model.obstacleGrid.get(x, y, z) == FireEscape.TYPE_STAIR) {
+                        if (!stairXYFlag[x][y]) { stairXYFlag[x][y] = true; stairXYList.add(new int[]{x, y}); }
+                        break;
+                    }
+                }
+            }
+        }
+        int stairShaftCells = 0;
+        for (int[] sp : stairXYList) {
+            int sx = sp[0], sy = sp[1];
+            for (int z : slabZs) {
+                if (model.obstacleGrid.get(sx, sy, z) == FireEscape.TYPE_WALL) {
+                    model.obstacleGrid.set(sx, sy, z, 0);
+                    model.insideGrid.set(sx, sy, z, 1);
+                    stairShaftCells++;
+                }
+            }
+        }
+        System.out.println("[BIM] 楼梯间竖井打通: " + stairXYList.size() + " 个楼梯间位置, 打通 " + stairShaftCells + " 个楼板格");
+
+        int shaftMade = 0;
+        int nCand = candidates.size();
+        if (nCand > 0) {
+            // ★ 修复: 竖井贯穿整栋楼(原实现只在z±2开5格, 其他楼层楼板仍挡住)
+            List<int[]> shaftPicks = new ArrayList<int[]>();
+            for (int seg = 0; seg < 3 && shaftMade < 3; seg++) {
+                int lo = seg * nCand / 3, hi = (seg+1) * nCand / 3;
+                if (hi <= lo) hi = lo + 1;
+                shaftPicks.add(candidates.get((lo + hi) / 2));
+                shaftMade++;
+            }
+            for (int[] pick : shaftPicks) {
+                int sx = pick[0], sy = pick[1];
+                for (int z : slabZs) {
+                    if (model.obstacleGrid.get(sx, sy, z) == FireEscape.TYPE_WALL) {
+                        model.obstacleGrid.set(sx, sy, z, 0);
+                        model.insideGrid.set(sx, sy, z, 1);
+                    }
+                }
+            }
+        }
+        System.out.println("[BIM] 竖井开洞: " + shaftMade + " 个 (楼板层=" + slabZs.size() + " 火源=(" + (model.fireSourcePositions.isEmpty() ? "无" : (model.fireSourcePositions.get(0)[0] + "," + model.fireSourcePositions.get(0)[1])) + "))");
+        // 方案A修复: custom网格覆盖与火源重选都在 model.start() 之后, 需在此按最终网格重建 insideCells,
+        // 否则火源柱/新内部格不在回写-clamp-冷却覆盖范围, 烟浓度无限累积且不衰减
+        model.insideCells.clear();
+        for (int x = 0; x < model.gridWidth; x++)
+            for (int y = 0; y < model.gridHeight; y++)
+                for (int z = 0; z < model.gridDepth; z++)
+                    if (model.insideGrid.get(x, y, z) == 1 && model.obstacleGrid.get(x, y, z) != FireEscape.TYPE_WALL)
+                        model.insideCells.add(new int[]{x, y, z});
+        System.out.println("[BIM] insideCells 重建(initModel后): " + model.insideCells.size() + " 个内部格, 火源=" + (model.fireSourcePositions.isEmpty() ? "无" : ("(" + model.fireSourcePositions.get(0)[0] + "," + model.fireSourcePositions.get(0)[1] + "," + model.fireSourcePositions.get(0)[2] + ")")));
         model.deadByFire = 0;
         model.deadBySmoke = 0;
         model.schedule.clear();
@@ -653,7 +740,11 @@ public class FireEscapeHttpServer {
                 }
             } catch (Exception e) { e.printStackTrace(); exchange.sendResponseHeaders(400,-1); return; }
             List<int[]> valid = new ArrayList<>();
-            for (int[] p : sources) { if (model.insideGrid.get(p[0],p[1],0)==1 && model.obstacleGrid.get(p[0],p[1],0)==0) valid.add(new int[]{p[0], p[1], 0}); }
+            for (int[] p : sources) {
+                // 方案C修复: 火源z不再写死0(可能在地下/楼板下), 改为找该列最低室内格
+                int zf = model.findLowestInteriorZ(p[0], p[1]);
+                if (zf >= 0) valid.add(new int[]{p[0], p[1], zf});
+            }
             customFireSources = valid.isEmpty()? null : valid;
             resetModel();
             respondOk(exchange);
@@ -720,7 +811,8 @@ public class FireEscapeHttpServer {
                     if (iy>0) sb.append(",");
                     double val = model.smokeGrid.get(i, j, z);
                     if (model.obstacleGrid.get(i, j, z) == 1 || model.insideGrid.get(i, j, z) == 0) val = 0.0;
-                    sb.append(((double)((long)(val*10.0)))/10.0);
+                    // 方案A修复: 0.01 精度 + 四舍五入, 低浓度烟可见
+                    sb.append(Math.round(val*100.0)/100.0);
                     iy++;
                 }
                 sb.append("]");
