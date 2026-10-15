@@ -1,0 +1,3940 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>火灾逃生模拟 - 3D 物理+BIM真实版</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a2e; margin: 0; padding: 20px; color: #eee; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .top-bar { background: #16213e; padding: 12px 24px; border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+        .top-bar select { background: #0f3460; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-size: 16px; cursor: pointer; }
+        .model-name { background: #e94560; padding: 6px 16px; border-radius: 30px; font-weight: bold; font-size: 18px; }
+        .middle-area { display: flex; gap: 20px; margin-bottom: 20px; height: 65vh; min-height: 500px; }
+        .canvas-container { flex: 2; background: #0f0f1a; border-radius: 16px; padding: 12px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.5); overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
+        #simCanvas { background-color: #ffffff; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.5); cursor: grab; max-width: 100%; max-height: 100%; width: auto; height: auto; border: 1px solid #333; }
+        #simCanvas:active { cursor: grabbing; }
+        .right-panel { flex: 1; display: flex; flex-direction: column; gap: 12px; height: 100%; overflow: hidden; }
+        /* ★ 实时统计（紧凑版） */
+        .info-box { background: #16213e; border-radius: 12px; padding: 6px 12px; flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+        .info-box > h3 { margin: 0 0 4px 0; font-size: 13px; color: #88aaff; }
+        .info-content { background: #0a0c15; border-radius: 8px; padding: 4px 6px; color: #bcd; }
+        .info-content .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 3px 4px;
+        }
+        .info-content .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            padding: 2px 4px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 4px;
+            min-width: 0;
+        }
+        .info-content .stat-label {
+            font-size: 10px;
+            color: #88aaff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .info-content .stat-value {
+            font-size: 14px;
+            color: #fff;
+            font-weight: bold;
+            line-height: 1.2;
+        }
+        .info-content .stat-item.danger .stat-value { color: #ff5722; }
+        .info-content .stat-item.warn .stat-value { color: #ffc107; }
+        .info-content .stat-item.success .stat-value { color: #4caf50; }
+        /* ★ 楼层信息条（紧凑版） */
+        #floor-info-bar {
+            display: flex;
+            gap: 8px;
+            padding: 3px 8px;
+            background: rgba(15, 52, 96, 0.6);
+            border: 1px solid rgba(68, 136, 255, 0.5);
+            border-radius: 6px;
+            margin-bottom: 4px;
+            font-size: 11px;
+            color: #bcd;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #floor-info-bar .fi-item { white-space: nowrap; }
+        #floor-info-bar strong { color: #fff; font-weight: 600; }
+        #floor-info-bar .fi-pill {
+            background: linear-gradient(135deg, #4488ff, #2266dd);
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+        }
+        #fi-status.fire { color: #ff5722; font-weight: bold; }
+        #fi-status.smoke { color: #ffc107; font-weight: bold; }
+        #fi-status.normal { color: #4caf50; font-weight: bold; }
+        /* ★ 平面图容器（替换原事件日志区块） */
+        .plan-body { position: relative; flex: 1; display: flex; gap: 8px; overflow: hidden; min-height: 0; }
+        .plan-box { background: #16213e; border-radius: 16px; padding: 12px; flex: 1; display: flex; flex-direction: column; overflow: visible; position: relative; min-height: 0; }
+        .plan-box > h3 { margin: 0 0 8px 0; font-size: 15px; color: #88aaff; flex: 0 0 auto; }
+        .plan-body { position: relative; flex: 1; display: flex; gap: 8px; overflow: hidden; min-height: 0; }
+        .control-bar { background: #16213e; border-radius: 16px; padding: 12px 20px; display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+        .control-bar button { padding: 6px 14px; font-weight: bold; border: none; border-radius: 40px; cursor: pointer; background: #0f3460; color: white; font-size: 13px; }
+        .start-btn { background: #2e7d32; }
+        .pause-btn { background: #f9a825; color: #000; }
+        .resume-btn { background: #2196f3; }
+        .step-btn { background: #f9a825; color: #000; }
+        .reset-btn { background: #6a1b9a; }
+        .map-btn { background: #ff9800; }
+        .toggle-persons-btn { background: #9c27b0; }
+        .fpv-btn { background: #455a64; }
+        .fpv-btn.active { background: #e53935; box-shadow: 0 0 8px rgba(229,57,53,0.7); }
+        /* ★ 第一人称监控小窗（逃生视角） */
+        #fpv-hud {
+            position: absolute; right: 22px; bottom: 22px;
+            width: 300px; height: 225px;
+            border: 2px solid rgba(190, 255, 120, 0.85);
+            box-shadow: 0 0 0 1px #000, 0 4px 18px rgba(0,0,0,0.6);
+            pointer-events: none; z-index: 6; display: none;
+            background: #000; overflow: hidden;
+        }
+        #fpv-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+        #fpv-hud::before {
+            content: ''; position: absolute; inset: 0;
+            background: linear-gradient(rgba(120,255,150,0.05), rgba(0,80,30,0.10));
+            box-shadow: inset 0 0 40px rgba(0,0,0,0.55);
+        }
+        #fpv-hud .fpv-scan {
+            position: absolute; inset: 0;
+            background: repeating-linear-gradient(0deg, rgba(255,255,255,0.05) 0 1px, rgba(0,0,0,0.10) 1px 3px);
+            mix-blend-mode: overlay;
+        }
+        #fpv-hud .fpv-osd-top {
+            position: absolute; top: 4px; left: 8px; right: 8px;
+            display: flex; gap: 6px; align-items: center;
+            font-size: 11px; color: #c8ff9a; font-weight: bold;
+            text-shadow: 0 0 3px #000; font-family: Consolas, monospace;
+        }
+        #fpv-hud .fpv-rec {
+            width: 8px; height: 8px; border-radius: 50%; background: #ff3b30;
+            animation: fpvBlink 1s steps(2) infinite;
+        }
+        @keyframes fpvBlink { 50% { opacity: 0; } }
+        #fpv-hud .fpv-osd-bottom {
+            position: absolute; bottom: 4px; left: 8px; right: 8px;
+            display: flex; justify-content: space-between;
+            font-size: 11px; color: #c8ff9a;
+            text-shadow: 0 0 3px #000; font-family: Consolas, monospace;
+        }
+        .nofire-btn { background: #00897b; color: white; }
+        .nofire-btn.active { background: #4caf50; box-shadow: 0 0 8px #4caf50; }
+        .speed-btn { background: #00bcd4; color: #000; }
+        .speed-btn.active { background: #ff5722; color: #fff; }
+        .modal { display: none; position: fixed; z-index: 1000; left:0; top:0; width:100%; height:100%; overflow:auto; background-color: rgba(0,0,0,0.7); }
+        .modal-content { background-color: #2d2d44; margin: 5% auto; padding: 20px; border-radius: 16px; width: 80%; max-width: 900px; color: #eee; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #555; }
+        .close { color: #aaa; font-size: 28px; cursor: pointer; }
+        .map-list ul { list-style: none; padding: 0; max-height: 200px; overflow-y: auto; }
+        .map-list li { padding: 8px; margin: 5px 0; background: #16213e; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .map-list li span { cursor: pointer; flex: 1; }
+        .map-list li .edit-btn { background: #2196f3; color: white; border: none; border-radius: 4px; padding: 4px 12px; cursor: pointer; margin-left: 10px; }
+        .editor-controls { margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
+        .editor-canvas { background: #111; border: 1px solid #555; cursor: crosshair; margin-top: 10px; }
+        .image-upload-area { margin-top: 15px; padding-top: 15px; border-top: 1px solid #555; }
+        .image-upload-area input[type="file"] { background: #0f3460; color: white; padding: 6px; border-radius: 4px; border: none; }
+        .image-upload-area input[type="range"] { width: 200px; vertical-align: middle; }
+        .image-upload-area .preview-img { max-width: 100%; max-height: 200px; margin: 10px 0; border: 1px solid #555; }
+        .log-time { color: #88ffaa; }
+        .error { color: #ff8888; }
+        .boundary-mode { background: #ffeb3b; color: black; }
+        .fire-source-mode { background: #ff1744; color: white; }
+        .speed-label { font-size: 13px; color: #aaa; margin-right: 4px; }
+
+        /* ★ 小地图样式（放在右侧平面图容器内，按层显示） */
+        #minimap-container {
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            background: #05060a;
+            border: 2px solid #4488ff;
+            border-radius: 8px;
+            padding: 6px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            overflow: hidden;  /* 内部溢出隐藏，确保子元素用 flex 正确分配空间 */
+        }
+        #minimap {
+            width: 100%;
+            display: block;
+            border-radius: 4px;
+            background: #000;
+            flex: 1 1 auto;
+            max-width: 100%;
+            min-height: 40px;
+            aspect-ratio: 1 / 1;  /* 默认正方形，JS 物理像素会按实际容器覆盖 */
+            object-fit: contain;
+        }
+        #minimap-title {
+            color: #88aaff;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 4px;
+            /* 禁止被压缩，保证标题和楼层控件永远可见 */
+            flex: 0 0 auto;
+        }
+        /* ★ 楼层选择控件 */
+        #floor-controls {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+        }
+        #floor-controls button {
+            background: #0f3460;
+            color: white;
+            border: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 10px;
+            padding: 0;
+            line-height: 1;
+        }
+        #floor-controls button:hover { background: #1976d2; }
+        #floor-controls button:active { background: #ff5722; }
+        #floor-label {
+            color: #ffeb3b;
+            font-weight: bold;
+            font-size: 11px;
+            min-width: 24px;
+            text-align: center;
+            text-shadow: 0 0 4px #000;
+        }
+
+        #floor-label {
+            color: #ffeb3b;
+            font-weight: bold;
+            font-size: 11px;
+            min-width: 24px;
+            text-align: center;
+            text-shadow: 0 0 4px #000;
+        }
+
+        /* ★ 小地图工具栏（控制面板切换/叠加模式/图层） */
+        #minimap-toolbar {
+            display: flex;
+            gap: 3px;
+            margin-top: 4px;
+            flex-wrap: wrap;
+            flex: 0 0 auto;  /* 禁止被压缩 */
+            min-height: 0;
+        }
+        #minimap-toolbar button {
+            background: #0f3460;
+            color: #bcd;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 5px;
+            font-size: 10px;
+            cursor: pointer;
+            flex: 1;
+            min-width: 0;
+        }
+        #minimap-toolbar button:hover { background: #1976d2; color: #fff; }
+        #minimap-toolbar button.active { background: #ff5722; color: #fff; }
+
+        /* ★ 小地图图例（浮层） */
+        #minimap-legend {
+            display: none;
+            position: absolute;
+            left: 70px;
+            top: 130px;
+            z-index: 100;
+            padding: 6px 8px;
+            background: rgba(0,0,0,0.75);
+            border: 1px solid #4488ff;
+            border-radius: 6px;
+            font-size: 11px;
+            color: #bcd;
+            line-height: 1.6;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+        #minimap-legend .lg-row { display: flex; align-items: center; gap: 4px; }
+        #minimap-legend .lg-swatch {
+            display: inline-block;
+            width: 10px; height: 10px;
+            border-radius: 2px;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+
+        /* ★ 全屏放大弹窗 */
+        .zoom-modal {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 5, 15, 0.95);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+        }
+        .zoom-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 20px;
+            background: #0a1628;
+            border-bottom: 2px solid #4488ff;
+            color: #88aaff;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .zoom-modal-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .zoom-modal-controls button {
+            background: #1a2a4a;
+            color: #bcd;
+            border: 1px solid #4488ff;
+            border-radius: 4px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .zoom-modal-controls button:hover { background: #1976d2; color: #fff; }
+        .zoom-modal-body {
+            flex: 1;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            overflow: hidden;
+            min-height: 0;
+        }
+        #zoom-canvas {
+            background: #000;
+            border: 2px solid #4488ff;
+            border-radius: 8px;
+            cursor: grab;
+            box-shadow: 0 0 30px rgba(68, 136, 255, 0.3);
+        }
+        #zoom-canvas.dragging { cursor: grabbing; }
+        .zoom-legend {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.75);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #bcd;
+            line-height: 1.8;
+            border: 1px solid rgba(68,136,255,0.4);
+        }
+        .zoom-tooltip {
+            position: absolute;
+            display: none;
+            pointer-events: none;
+            background: rgba(0,0,0,0.92);
+            color: #ffe;
+            border: 1px solid #4488ff;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+            z-index: 20;
+        }
+        .zoom-modal-footer {
+            padding: 8px 20px;
+            background: #0a1628;
+            border-top: 1px solid rgba(68,136,255,0.3);
+            color: #668;
+            font-size: 12px;
+            text-align: center;
+        }
+
+        /* ★ 悬停 tooltip */
+        #minimap-tooltip {
+            position: absolute;
+            display: none;
+            pointer-events: none;
+            background: rgba(0,0,0,0.92);
+            color: #ffe;
+            border: 1px solid #4488ff;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 11px;
+            z-index: 20;
+            white-space: nowrap;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.6);
+        }
+
+        /* ★ 楼层缩略条（平面图容器左侧竖向） */
+        #floor-thumb-strip {
+            position: relative;
+            top: auto;
+            right: auto;
+            display: flex;
+            flex-direction: column-reverse;
+            gap: 6px;
+            z-index: 1;
+            max-height: 100%;
+            overflow-y: auto;
+            padding: 2px;
+        }
+        #floor-thumb-strip canvas {
+            width: 64px;
+            height: 64px;
+            border: 2px solid #334;
+            border-radius: 4px;
+            background: #000;
+            cursor: pointer;
+            display: block;
+        }
+        #floor-thumb-strip canvas.active { border-color: #ffeb3b; box-shadow: 0 0 6px #ffeb3b; }
+        #floor-thumb-strip canvas:hover { border-color: #4488ff; }
+        #floor-thumb-strip .thumb-label {
+            color: #88aaff;
+            font-size: 10px;
+            text-align: center;
+            margin-bottom: 2px;
+        }
+
+        /* ★ 小地图容器（放大并支持交互，右侧主图） */
+        #minimap-container {
+            /* flex:1 已在前面声明 */
+        }
+        #minimap {
+            cursor: crosshair;
+            image-rendering: pixelated;
+        }
+        #minimap.dragging { cursor: grabbing; }
+
+        /* ★ 漫游模式提示 + 十字准星 */
+        #walk-hint {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #88ff88;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            z-index: 10;
+            pointer-events: none;
+            border: 1px solid #448844;
+        }
+        #walk-hint .key { display: inline-block; background: #2e7d32; color: white; padding: 1px 6px; border-radius: 4px; margin: 0 2px; font-weight: bold; }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            z-index: 11;
+            pointer-events: none;
+            display: none;
+        }
+        #crosshair::before, #crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(255,255,255,0.8);
+        }
+        #crosshair::before { left: 9px; top: 0; width: 2px; height: 20px; }
+        #crosshair::after  { top: 9px; left: 0; height: 2px; width: 20px; }
+        body.walk-active { cursor: none; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+<div class="container">
+    <div class="top-bar">
+        <select id="modelSelect">
+            <option value="simple" selected>🏠 简单矩形房间</option>
+            <option value="building">🏢 BIM 大楼模型</option>
+        </select>
+        <div class="model-name">📌 当前模型: <span id="currentModel">简单矩形房间</span></div>
+    </div>
+    <div class="middle-area">
+        <div class="canvas-container">
+            <canvas id="simCanvas"></canvas>
+            <div id="loadingTip" style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:#888; pointer-events:none;">加载3D引擎中...</div>
+            <!-- ★ 漫游模式提示 -->
+            <div id="walk-hint">按 <span class="key">V</span> 进入飞行模式</div>
+            <!-- ★ 十字准星（漫游时显示） -->
+            <div id="crosshair"></div>
+            <!-- ★ 监控第一人称小窗（逃生视角） -->
+            <div id="fpv-hud">
+                <canvas id="fpv-canvas" width="300" height="225"></canvas>
+                <div class="fpv-scan"></div>
+                <div class="fpv-osd-top">
+                    <span class="fpv-rec"></span><span>REC</span>
+                    <span id="fpv-osd-cam">CAM-01</span>
+                    <span id="fpv-osd-target" style="margin-left:auto">--</span>
+                </div>
+                <div class="fpv-osd-bottom">
+                    <span id="fpv-osd-time">T+0.0s</span>
+                    <span id="fpv-osd-status">待机</span>
+                </div>
+            </div>
+        </div>
+        <div class="right-panel">
+            <!-- ★ 实时统计（紧凑版） -->
+            <div class="info-box"><h3>📊 实时统计</h3><div class="info-content" id="infoContent">加载中...</div></div>
+            <div class="plan-box">
+                <h3>🗺️ 楼层平面图</h3>
+                <!-- ★ 楼层信息条 -->
+                <div id="floor-info-bar">
+                    <span id="fi-floor" class="fi-pill">F1 层</span>
+                    <span class="fi-item">📐 建筑面积: <strong id="fi-area">--</strong> m²</span>
+                    <span class="fi-item">👥 人员: <strong id="fi-persons">--</strong></span>
+                    <span class="fi-item">🚪 出口: <strong id="fi-exits">--</strong></span>
+                    <span class="fi-item" id="fi-status-wrap">⚠️ 状态: <strong id="fi-status">正常</strong></span>
+                </div>
+                <div class="plan-body">
+                    <!-- ★ 楼层缩略条（点击直跳楼层） -->
+                    <div id="floor-thumb-strip"></div>
+                    <!-- ★ 小地图（主图） -->
+                    <div id="minimap-container">
+                        <div id="minimap-title">
+                            <span>2D 俯视图</span>
+                            <div id="floor-controls">
+                                <button id="floor-down" title="下一层">▼</button>
+                                <span id="floor-label">F1</span>
+                                <button id="floor-up" title="上一层">▲</button>
+                            </div>
+                        </div>
+                        <canvas id="minimap" width="720" height="720"></canvas>
+                        <!-- ★ 工具栏：图层切换 -->
+                        <div id="minimap-toolbar">
+                            <button id="btn-legend" title="图例">图例</button>
+                            <button id="btn-grid" class="active" title="网格线">网格</button>
+                            <button id="btn-overlay" title="楼层偏移叠加">叠加</button>
+                            <button id="btn-scale" class="active" title="比例尺/指北针">比例</button>
+                            <button id="btn-fit" title="自动适配视图">适配</button>
+                            <button id="btn-focus" title="点击地图定位主视图">定位</button>
+                            <button id="btn-zoom" title="全屏放大查看">🔍 放大</button>
+                        </div>
+                    </div>
+                    <!-- ★ 悬停信息 -->
+                    <div id="minimap-tooltip"></div>
+                </div>
+                <!-- ★ 图例（浮层，在 plan-box 层级，不受 plan-body overflow:hidden 限制） -->
+                <div id="minimap-legend">
+                    <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
+                    <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ★ 全屏放大弹窗 -->
+    <div id="zoom-modal" class="zoom-modal" style="display:none;">
+        <div class="zoom-modal-header">
+            <span id="zoom-modal-title">2D 俯视图 - 放大模式</span>
+            <div class="zoom-modal-controls">
+                <button id="zoom-floor-down" title="下一层">▼</button>
+                <span id="zoom-floor-label">F1</span>
+                <button id="zoom-floor-up" title="上一层">▲</button>
+                <button id="zoom-fit" title="自动适配">适配</button>
+                <button id="zoom-close" title="关闭 (ESC)">✕ 关闭</button>
+            </div>
+        </div>
+        <div class="zoom-modal-body">
+            <canvas id="zoom-canvas"></canvas>
+            <div id="zoom-legend" class="zoom-legend">
+                <div class="lg-row"><span class="lg-swatch" style="background:#3a3a4a"></span>墙体</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#4caf50"></span>出口</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#ff5722"></span>火源</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:rgba(100,140,180,0.6)"></span>烟雾</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#ffffff"></span>人员</div>
+                <div class="lg-row"><span class="lg-swatch" style="background:#ffff00"></span>相机</div>
+            </div>
+            <div id="zoom-tooltip" class="zoom-tooltip"></div>
+        </div>
+        <div class="zoom-modal-footer">
+            <span>💡 滚轮缩放 · 左键拖动平移 · 双击定位 3D 视图 · ESC 关闭</span>
+        </div>
+    </div>
+    <div class="control-bar">
+        <button id="startBtn" class="start-btn">▶ 启动/重置</button>
+        <button id="pauseBtn" class="pause-btn">⏸ 暂停</button>
+        <button id="resumeBtn" class="resume-btn">▶ 继续</button>
+        <button id="stepBtn" class="step-btn">⏩ 单步</button>
+        <button id="resetBtn" class="reset-btn">🔄 重置</button>
+        <button id="mapBtn" class="map-btn">🗺️ 地图</button>
+        <button id="togglePersonsBtn" class="toggle-persons-btn">👤 隐藏人员</button>
+        <button id="fpvBtn" class="fpv-btn" title="随机锁定一名逃生人员，以监控第一人称视角跟踪其逃生视野">📹 监控视角</button>
+        <button id="noFireBtn" class="nofire-btn">🚭 无火模式</button>
+        <span class="speed-label">速度:</span>
+        <button class="speed-btn active" data-speed="1">1×</button>
+        <button class="speed-btn" data-speed="2">2×</button>
+        <button class="speed-btn" data-speed="3">3×</button>
+        <button class="speed-btn" data-speed="4">4×</button>
+        <button class="speed-btn" data-speed="8">8×</button>
+    </div>
+</div>
+
+<!-- 地图模态窗 -->
+<div id="mapModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header"><h2>🗺️ 地图管理</h2><span class="close">&times;</span></div>
+        <div class="map-list"><h3>已保存的地图</h3><ul id="mapList"></ul><button id="refreshMapsBtn">刷新列表</button></div>
+        <div class="map-editor">
+            <h3>绘制新地图</h3>
+            <canvas id="editorCanvas" width="600" height="400" class="editor-canvas"></canvas>
+            <div class="editor-controls">
+                <button id="drawEmptyBtn" style="background:#111; color:white;">⬛ 空地(0)</button>
+                <button id="drawWallBtn" style="background:#4a4a5a; color:white;">🧱 墙(1)</button>
+                <button id="drawCombustBtn" style="background:#ff8c00; color:black;">🔥 可燃物(2)</button>
+                <button id="drawDoorBtn" style="background:#2196f3; color:white;">🚪 门(3)</button>
+                <button id="drawExitBtn" style="background:#4caf50; color:white;">🚪 出口(4)</button>
+                <button id="drawBoundaryBtn" style="background:#ffeb3b; color:black;">🟨 边界</button>
+                <button id="drawFireBtn" style="background:#ff1744; color:white;">🔥 火源</button>
+                <button id="clearMapBtn">清除全部(设为0)</button>
+                <input type="text" id="newMapName" placeholder="地图名称.map" value="newmap.map">
+                <button id="saveNewMapBtn">保存地图</button>
+            </div>
+            <p style="font-size:12px;">提示：点击"火源"后在地图上点击放置/删除火源（红色圆点）。点击"边界"后点击画点，双击闭合。</p>
+        </div>
+        <div class="image-upload-area">
+            <h3>从图片生成地图</h3>
+            <p style="font-size:12px;">上传建筑平面图（白色背景，黑色墙体），调整阈值后生成障碍物地图。</p>
+            <input type="file" id="imageInput" accept="image/*">
+            <br>
+            <label>二值化阈值: <span id="thresholdLabel">128</span></label>
+            <input type="range" id="thresholdSlider" min="0" max="255" value="128">
+            <br>
+            <button id="generateMapBtn">生成地图并应用</button>
+            <br>
+            <img id="previewImage" class="preview-img" style="display:none;" alt="预览">
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    // ================================================================
+    // 1. 引入 Three.js 核心库
+    // ================================================================
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+    // ================================================================
+    // 2. 核心变量
+    // ================================================================
+    const canvas = document.getElementById('simCanvas');
+    const loadingTip = document.getElementById('loadingTip');
+    let scene, camera, renderer, controls;
+    let voxelMesh = null;        // 用于渲染火、烟（不发散实体墙体）
+    let personGroup = new THREE.Group();
+    let buildingGroup = null;    // 用于承载加载的 glTF 真实模型
+    let lastStep = -1, currentData = null;
+    const T_AMB = 293.15;
+    const T_MAX_HOT = 1273.15;
+    // 默认值，若 semantic_info.json 加载成功会被覆盖
+    let voxelSize = 0.5;
+    let originOffset = [0.0, 0.0, 0.0];
+    // 前端渲染步长：x/y/z 统一使用 voxelSize，与 Java deltaX/deltaZ 和 Python voxel_size 一致
+    let dx = voxelSize, dz = voxelSize;
+    // ★ GPU 粒子系统（火焰/烟雾）与动态点光源
+    const clock = new THREE.Clock();
+    let fireParticles = null;
+    let smokeParticles = null;
+    let volumeSmoke = null;
+    let fireLights = [];
+    let fireGlows = [];        // ★ 火焰发光光晕精灵 (真实火焰在周围形成明亮光晕)
+    let fireGlowTexture = null;
+
+    // ★ 漫游模式相关（已改为飞行模式）
+    let pointerLockControls = null;     // PointerLockControls 实例
+    let walkMode = false;               // 是否处于飞行模式
+    let clipMode = false;               // 剖面模式(隐藏前墙观察内部烟雾)
+    const moveKeys = { w: false, a: false, s: false, d: false, space: false, shift: false };  // 键盘按下状态
+    const moveVelocity = new THREE.Vector3();
+    const moveDirection = new THREE.Vector3();
+    let prevTime = performance.now();
+
+    // ★ 监控第一人称视角（随机锁定一名逃生人员，跟踪其逃生视野）
+    let fpvMode = false;              // 监控视角是否开启
+    let fpvRenderer = null;           // 小窗独立 WebGLRenderer（共用同一 scene）
+    let fpvCamera = null;             // 第一人称相机
+    let fpvTarget = null;             // 当前锁定人员的最后已知网格坐标 {gx, gy, gz}
+    let fpvCamId = 1;                 // 镜头编号（每次换目标 +1）
+    let fpvYaw = 0;                   // 平滑朝向角
+    let fpvLastX = 0, fpvLastZ = 0;   // 上一帧目标世界坐标（推算移动方向）
+
+    // ★ 小地图相关
+    let minimapCanvas = null;
+    let minimapCtx = null;
+    // ★ 楼层选择状态
+    // 用 currentFloorZ 存"当前选中的体素 z 索引"，由按钮切换。
+    let currentFloorZ = -1;   // -1 表示自动取中间层
+    let detectedFloors = [];  // 检测到的楼层 z 索引列表（优先用服务端 floorSlabs，否则几何检测）
+    // ★ 小地图交互状态
+    let minimapView = { scale: 1, offsetX: 0, offsetY: 0 };  // 缩放与平移
+    let minimapHover = null;   // {x, y, z, type} 当前悬停的格子
+    let minimapOptions = { grid: true, overlay: false, scale: true, focus: true };
+    let thumbCanvases = [];    // 侧边缩略条 canvas 列表
+
+    // ================================================================
+    // 3. 辅助函数
+    // ================================================================
+    function addLog(msg, type) {
+        const t = new Date().toLocaleTimeString();
+        // 用户要求移除事件日志区块：全部落到控制台，避免 DOM 操作抛错
+        if (type === 'error') console.error(`[${t}] ${msg}`);
+        else console.log(`[${t}] ${msg}`);
+        const d = document.getElementById('logContent');
+        if (!d) return;
+        const c = type === 'error' ? 'error' : 'log-time';
+        const e = document.createElement('div');
+        e.innerHTML = `<span class="${c}">[${t}]</span> ${msg}`;
+        d.appendChild(e);
+        e.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+
+    function updateStats(d) {
+        let timeStr = d.currentTime ? d.currentTime.toFixed(1) : '0.0';
+        // ★ 更新实时统计面板（三列网格布局）
+        document.getElementById('infoContent').innerHTML =
+            `<div class="stat-grid">
+                <div class="stat-item"><span class="stat-label">⏱ 时间</span><span class="stat-value">${timeStr}s</span></div>
+                <div class="stat-item"><span class="stat-label">👣 步数</span><span class="stat-value">${d.step}</span></div>
+                <div class="stat-item"><span class="stat-label">👥 存活</span><span class="stat-value">${d.active}</span></div>
+                <div class="stat-item danger"><span class="stat-label">🔥 火烧死</span><span class="stat-value">${d.deadFire}</span></div>
+                <div class="stat-item warn"><span class="stat-label">💨 烟熏死</span><span class="stat-value">${d.deadSmoke}</span></div>
+                <div class="stat-item success"><span class="stat-label">🚪 逃出</span><span class="stat-value">${d.escaped}</span></div>
+                <div class="stat-item"><span class="stat-label">👤 总人数</span><span class="stat-value">${d.total}</span></div>
+            </div>`;
+        // ★ 更新楼层信息条
+        updateFloorInfo(d);
+    }
+
+    // ★ 楼层信息条更新函数
+    function updateFloorInfo(d) {
+        if (!currentData) return;
+        
+        const idx = detectedFloors.indexOf(currentFloorZ);
+        const floorNum = idx >= 0 ? idx + 1 : 1;
+        
+        // 1. 楼层号
+        const fiFloor = document.getElementById('fi-floor');
+        if (fiFloor) fiFloor.textContent = `F${floorNum} 层`;
+        
+        // 2. 建筑面积 (体素数 × 单个体素面积, dx=0.5m)
+        const voxelSize = 0.5;
+        const area = currentData.width * currentData.height * voxelSize * voxelSize;
+        const fiArea = document.getElementById('fi-area');
+        if (fiArea) fiArea.textContent = area.toFixed(0);
+        
+        // 3. 人员数（按楼层分组）
+        const nextFloorZ = (idx >= 0 && idx + 1 < detectedFloors.length) ? detectedFloors[idx + 1] : currentFloorZ + 17;
+        const persons = d.persons || currentData.persons || [];
+        const personsOnFloor = persons.filter(p => {
+            const z = p[2] !== undefined ? p[2] : p.z;
+            return z >= currentFloorZ && z < nextFloorZ;
+        }).length;
+        const fiPersons = document.getElementById('fi-persons');
+        if (fiPersons) fiPersons.textContent = personsOnFloor;
+        
+        // 4. 出口数（按楼层分组）
+        const exits = currentData.exits || [];
+        const exitsOnFloor = exits.filter(e => e.z === currentFloorZ).length;
+        const fiExits = document.getElementById('fi-exits');
+        if (fiExits) fiExits.textContent = exitsOnFloor;
+        
+        // 5. 状态判断
+        const fiStatus = document.getElementById('fi-status');
+        if (fiStatus) {
+            let status = '正常', statusClass = 'normal';
+            if (hasFireOnFloor(currentFloorZ)) { status = '火灾'; statusClass = 'fire'; }
+            else if (hasSmokeOnFloor(currentFloorZ)) { status = '烟雾'; statusClass = 'smoke'; }
+            fiStatus.textContent = status;
+            fiStatus.className = statusClass;
+        }
+    }
+
+    // ★ 辅助：判断楼层是否有火灾
+    function hasFireOnFloor(z) {
+        const fire = currentData?.fire;
+        if (!fire || !fire[z]) return false;
+        const layer = fire[z];
+        for (let x = 0; x < layer.length; x++) {
+            const row = layer[x];
+            if (!row) continue;
+            for (let y = 0; y < row.length; y++) {
+                if (row[y] > 500) return true;  // 温度 > 500K 视为火灾
+            }
+        }
+        return false;
+    }
+
+    // ★ 辅助：判断楼层是否有烟雾
+    function hasSmokeOnFloor(z) {
+        const smoke = currentData?.smoke;
+        if (!smoke || !smoke[z]) return false;
+        const layer = smoke[z];
+        for (let x = 0; x < layer.length; x++) {
+            const row = layer[x];
+            if (!row) continue;
+            for (let y = 0; y < row.length; y++) {
+                if (row[y] > 0.3) return true;  // 烟雾浓度 > 0.3
+            }
+        }
+        return false;
+    }
+
+    function sendCommand(cmd) {
+        fetch('/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `cmd=${cmd}`
+        }).then(() => {
+            addLog(`指令已发送: ${cmd}`, 'info');
+            fetchState();
+        }).catch(e => addLog(`指令失败: ${e}`, 'error'));
+    }
+
+    // ★ 小地图首次就绪标记（防止反复 auto-fit）
+    let minimapReady = false;
+    let lastMinimapSize = { w: 0, h: 0, gridW: 0, gridH: 0 };
+    let cameraFramed = false;
+    let lastGridKey = null;  // 记录上次网格尺寸, 切换地图后自动重置相机
+
+    function fetchState() {
+        fetch('/state')
+            .then(r => r.json())
+            .then(d => {
+                currentData = d;
+                updateStats(d);
+                fpvOnData(d);
+                update3DWorld(d);
+                // ★ GPU 粒子系统：同步火源物理参数与浓度场 (粒子烟雾已由体积渲染接管)
+                if (fireParticles) fireParticles.updateSources(d.fireSources, dx, dz, d.fire, d.stride || 1);
+                // if (smokeParticles) smokeParticles.updateFromField(d.smoke, d.fire, dx, dz, d.depth, d.stride || 1);
+                updateFireLights(d);
+                // ★ 平面图：首次有数据时自适应画布 + 自动 fit 居中
+                ensurePlanViewReady(d);
+                // ★ 首次或网格尺寸变化时自动框住整个建筑
+                //   记录上次网格尺寸, 切换地图后自动重置相机
+                const gridKey = d.width + 'x' + d.height + 'x' + d.depth;
+                if (lastGridKey !== gridKey) {
+                    lastGridKey = gridKey;
+                    cameraFramed = false;
+                }
+                if (!cameraFramed && d.width && d.depth && controls && camera) {
+                    cameraFramed = true;
+                    const cx = d.width * dx / 2, cy = d.depth * dz / 2, cz = d.height * dx / 2;
+                    controls.target.set(cx, cy, cz);
+                    const size = Math.max(d.width * dx, d.depth * dz, d.height * dx);
+                    camera.position.set(cx + size * 0.6, cy + size * 0.75, cz + size * 0.6);
+                    controls.update();
+                }
+                if (lastStep !== d.step) lastStep = d.step;
+            })
+            .catch(e => addLog('获取状态失败: ' + e, 'error'));
+    }
+
+    // ★ 让平面图画布物理像素与容器 CSS 尺寸一致，并在首次/换图/容器尺寸变化时 auto-fit
+    function ensurePlanViewReady(d) {
+        if (!minimapCanvas || !d || !d.width) return;
+        // 若 voxelSize/dx 来自后端，覆盖默认值
+        if (d.voxelSize && d.voxelSize > 0) {
+            voxelSize = d.voxelSize;
+            dx = voxelSize; dz = voxelSize;
+        }
+        const sizeChanged = resizePlanViewCanvas(false);
+        const dimsChanged = lastMinimapSize.gridW !== d.width || lastMinimapSize.gridH !== d.height;
+        if (!minimapReady || dimsChanged || sizeChanged) {
+            fitMinimapToContent();
+            minimapReady = true;
+            lastMinimapSize.gridW = d.width;
+            lastMinimapSize.gridH = d.height;
+        }
+    }
+
+    // ★ 将 minimapCanvas 物理像素调整为等于容器 CSS 尺寸，避免浏览器二次缩放导致"糊"
+    //   返回 true 表示尺寸发生了变化（调用方应据此重新 fit）
+    function resizePlanViewCanvas(doFit) {
+        if (!minimapCanvas) return false;
+        const container = minimapCanvas.parentElement;  // #minimap-container
+        // canvas 上方有 title/toolbar/legend 等占据 offsetTop，只给剩余高度
+        const availH = container.clientHeight - minimapCanvas.offsetTop;
+        const cssW = Math.max(120, Math.floor(container.clientWidth - 12));
+        const cssH = Math.max(120, Math.floor(availH - 6));  // 底部留 6px
+        if (cssW === lastMinimapSize.w && cssH === lastMinimapSize.h) return false;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        minimapCanvas.width = Math.max(200, Math.floor(cssW * dpr));
+        minimapCanvas.height = Math.max(200, Math.floor(cssH * dpr));
+        lastMinimapSize.w = cssW;
+        lastMinimapSize.h = cssH;
+        if (doFit) fitMinimapToContent();
+        return true;
+    }
+
+    // ★ 自动适配：建筑用正方形 cell（cell=min(W/w,H/h)），保持真实比例；
+    //   scale 用于留 margin，offset 让建筑居中
+    function fitMinimapToContent() {
+        if (!minimapCanvas || !currentData || !currentData.width) return;
+        const W = minimapCanvas.width, H = minimapCanvas.height;
+        const w = currentData.width, h = currentData.height;
+        if (!w || !h) return;
+        const margin = 24;
+        // drawMinimap/drawFloorLayer 中 cell = min(W/w, H/h)
+        const cell = Math.min(W / w, H / h);
+        // 建筑实际像素宽 = w*cell，高 = h*cell。留 margin 后需要的缩放：
+        const sx = (W - margin * 2) / (w * cell);
+        const sy = (H - margin * 2) / (h * cell);
+        minimapView.scale = Math.max(0.1, Math.min(sx, sy));
+        // 居中：建筑缩放后宽 = w*cell*scale，放在画布中心
+        minimapView.offsetX = (W - w * cell * minimapView.scale) / 2;
+        minimapView.offsetY = (H - h * cell * minimapView.scale) / 2;
+    }
+
+    // ================================================================
+    // 4. 温度颜色映射
+    // ================================================================
+    function temperatureToColor(temp) {
+        if (temp < T_AMB) return new THREE.Color(0x000000);
+        if (temp < 373.15) {
+            let t = (temp - T_AMB) / (373.15 - T_AMB);
+            let r = Math.floor(80 * t) / 255;
+            return new THREE.Color(r, 0, 0);
+        } else if (temp < 573.15) {
+            let t = (temp - 373.15) / (573.15 - 373.15);
+            let r = (80 + 175 * t) / 255;
+            let g = (20 * t) / 255;
+            return new THREE.Color(r, g, 0);
+        } else if (temp < 773.15) {
+            let t = (temp - 573.15) / (773.15 - 573.15);
+            let g = (20 + 235 * t) / 255;
+            return new THREE.Color(1, g, 0);
+        } else if (temp < 1073.15) {
+            let t = (temp - 773.15) / (1073.15 - 773.15);
+            let b = (80 * t) / 255;
+            return new THREE.Color(1, 1, b);
+        } else {
+            return new THREE.Color(1, 1, 1);
+        }
+    }
+
+    // ================================================================
+    // 4b. 动态火源点光源 + 火焰发光光晕 + 烟雾遮挡火焰
+    // ================================================================
+
+    // ★ 火焰光晕径向渐变纹理 (白黄核心 → 橙 → 透明边缘)
+    function makeGlowTexture() {
+        if (fireGlowTexture) return fireGlowTexture;
+        const c = document.createElement('canvas');
+        c.width = c.height = 128;
+        const g = c.getContext('2d');
+        const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+        grad.addColorStop(0.00, 'rgba(255, 220, 150, 1.0)');
+        grad.addColorStop(0.25, 'rgba(255, 160, 60, 0.60)');
+        grad.addColorStop(0.55, 'rgba(255, 90, 25, 0.22)');
+        grad.addColorStop(1.00, 'rgba(255, 40, 10, 0.0)');
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 128, 128);
+        fireGlowTexture = new THREE.CanvasTexture(c);
+        return fireGlowTexture;
+    }
+
+    function updateFireLights(d) {
+        const srcs = d.fireSources || [];
+        while (fireLights.length < srcs.length) {
+            const l = new THREE.PointLight(0xff6622, 0, 40, 2);
+            scene.add(l);
+            fireLights.push(l);
+        }
+        while (fireLights.length > srcs.length) {
+            const l = fireLights.pop();
+            scene.remove(l);
+        }
+        // ★ 火焰发光光晕: 与光源同步维护, 每个火源一个发光精灵
+        const glowTex = makeGlowTexture();
+        while (fireGlows.length < srcs.length) {
+            const mat = new THREE.SpriteMaterial({
+                map: glowTex, color: 0xff8833, transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false, depthTest: false
+            });
+            const sp = new THREE.Sprite(mat);
+            sp.renderOrder = 1;
+            scene.add(sp);
+            fireGlows.push(sp);
+        }
+        while (fireGlows.length > srcs.length) {
+            const sp = fireGlows.pop();
+            scene.remove(sp);
+            sp.material.dispose();
+        }
+        srcs.forEach((f, i) => {
+            const l = fireLights[i];
+            const fh = f.flameHeight || 2.0;
+            // 光源位于火焰中部
+            l.position.set(f.x * dx + dx/2, f.z * dz + dz/2 + fh * 0.5, f.y * dx + dx/2);
+            // ★ 记录基准强度, 供逐帧火焰闪烁调制 (animate 中乘 flicker)
+            l.baseIntensity = Math.min(3.0, 0.6 + (f.heatRelease || 0) / 400.0);
+            l.intensity = l.baseIntensity;
+            // ★ 光晕精灵: 位于火焰中下部, 大小随火势
+            const sp = fireGlows[i];
+            sp.position.set(f.x * dx + dx/2, f.z * dz + dz/2 + fh * 0.35, f.y * dx + dx/2);
+            const gs = fh * 2.4;
+            sp.scale.set(gs, gs, 1);
+            sp.material.opacity = 0.9;
+        });
+        // 烟雾遮挡: 火源上方烟浓度 → 火焰透明度衰减
+        if (fireParticles && srcs.length > 0 && d.smoke && d.depth) {
+            const f = srcs[0];
+            let s = 0, cnt = 0;
+            const zTop = Math.min(d.depth - 1, f.z + Math.ceil((f.flameHeight || 2) / dz));
+            for (let zi = f.z; zi <= zTop; zi++) {
+                s += (d.smoke[zi]?.[f.x]?.[f.y]) || 0;
+                cnt++;
+            }
+            fireParticles.material.uniforms.uSmokeDensity.value = cnt > 0 ? Math.min(1, (s / cnt) * 4) : 0;
+        }
+    }
+
+    // ================================================================
+    // 4c. 火焰粒子系统 (GPU Shader)
+    // ================================================================
+    const fireVertexShader = `
+        attribute float aLife;      // 0~1 剩余生命比例
+        attribute float aSeed;      // 随机种子 0~1
+        attribute float aSize;      // 基础大小
+        uniform float uTime;
+        uniform float uFlameHeight;
+        uniform vec3  uFirePos;
+        varying float vLife;
+        varying float vSeed;
+
+        // 增强湍流噪声: 三层 sin 叠加, 模拟火焰摇曳翻滚 (低频摇摆+高频抖动)
+        vec3 noise3(vec3 p) {
+            vec3 n = vec3(
+                sin(p.y*3.0 + p.z*2.0 + uTime*2.5),
+                sin(p.x*3.1 + p.z*2.6 + uTime*2.1),
+                sin(p.x*2.4 + p.y*3.2 + uTime*2.8)
+            ) * 0.55;
+            n += vec3(
+                sin(p.y*6.5 + p.x*5.0 + uTime*4.2),
+                sin(p.z*6.2 + p.x*4.5 + uTime*3.8),
+                sin(p.x*5.6 + p.y*6.4 + uTime*4.6)
+            ) * 0.28;
+            n += vec3(
+                sin(p.y*12.0 + p.z*9.0 + uTime*7.0),
+                sin(p.x*11.0 + p.z*10.0 + uTime*6.2),
+                sin(p.x*10.0 + p.y*12.5 + uTime*7.5)
+            ) * 0.14;
+            return n;
+        }
+
+        void main() {
+            vLife = aLife;
+            vSeed = aSeed;
+            float t = 1.0 - aLife;  // 0=出生(底), 1=死亡(顶)
+            // 垂直上升: 底部加速上升, 顶部略微减速, 形成火舌
+            float h = t * uFlameHeight * (1.0 - 0.10 * t);
+            vec3 pos = position;
+            pos.y += h;
+            // 湍流偏移: 底部小顶部大 (火舌摇曳), 时间+种子驱动
+            vec3 turb = noise3(pos * 1.8 + aSeed * 13.0) * (0.15 + t * 0.85);
+            pos.xz += turb.xz * 0.45;
+            // 火焰形状: 根部窄, 中上部略微膨胀, 尖端收拢 (真实火舌轮廓)
+            float shape = 0.35 + t * 0.62;
+            pos.xz *= shape;
+            float tip = smoothstep(0.60, 1.0, t);
+            pos.xz *= 1.0 - tip * 0.38;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            // 粒子尺寸: 底部小, 中部最大, 顶部收小; 双频强闪烁
+            float sizeCurve = 0.65 + 0.75 * sin(t * 3.14159);
+            float flicker = 0.82 + 0.16 * sin(uTime * 13.0 + aSeed * 60.0)
+                                  + 0.10 * sin(uTime * 27.0 + aSeed * 31.0);
+            gl_PointSize = aSize * sizeCurve * flicker * (200.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `;
+
+    const fireFragmentShader = `
+        uniform float uSmokeDensity;
+        varying float vLife;
+        varying float vSeed;
+        void main() {
+            vec2 uv = gl_PointCoord - 0.5;
+            float dist = length(uv);
+            if (dist > 0.5) discard;
+            // 径向软边: 中心亮, 边缘渐隐 (火焰发光感)
+            float radial = smoothstep(0.5, 0.08, dist);
+            // t = 1-生命: 0=底部出生, 1=顶部
+            float t = 1.0 - vLife;
+            // ★ 真实火焰颜色: 底部白黄高温内核 → 橙黄 → 橙红 → 顶部暗红熄灭
+            vec3 core   = vec3(1.00, 0.96, 0.80);
+            vec3 orange = vec3(1.00, 0.60, 0.18);
+            vec3 red    = vec3(0.92, 0.30, 0.06);
+            vec3 dark   = vec3(0.48, 0.11, 0.02);
+            vec3 col;
+            if (t < 0.28) {
+                col = mix(core, orange, t / 0.28);
+            } else if (t < 0.62) {
+                col = mix(orange, red, (t - 0.28) / 0.34);
+            } else {
+                col = mix(red, dark, (t - 0.62) / 0.38);
+            }
+            // 顶部渐隐: 火舌尖端熄灭, 而非变成灰烟 (烟雾交给体积渲染)
+            float topFade = 1.0 - smoothstep(0.68, 1.0, t);
+            // 边缘比中心暗, 增强火苗立体感
+            float edgeDark = mix(1.0, 0.5, smoothstep(0.0, 0.4, dist));
+            // 中心内核更亮 (高温发光)
+            col *= (1.0 + smoothstep(0.16, 0.0, dist) * 0.35);
+            float alpha = radial * topFade * edgeDark;
+            // 浓烟遮挡火焰
+            alpha *= (1.0 - uSmokeDensity * 0.85);
+            gl_FragColor = vec4(col, alpha);
+        }
+    `;
+
+    class FireParticleSystem {
+        constructor(scene, maxParticles = 5000) {
+            this.scene = scene;
+            this.maxParticles = maxParticles;
+            this.activeCount = 0;
+            this.sources = [];  // [{pos, flameHeight, emissionRate, accumulator}]
+            this.emissionScale = 1.0;
+
+            const geo = new THREE.BufferGeometry();
+            this.positions = new Float32Array(maxParticles * 3);
+            this.life = new Float32Array(maxParticles);
+            this.seed = new Float32Array(maxParticles);
+            this.size = new Float32Array(maxParticles);
+            geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+            geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+            geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
+            geo.setDrawRange(0, 0);
+
+            this.material = new THREE.ShaderMaterial({
+                vertexShader: fireVertexShader,
+                fragmentShader: fireFragmentShader,
+                uniforms: {
+                    uTime: { value: 0 },
+                    uFlameHeight: { value: 2.0 },
+                    uFirePos: { value: new THREE.Vector3(0,0,0) },
+                    uSmokeDensity: { value: 0.0 }
+                },
+                transparent: true,
+                blending: THREE.NormalBlending,
+                depthWrite: false,
+                depthTest: true
+            });
+
+            this.points = new THREE.Points(geo, this.material);
+            this.points.frustumCulled = false;
+            scene.add(this.points);
+        }
+
+        updateSources(fireSources, dx, dz, fireData, stride) {
+            const st = stride || 1;
+            const srcs = (fireSources || []).map(f => ({
+                pos: new THREE.Vector3(f.x * dx + dx/2, f.z * dz + dz/2, f.y * dx + dx/2),
+                flameHeight: f.flameHeight || 2.0,
+                emissionRate: Math.min(60, 10 + (f.heatRelease || 0) * 0.1),
+                accumulator: 0
+            }));
+            // ★ 次级火源: 温度场高温体素(火焰蔓延区域)也发射粒子
+            if (fireData && fireData.length) {
+                const depth = fireData.length;
+                const w = (fireData[0] || []).length;
+                const h = (fireData[0]?.[0]) ? fireData[0][0].length : 0;
+                if (w && h) {
+                    const thresh = T_AMB + 0.25 * (T_MAX_HOT - T_AMB);
+                    const baseFh = (fireSources && fireSources[0] && fireSources[0].flameHeight) || 2.0;
+                    const spread = [];
+                    for (let z = 0; z < depth; z++) {
+                        const layer = fireData[z];
+                        if (!layer) continue;
+                        for (let x = 0; x < w; x++) {
+                            const row = layer[x];
+                            if (!row) continue;
+                            for (let y = 0; y < h; y++) {
+                                const t = row[y] || 0;
+                                if (t > thresh) {
+                                    spread.push({ t: t, x: x, y: y, z: z });
+                                }
+                            }
+                        }
+                    }
+                    // 按温度取前 50 个, 控制粒子总量
+                    spread.sort((a, b) => b.t - a.t);
+                    const cap = Math.min(spread.length, 50);
+                    for (let i = 0; i < cap; i++) {
+                        const s = spread[i];
+                        srcs.push({
+                            pos: new THREE.Vector3(s.x * dx * st + dx * st / 2, s.z * dz + dz / 2, s.y * dx * st + dx * st / 2),
+                            flameHeight: baseFh * 0.6,
+                            emissionRate: Math.min(15, 5 + (s.t - T_AMB) * 0.008),
+                            accumulator: 0
+                        });
+                    }
+                }
+            }
+            this.sources = srcs;
+        }
+
+        emit(dt) {
+            const scale = this.emissionScale;
+            for (const src of this.sources) {
+                src.accumulator += src.emissionRate * scale * dt;
+                const toEmit = Math.floor(src.accumulator);
+                src.accumulator -= toEmit;
+                for (let i = 0; i < toEmit; i++) {
+                    if (this.activeCount >= this.maxParticles) return;
+                    const idx = this.activeCount++;
+                    // 在火源底部小圆盘内随机分布 (绝对世界坐标)
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = Math.random() * 0.3;
+                    this.positions[idx*3]   = src.pos.x + Math.cos(angle) * r;
+                    this.positions[idx*3+1] = src.pos.y + Math.random() * 0.1;
+                    this.positions[idx*3+2] = src.pos.z + Math.sin(angle) * r;
+                    this.life[idx] = 1.0;
+                    this.seed[idx] = Math.random();
+                    this.size[idx] = 12 + Math.random() * 8;
+                }
+            }
+        }
+
+        update(dt, time, camera) {
+            // LOD: 相机远离时降低发射率
+            let scale = 1.0;
+            if (camera && this.sources.length > 0) {
+                let dist = Infinity;
+                for (const src of this.sources) dist = Math.min(dist, src.pos.distanceTo(camera.position));
+                if (dist > 25) scale = 0.3;
+            }
+            if (this.activeCount >= this.maxParticles * 0.9) scale *= 0.5;
+            this.emissionScale = scale;
+
+            this.emit(dt);
+            // 生命衰减
+            const decay = dt * 1.2;  // 粒子寿命 ~0.83s
+            for (let i = 0; i < this.activeCount; i++) {
+                this.life[i] -= decay;
+            }
+            // 死亡粒子压缩到末尾
+            let writeIdx = 0;
+            for (let i = 0; i < this.activeCount; i++) {
+                if (this.life[i] > 0) {
+                    if (writeIdx !== i) {
+                        this.positions[writeIdx*3]   = this.positions[i*3];
+                        this.positions[writeIdx*3+1] = this.positions[i*3+1];
+                        this.positions[writeIdx*3+2] = this.positions[i*3+2];
+                        this.life[writeIdx] = this.life[i];
+                        this.seed[writeIdx] = this.seed[i];
+                        this.size[writeIdx] = this.size[i];
+                    }
+                    writeIdx++;
+                }
+            }
+            this.activeCount = writeIdx;
+            this.points.geometry.setDrawRange(0, this.activeCount);
+            this.points.geometry.attributes.position.needsUpdate = true;
+            this.points.geometry.attributes.aLife.needsUpdate = true;
+            this.points.geometry.attributes.aSeed.needsUpdate = true;
+            this.points.geometry.attributes.aSize.needsUpdate = true;
+
+            // 更新 uniform (取第一个火源, 多火源时可扩展为实例化)
+            if (this.sources.length > 0) {
+                this.material.uniforms.uFirePos.value.copy(this.sources[0].pos);
+                this.material.uniforms.uFlameHeight.value = this.sources[0].flameHeight;
+            }
+            this.material.uniforms.uTime.value = time;
+        }
+
+        dispose() {
+            this.scene.remove(this.points);
+            this.points.geometry.dispose();
+            this.material.dispose();
+        }
+    }
+
+    // ================================================================
+    // 4d. 烟雾粒子系统 (GPU Shader)
+    // ================================================================
+    const smokeVertexShader = `
+        attribute float aLife;
+        attribute float aSeed;
+        attribute float aSize;
+        attribute vec3  aVelocity;
+        uniform float uTime;
+        varying float vLife;
+        varying float vSeed;
+        varying float vDensity;
+
+        vec3 noise3(vec3 p) {
+            return vec3(
+                sin(p.y*1.5 + p.z + uTime*0.5),
+                sin(p.x*1.5 + p.z*1.2 + uTime*0.4),
+                sin(p.x*1.2 + p.y*1.5 + uTime*0.6)
+            ) * 0.5;
+        }
+
+        void main() {
+            vLife = aLife;
+            vSeed = aSeed;
+            float t = 1.0 - aLife;
+            vec3 pos = position + aVelocity * t * 3.0;
+            // 烟雾湍流 (比火焰慢、幅度大)
+            vec3 turb = noise3(pos * 0.8 + aSeed * 5.0) * t * 1.5;
+            pos += turb;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            float grow = 1.0 + t * 2.0;  // 粒子越老越大
+            gl_PointSize = aSize * grow * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+            vDensity = aLife;
+        }
+    `;
+
+    const smokeFragmentShader = `
+        varying float vLife;
+        varying float vSeed;
+        varying float vDensity;
+        void main() {
+            vec2 uv = gl_PointCoord - 0.5;
+            float dist = length(uv);
+            if (dist > 0.5) discard;
+            // 软边高斯
+            float alpha = smoothstep(0.5, 0.0, dist);
+            alpha *= 0.6 * vDensity;  // 烟雾半透明
+            // 颜色: 淡灰 → 深灰 (基于生命和随机)
+            float gray = 0.35 + 0.25 * vSeed + (1.0 - vDensity) * 0.2;
+            vec3 col = vec3(gray);
+            gl_FragColor = vec4(col, alpha);
+        }
+    `;
+
+    class SmokeParticleSystem {
+        constructor(scene, maxParticles = 6000) {
+            this.scene = scene;
+            this.maxParticles = maxParticles;
+            this.activeCount = 0;
+            this.emissionCells = [];  // [{pos, vel, density, acc}]
+            this.emissionScale = 1.0;
+
+            const geo = new THREE.BufferGeometry();
+            this.positions = new Float32Array(maxParticles * 3);
+            this.velocities = new Float32Array(maxParticles * 3);
+            this.life = new Float32Array(maxParticles);
+            this.seed = new Float32Array(maxParticles);
+            this.size = new Float32Array(maxParticles);
+            geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+            geo.setAttribute('aVelocity', new THREE.BufferAttribute(this.velocities, 3));
+            geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+            geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
+            geo.setDrawRange(0, 0);
+
+            this.material = new THREE.ShaderMaterial({
+                vertexShader: smokeVertexShader,
+                fragmentShader: smokeFragmentShader,
+                uniforms: {
+                    uTime: { value: 0 }
+                },
+                transparent: true,
+                blending: THREE.NormalBlending,
+                depthWrite: false,
+                depthTest: false
+            });
+
+            this.points = new THREE.Points(geo, this.material);
+            this.points.frustumCulled = false;
+            scene.add(this.points);
+        }
+
+        // 从后端浓度场收集发射单元: 浓度 > 0.05 的体素, 速度=垂直上升+温度梯度水平分量
+        updateFromField(smokeData, fireData, dx, dz, depth, stride) {
+            this.emissionCells = [];
+            if (!smokeData || !fireData || !depth) return;
+            const st = stride || 1;
+            const w = (smokeData[0] || []).length;
+            const h = (smokeData[0]?.[0]) ? smokeData[0][0].length : 0;
+            if (!w || !h) return;
+
+            const cells = [];
+            for (let z = 0; z < depth; z++) {
+                const layer = smokeData[z];
+                if (!layer) continue;
+                for (let x = 0; x < w; x++) {
+                    const row = layer[x];
+                    if (!row) continue;
+                    for (let y = 0; y < h; y++) {
+                        const c = row[y] || 0;
+                        if (c <= 0.05) continue;
+                        // 温度梯度水平分量 (驱动水平飘散)
+                        const xm = Math.max(0, x - 1), xp = Math.min(w - 1, x + 1);
+                        const ym = Math.max(0, y - 1), yp = Math.min(h - 1, y + 1);
+                        const gx = ((fireData[z]?.[xp]?.[y] || 0) - (fireData[z]?.[xm]?.[y] || 0)) * 0.002;
+                        const gz = ((fireData[z]?.[x]?.[yp] || 0) - (fireData[z]?.[x]?.[ym] || 0)) * 0.002;
+                        const pos = new THREE.Vector3(x * dx * st + dx * st / 2, z * dz + dz / 2, y * dx * st + dx * st / 2);
+                        cells.push({
+                            pos: pos,
+                            vel: new THREE.Vector3(gx, 1.0, gz),
+                            density: c,
+                            acc: 0,
+                            x: x, y: y, z: z
+                        });
+                    }
+                }
+            }
+            // ★ 空间分层采样: 按浓度降序, 每 ~2m 网格桶只取一个发射单元,
+            //   让烟云均匀覆盖整个建筑, 而不是扫描序前 500 个全挤在一个角落
+            cells.sort((a, b) => b.density - a.density);
+            const bucket = Math.max(2, Math.floor(Math.max(w, h) / 10));
+            const bucketSet = new Set();
+            const chosen = [];
+            for (const c of cells) {
+                const k = Math.floor(c.x / bucket) + ',' + Math.floor(c.y / bucket);
+                if (bucketSet.has(k)) continue;
+                bucketSet.add(k);
+                chosen.push(c);
+                if (chosen.length >= 500) break;
+            }
+            if (chosen.length < 500 && chosen.length < cells.length) {
+                for (const c of cells) {
+                    if (chosen.includes(c)) continue;
+                    chosen.push(c);
+                    if (chosen.length >= 500) break;
+                }
+            }
+            this.emissionCells = chosen;
+        }
+
+        emit(dt) {
+            const scale = this.emissionScale;
+            for (const cell of this.emissionCells) {
+                const rate = Math.min(8, 1 + cell.density * 12) * scale;
+                cell.acc += rate * dt;
+                const n = Math.floor(cell.acc);
+                cell.acc -= n;
+                for (let i = 0; i < n; i++) {
+                    if (this.activeCount >= this.maxParticles) return;
+                    const idx = this.activeCount++;
+                    this.positions[idx*3]   = cell.pos.x + (Math.random() - 0.5) * dx;
+                    this.positions[idx*3+1] = cell.pos.y + (Math.random() - 0.5) * dz;
+                    this.positions[idx*3+2] = cell.pos.z + (Math.random() - 0.5) * dx;
+                    this.velocities[idx*3]   = cell.vel.x + (Math.random() - 0.5) * 0.2;
+                    this.velocities[idx*3+1] = cell.vel.y * (0.8 + Math.random() * 0.4);
+                    this.velocities[idx*3+2] = cell.vel.z + (Math.random() - 0.5) * 0.2;
+                    this.life[idx] = 1.0;
+                    this.seed[idx] = Math.random();
+                    this.size[idx] = 40 + Math.random() * 25;
+                }
+            }
+        }
+
+        update(dt, time, camera) {
+            // LOD: 相机远离时降低发射率
+            let scale = 1.0;
+            if (camera && this.emissionCells.length > 0) {
+                const dist = this.emissionCells[0].pos.distanceTo(camera.position);
+                if (dist > 25) scale = 0.3;
+            }
+            if (this.activeCount >= this.maxParticles * 0.9) scale *= 0.5;
+            this.emissionScale = scale;
+
+            this.emit(dt);
+            const decay = dt / 3.0;  // 烟雾粒子寿命 ~3s
+            for (let i = 0; i < this.activeCount; i++) {
+                this.life[i] -= decay;
+            }
+            let writeIdx = 0;
+            for (let i = 0; i < this.activeCount; i++) {
+                if (this.life[i] > 0) {
+                    if (writeIdx !== i) {
+                        this.positions[writeIdx*3]   = this.positions[i*3];
+                        this.positions[writeIdx*3+1] = this.positions[i*3+1];
+                        this.positions[writeIdx*3+2] = this.positions[i*3+2];
+                        this.velocities[writeIdx*3]   = this.velocities[i*3];
+                        this.velocities[writeIdx*3+1] = this.velocities[i*3+1];
+                        this.velocities[writeIdx*3+2] = this.velocities[i*3+2];
+                        this.life[writeIdx] = this.life[i];
+                        this.seed[writeIdx] = this.seed[i];
+                        this.size[writeIdx] = this.size[i];
+                    }
+                    writeIdx++;
+                }
+            }
+            this.activeCount = writeIdx;
+            this.points.geometry.setDrawRange(0, this.activeCount);
+            this.points.geometry.attributes.position.needsUpdate = true;
+            this.points.geometry.attributes.aVelocity.needsUpdate = true;
+            this.points.geometry.attributes.aLife.needsUpdate = true;
+            this.points.geometry.attributes.aSeed.needsUpdate = true;
+            this.points.geometry.attributes.aSize.needsUpdate = true;
+            this.material.uniforms.uTime.value = time;
+        }
+
+        dispose() {
+            this.scene.remove(this.points);
+            this.points.geometry.dispose();
+            this.material.dispose();
+        }
+    }
+
+    // ================================================================
+    // 4e. 体积烟雾渲染 (3D Texture + Ray Marching)
+    // ================================================================
+    const volumeVertexShader = `
+        out vec3 vWorldPos;
+        void main() {
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+    `;
+
+    const volumeFragmentShader = `
+        precision highp float;
+        uniform highp sampler2D uSmokeTex;
+        uniform highp sampler2D uTempTex;
+        uniform float uLayerCount;    // 深度层数 dd
+        uniform float uLayerHeight;   // 每层高度方向体素数 dh
+        uniform vec3 uBoxHalf;        // 建筑半尺寸 (米)
+        uniform vec3 uBoxCenter;      // 建筑中心世界坐标
+        uniform vec3 uCameraPos;
+        uniform vec3 uLightDir;
+        uniform vec3 uLightColor;
+        uniform vec3 uAmbientColor;
+        uniform float uAbsorption;
+        uniform float uScattering;
+        uniform float uStepSize;
+        uniform int uMaxSteps;
+        uniform float uDensityThreshold;
+        uniform float uTime;
+
+        in vec3 vWorldPos;
+        out vec4 outFragColor;
+
+        vec2 rayBoxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
+            vec3 invR = 1.0 / rd;
+            vec3 t0 = (bmin - ro) * invR;
+            vec3 t1 = (bmax - ro) * invR;
+            vec3 tmin = min(t0, t1);
+            vec3 tmax = max(t0, t1);
+            float tN = max(max(tmin.x, tmin.y), tmin.z);
+            float tF = min(min(tmax.x, tmax.y), tmax.z);
+            return vec2(tN, tF);
+        }
+
+        float hgPhase(float cosT, float g) {
+            float g2 = g * g;
+            return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
+        }
+
+        // 3D采样: uvw=(X归一化, 水平深度y归一化, 垂直楼层z归一化) → 2D图集
+        // 数据布局: i = z_idx*(dh*dw) + y_idx*dw + x_idx, atlasW=dw, atlasH=dh*dd
+        // v = (z_idx*dh + y_idx)/(dh*dd) = (uvw.z*dd + uvw.y)/dd
+        float sampleField(sampler2D tex, vec3 uvw) {
+            vec2 auv = vec2(uvw.x, (uvw.z * uLayerCount + uvw.y) / uLayerCount);
+            return texture(tex, auv).r;
+        }
+
+        // ★ 3D Value Noise: 用于烟雾湍流扰动, 产生翻滚/脉动效果
+        float hash31(vec3 p) {
+            p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+            p += dot(p, p.yxz + 19.19);
+            return fract((p.x + p.y) * p.z);
+        }
+        float vnoise(vec3 p) {
+            vec3 i = floor(p);
+            vec3 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);  // smoothstep
+            float n000 = hash31(i);
+            float n100 = hash31(i + vec3(1,0,0));
+            float n010 = hash31(i + vec3(0,1,0));
+            float n110 = hash31(i + vec3(1,1,0));
+            float n001 = hash31(i + vec3(0,0,1));
+            float n101 = hash31(i + vec3(1,0,1));
+            float n011 = hash31(i + vec3(0,1,1));
+            float n111 = hash31(i + vec3(1,1,1));
+            return mix(
+                mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+                mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+                f.z
+            );
+        }
+        float fbm(vec3 p) {
+            float v = 0.0;
+            float a = 0.5;
+            for (int i = 0; i < 4; i++) {
+                v += a * vnoise(p);
+                p *= 2.0;
+                a *= 0.5;
+            }
+            return v;
+        }
+
+        void main() {
+            vec3 ro = vWorldPos - uBoxCenter;
+            // ★ 光线方向: 从远面朝相机方向步进 (BackSide 远面 → 穿过体积 → 相机)
+            vec3 rd = normalize(uCameraPos - vWorldPos);
+
+            vec2 tHit = rayBoxIntersect(ro, rd, -uBoxHalf, uBoxHalf);
+            if (tHit.x > tHit.y) discard;
+
+            float tStart = max(tHit.x, 0.0);
+            float tEnd = tHit.y;
+
+            vec3 accumColor = vec3(0.0);
+            float accumAlpha = 0.0;
+
+            for (int i = 0; i < 256; i++) {
+                if (i >= uMaxSteps) break;
+                float t = tStart + float(i) * uStepSize;
+                if (t > tEnd) break;
+
+                vec3 sp = ro + rd * t;
+                vec3 p = sp / uBoxHalf;
+                // 建筑坐标 → 3D场坐标: uvw=(X, 深度, 高度)
+                vec3 uvw = vec3(p.x, p.z, p.y) * 0.5 + 0.5;
+
+                // ★ 湍流扰动: 用FBM噪声扰动采样坐标, 产生烟雾翻滚/脉动效果
+                // 扰动强度随高度增加(上部烟雾更弥散), 随时间脉动
+                float heightFactor = smoothstep(0.0, 1.0, uvw.z);  // 越高扰动越大
+                float pulse = 0.7 + 0.3 * sin(uTime * 1.5 + uvw.y * 6.28);  // 脉动
+                vec3 noiseCoord = uvw * vec3(8.0, 8.0, 6.0) + vec3(0.0, 0.0, uTime * 0.3);
+                float turb = fbm(noiseCoord) - 0.5;  // [-0.5, 0.5]
+                vec3 uvwDistorted = uvw + turb * 0.04 * (0.5 + heightFactor) * pulse;
+                uvwDistorted = clamp(uvwDistorted, 0.0, 1.0);
+
+                float density = sampleField(uSmokeTex, uvwDistorted);
+                // ★ 噪声调制密度: 让烟雾有浓淡不均的湍流纹理
+                float densityNoise = fbm(uvw * vec3(12.0, 12.0, 8.0) + vec3(uTime * 0.2));
+                density *= (0.6 + 0.4 * densityNoise);
+                if (density < uDensityThreshold) continue;
+
+                float temp = 293.15 + sampleField(uTempTex, uvw) * 880.0;
+                float excessT = max(0.0, temp - 293.15);
+
+                // === 深灰色体积烟雾 (低密度浅灰, 高密度深黑, 参考FDS Smokeview) ===
+                // 颜色渐变: 极淡(0.45) → 淡灰(0.25) → 深灰(0.10) → 近黑(0.03)
+                vec3 smokeColor = mix(vec3(0.42, 0.41, 0.43), vec3(0.03, 0.03, 0.04), smoothstep(0.0, 0.6, density));
+                // 高温烟雾带橙红色(被火焰照亮/自身高温)
+                float heatGlow = smoothstep(350.0, 700.0, excessT);
+                smokeColor = mix(smokeColor, vec3(0.55, 0.25, 0.08), heatGlow * 0.6);
+
+                // === 光照: 主方向光散射 (Henyey-Greenstein) ===
+                float lightTrans = exp(-density * uAbsorption * 0.7);
+                float cosT = dot(rd, uLightDir);
+                float phase = hgPhase(cosT, 0.55);
+                // 各向同性项(背光柔和)
+                float phaseIso = 0.05 + 0.1 * density;
+
+                vec3 scatterL = uLightColor * lightTrans * (phase * uScattering + phaseIso);
+
+                // === 多层散射近似: 内部烟雾被周围高温照亮, 增加体积光感 ===
+                // 用当前密度+温度做自发光增强, 模拟多次散射造成的"内亮外暗"
+                float multiScatter = density * (1.0 - lightTrans) * 0.8;
+                vec3 ambientL = uAmbientColor * (0.2 + multiScatter) * uScattering;
+
+                // === 火焰发光 (高温区强烈自发光, 照亮周围烟雾, 探出窗户的火焰更亮) ===
+                float flameGlow = smoothstep(350.0, 800.0, excessT);
+                float flameCore = smoothstep(600.0, 1000.0, excessT);
+                // 火焰颜色: 外焰橙红, 内焰黄白
+                vec3 flameColor = mix(vec3(1.0, 0.45, 0.1), vec3(1.0, 0.85, 0.3), flameCore);
+                vec3 emissive = flameColor * flameGlow * (0.5 + density * 0.6 + flameCore * 0.8);
+                // 火焰对周围烟雾的照亮(距离衰减近似)
+                float fireLight = flameGlow * (1.0 - density * 0.2) * 0.7;
+
+                vec3 totalLight = scatterL + ambientL + emissive + vec3(1.0, 0.4, 0.1) * fireLight;
+                vec3 color = smokeColor * totalLight + emissive * (0.6 + flameCore * 0.4);  // 火焰发光叠加
+
+                // === Beer-Lambert 累积 ===
+                // ★ 浓烟羽流增强: 中低层(z<0.75)烟雾大幅增强不透明度, 让从窗户冒出的浓烟柱状更明显
+                float plumeBoost = 1.0;
+                if (uvw.z < 0.75 && density > 0.03) {
+                    // 离建筑边缘越近(羽流区), 增强越多; 浓度越高增强越多
+                    float edgeDist = min(min(uvw.x, 1.0-uvw.x), min(uvw.y, 1.0-uvw.y));
+                    float edgeFactor = smoothstep(0.0, 0.3, edgeDist);  // 边缘0, 中心1
+                    plumeBoost = 1.0 + 1.2 * (1.0 - uvw.z / 0.75) * (0.5 + 0.5 * density) * (1.0 - edgeFactor * 0.5);
+                }
+                float absorp = density * uAbsorption * uStepSize * plumeBoost;
+                float alpha = 1.0 - exp(-absorp);
+
+                accumColor += (1.0 - accumAlpha) * color * alpha;
+                accumAlpha += (1.0 - accumAlpha) * alpha;
+
+                if (accumAlpha > 0.97) break;
+            }
+
+            if (accumAlpha < 0.01) discard;
+            outFragColor = vec4(accumColor, accumAlpha);
+        }
+    `;
+
+    class VolumeSmoke {
+        constructor(scene) {
+            this.scene = scene;
+            this.mesh = null;
+            this.smokeTex = null;
+            this.tempTex = null;
+            this.material = null;
+            this.dims = { w: 0, h: 0, d: 0 };
+        }
+
+        // 从 /smokeVolume 数据创建或更新纹理
+        update(data, dx, dz) {
+            if (!data || !data.smoke || !data.temp) return;
+            const stride = data.stride || 1;
+            const dw = Math.ceil(data.width / stride);
+            const dh = Math.ceil(data.height / stride);
+            const dd = Math.ceil(data.depth / stride);
+            const need = dw * dh * dd;
+            if (data.smoke.length < need || data.temp.length < need) return;
+            // ★ 2D 图集: 每高度层一行 (dw x dh*dd), 后端扁平化顺序可直接复用
+            const atlasW = dw, atlasH = dh * dd;
+            const smokeArr = new Uint8Array(atlasW * atlasH * 4);
+            const tempArr = new Uint8Array(atlasW * atlasH * 4);
+            for (let i = 0; i < need; i++) {
+                const s = Math.max(0, Math.min(1, data.smoke[i] || 0));
+                smokeArr[i * 4] = Math.round(s * 255);
+                const t = Math.max(293.15, data.temp[i] || 0);
+                tempArr[i * 4] = Math.round(Math.min(1, (t - 293.15) / 880.0) * 255);
+            }
+
+            // 首次创建或尺寸变化
+            if (!this.mesh || this.dims.w !== dw || this.dims.h !== dh || this.dims.d !== dd) {
+                this.dispose();
+                this.dims = { w: dw, h: dh, d: dd };
+
+                this.smokeTex = new THREE.DataTexture(smokeArr, atlasW, atlasH, THREE.RGBAFormat);
+                this.smokeTex.type = THREE.UnsignedByteType;
+                this.smokeTex.minFilter = THREE.LinearFilter;
+                this.smokeTex.magFilter = THREE.LinearFilter;
+                this.smokeTex.wrapS = THREE.ClampToEdgeWrapping;
+                this.smokeTex.wrapT = THREE.ClampToEdgeWrapping;
+                this.smokeTex.needsUpdate = true;
+
+                this.tempTex = new THREE.DataTexture(tempArr, atlasW, atlasH, THREE.RGBAFormat);
+                this.tempTex.type = THREE.UnsignedByteType;
+                this.tempTex.minFilter = THREE.LinearFilter;
+                this.tempTex.magFilter = THREE.LinearFilter;
+                this.tempTex.wrapS = THREE.ClampToEdgeWrapping;
+                this.tempTex.wrapT = THREE.ClampToEdgeWrapping;
+                this.tempTex.needsUpdate = true;
+
+                // 容器: 尺寸 = 原始网格尺寸 × 体素尺寸 (data.width是原始尺寸, 非降采样)
+                const boxW = data.width * dx;
+                const boxH = data.depth * dz;
+                const boxD = data.height * dx;
+                const geo = new THREE.BoxGeometry(boxW, boxH, boxD);
+                geo.translate(boxW / 2, boxH / 2, boxD / 2);
+
+                this.material = new THREE.ShaderMaterial({
+                    vertexShader: volumeVertexShader,
+                    fragmentShader: volumeFragmentShader,
+                    glslVersion: THREE.GLSL3,
+                    uniforms: {
+                        uSmokeTex: { value: this.smokeTex },
+                        uTempTex: { value: this.tempTex },
+                        uLayerCount: { value: dd },
+                        uLayerHeight: { value: dh },
+                        uBoxHalf: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
+                        uBoxCenter: { value: new THREE.Vector3(boxW / 2, boxH / 2, boxD / 2) },
+                        uCameraPos: { value: new THREE.Vector3() },
+                        uLightDir: { value: new THREE.Vector3(0.3, 0.9, 0.2).normalize() },
+                        uLightColor: { value: new THREE.Color(0.95, 0.90, 0.80) },
+                        uAmbientColor: { value: new THREE.Color(0.15, 0.15, 0.18) },
+                        uAbsorption: { value: 22.0 },
+                        uScattering: { value: 4.5 },
+                        uStepSize: { value: 0.15 },
+                        uMaxSteps: { value: 320 },
+                        uDensityThreshold: { value: 0.003 },
+                        uTime: { value: 0 }
+                    },
+                    transparent: true,
+                    side: THREE.BackSide,
+                    depthWrite: false,
+                    depthTest: false,  // 禁用深度测试, 确保烟雾不被建筑阻挡
+                    blending: THREE.NormalBlending
+                });
+
+                this.mesh = new THREE.Mesh(geo, this.material);
+                this.mesh.frustumCulled = false;
+                this.mesh.renderOrder = 2;
+                this.scene.add(this.mesh);
+            } else {
+                // 更新纹理数据
+                this.smokeTex.image.data.set(smokeArr);
+                this.smokeTex.needsUpdate = true;
+                this.tempTex.image.data.set(tempArr);
+                this.tempTex.needsUpdate = true;
+            }
+        }
+
+        updateFrame(camera, time) {
+            if (!this.material) return;
+            this.material.uniforms.uCameraPos.value.copy(camera.position);
+            this.material.uniforms.uTime.value = time;
+        }
+
+        setVisible(v) {
+            if (this.mesh) this.mesh.visible = v;
+        }
+
+        dispose() {
+            if (this.mesh) {
+                this.scene.remove(this.mesh);
+                this.mesh.geometry.dispose();
+                this.material.dispose();
+                if (this.smokeTex) this.smokeTex.dispose();
+                if (this.tempTex) this.tempTex.dispose();
+                this.mesh = null;
+            }
+        }
+    }
+
+    // ================================================================
+    // 5. 3D 场景初始化
+    // ================================================================
+    function init3D() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xffffff);
+        window.__scene = scene;
+
+        camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+        camera.position.set(50, 30, 50);
+
+        renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+        renderer.shadowMap.enabled = true;
+        window.__renderer = renderer;
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        // 对准建筑中心 (38m x 17m x 16m, 原点对齐后)
+        controls.target.set(19, 8, 8);
+        controls.update();
+
+        // ★ 创建 PointerLockControls（用于漫游模式），共用同一个 camera
+        pointerLockControls = new PointerLockControls(camera, renderer.domElement);
+        pointerLockControls.addEventListener('lock', () => {
+            console.log('[Walk] 漫游模式已激活');
+        });
+        pointerLockControls.addEventListener('unlock', () => {
+            console.log('[Walk] 漫游模式已退出');
+            if (walkMode) exitWalkMode();
+        });
+        scene.add(pointerLockControls.getObject());
+        // 初始位置放在建筑外高空（与 OrbitControls 起点一致）
+        pointerLockControls.getObject().position.set(50, 30, 50);
+
+        // ★ 初始化小地图
+        minimapCanvas = document.getElementById('minimap');
+        minimapCtx = minimapCanvas.getContext('2d');
+
+        const ambLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(20, 50, 20);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        loadingTip.style.display = 'none';
+        addLog('3D 引擎加载完毕，按住左键可旋转视角', 'info');
+        fireParticles = new FireParticleSystem(scene, 3000);
+        // ★ 体积烟雾接管: 粒子烟雾停用
+        // smokeParticles = new SmokeParticleSystem(scene, 6000);
+        volumeSmoke = new VolumeSmoke(scene);
+        animate();
+
+        // ★ 默认简单房间模式不加载BIM模型, 仅在切换到building模式时加载
+        // loadBuildingModel();
+    }
+
+    function loadBuildingModel() {
+        // 先加载 semantic_info.json 获取坐标对齐参数
+        fetch('./ifc_output/semantic_info.json')
+            .then(r => r.ok ? r.json() : Promise.reject('no semantic'))
+            .then(info => {
+                if (info.voxel_size !== undefined) {
+                    voxelSize = info.voxel_size;
+                    dx = voxelSize;
+                    dz = voxelSize;
+                }
+                if (info.origin_offset) {
+                    originOffset = info.origin_offset;
+                    addLog(`坐标对齐: origin_offset=[${originOffset.map(v => v.toFixed(2)).join(', ')}], voxel_size=${voxelSize}`, 'info');
+                }
+                loadGLTF();
+            })
+            .catch(() => {
+                addLog('[WARN] 未找到 semantic_info.json，使用默认坐标（可能与体素网格不对齐）', 'error');
+                loadGLTF();
+            });
+    }
+
+    function loadGLTF() {
+        // glTF 由 IfcConvert -y 转为 Y-up (Three.js 约定：Y 垂直)。
+        // origin_offset 来自 IFC 世界坐标 (Z-up)：[ox, oy, oz]，oz 为垂直方向。
+        // 因此平移量需做 Y-Z 互换：Three.js (x, y垂直, z水平) = (-ox, -oz, -oy)
+        const loader = new GLTFLoader();
+        const glbPath = './ifc_output/building.glb';
+
+        loader.load(glbPath, function (gltf) {
+            buildingGroup = gltf.scene;
+            // 将 glTF 模型平移，使其原点与体素网格原点对齐（Y-Z 互换后）
+            buildingGroup.position.set(-originOffset[0], -originOffset[2], -originOffset[1]);
+            // ★ 建筑外壳半透明: 外部视角也能看到内部烟雾, 无需剖面模式
+            buildingGroup.traverse((obj) => {
+                if (obj.isMesh && obj.material) {
+                    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+                    mats.forEach((m) => {
+                        m.transparent = true;
+                        m.opacity = 0.3;
+                        m.depthWrite = false;
+                        m.side = THREE.DoubleSide;
+                    });
+                    obj.renderOrder = 1;  // 建筑在体积烟雾之前渲染
+                }
+            });
+            scene.add(buildingGroup);
+            addLog('✅ 真实建筑模型 (glTF) 加载成功！(半透明, 可透视内部烟雾)', 'info');
+        }, undefined, function (error) {
+            addLog('[WARN] 未找到真实建筑模型，回退到方块渲染模式', 'error');
+            console.error(error);
+        });
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // ★ GPU 粒子系统更新（火焰/烟雾）
+        const dt = clock.getDelta();
+        const ptime = clock.getElapsedTime();
+        if (fireParticles) fireParticles.update(dt, ptime, camera);
+        // if (smokeParticles) smokeParticles.update(dt, ptime, camera);
+        if (volumeSmoke) volumeSmoke.updateFrame(camera, ptime);
+
+        // ★ 动态火光: 火焰光源逐帧闪烁脉动, 照亮周围墙壁/地面 (真实火焰光照)
+        for (let i = 0; i < fireLights.length; i++) {
+            const l = fireLights[i];
+            if (l.baseIntensity === undefined) continue;
+            const flick = 0.78 + 0.22 * Math.sin(ptime * 12.7 + i * 1.7)
+                                * Math.sin(ptime * 8.3 + i * 2.3)
+                                + 0.08 * Math.sin(ptime * 31.0 + i * 5.1);
+            l.intensity = Math.max(0.1, l.baseIntensity * flick);
+        }
+        // ★ 火焰光晕逐帧脉动: 让光晕随火焰一起呼吸闪烁
+        for (let i = 0; i < fireGlows.length; i++) {
+            const sp = fireGlows[i];
+            const gf = 0.72 + 0.28 * Math.sin(ptime * 9.5 + i * 2.1)
+                             * Math.sin(ptime * 6.1 + i * 4.3);
+            sp.material.opacity = Math.max(0.28, Math.min(1.0, 0.9 * gf));
+        }
+
+        // ★ 飞行模式：根据按键状态更新相机位置（无重力，可悬停）
+        if (walkMode && pointerLockControls && pointerLockControls.isLocked) {
+            const time = performance.now();
+            const delta = Math.min((time - prevTime) / 1000, 0.1);  // 限制单帧最大时间，避免卡顿瞬移
+            prevTime = time;
+
+            // 阻尼衰减（X/Z 平面阻尼让松开按键后逐渐停下；Y 轴也阻尼实现悬停）
+            const damping = 6.0;
+            moveVelocity.x -= moveVelocity.x * damping * delta;
+            moveVelocity.z -= moveVelocity.z * damping * delta;
+            moveVelocity.y -= moveVelocity.y * damping * delta;
+            // ★ 无重力：不再有 moveVelocity.y -= 9.8 * delta
+
+            // 按键加速
+            const speed = 15.0;  // m/s
+            moveDirection.z = Number(moveKeys.w) - Number(moveKeys.s);
+            moveDirection.x = Number(moveKeys.d) - Number(moveKeys.a);
+            moveDirection.normalize();
+
+            if (moveKeys.w || moveKeys.s) moveVelocity.z -= moveDirection.z * speed * delta * 10;
+            if (moveKeys.a || moveKeys.d) moveVelocity.x -= moveDirection.x * speed * delta * 10;
+            // ★ 飞行模式：Space 上升，Shift 下降（持续按住持续作用，非单次跳跃）
+            if (moveKeys.space) moveVelocity.y += speed * delta * 10;
+            if (moveKeys.shift) moveVelocity.y -= speed * delta * 10;
+
+            // 应用移动
+            pointerLockControls.moveRight(-moveVelocity.x * delta);
+            pointerLockControls.moveForward(-moveVelocity.z * delta);
+            pointerLockControls.getObject().position.y += moveVelocity.y * delta;
+
+            // 限制最低高度（防止穿地）
+            const minY = 0.5;
+            if (pointerLockControls.getObject().position.y < minY) {
+                pointerLockControls.getObject().position.y = minY;
+                moveVelocity.y = 0;
+            }
+            // 限制最高高度（防止飞出场景）
+            const maxY = 80.0;
+            if (pointerLockControls.getObject().position.y > maxY) {
+                pointerLockControls.getObject().position.y = maxY;
+                moveVelocity.y = 0;
+            }
+            // ★ 悬停：当没有 Space/Shift 按下时，Y 轴速度被阻尼快速归零，实现空中悬停
+        }
+
+        // OrbitControls 仅在非漫游模式时更新
+        if (!walkMode) controls.update();
+
+        // ★ 动态背景色: 简单房间白色, BIM深色
+        const curMode = document.getElementById('modelSelect').value;
+        const targetBg = (curMode === 'simple') ? 0xffffff : 0x111122;
+        renderer.setClearColor(targetBg, 1);
+        scene.background = null;
+
+        renderer.render(scene, camera);
+
+        // ★ 监控第一人称小窗渲染（共用 scene，第二路小分辨率渲染；
+        //   renderFpvFrame 内部临时切到 FPV 相机后已还原为主相机）
+        if (fpvMode && fpvTarget) renderFpvFrame(dt, ptime, targetBg);
+
+        // ★ 更新小地图（每帧绘制，与主画面同步）
+        drawMinimap();
+        drawThumbStrip();
+        // 若放大弹窗打开，同步重绘
+        if (window.__isZoomOpen && window.__isZoomOpen()) {
+            window.__drawZoomMap && window.__drawZoomMap();
+        }
+    }
+
+    // ================================================================
+    // ★ 漫游模式：进入/退出
+    // ================================================================
+    function enterWalkMode() {
+        if (!pointerLockControls) return;
+        // 从 OrbitControls 当前相机位置作为飞行起点
+        pointerLockControls.getObject().position.copy(camera.position);
+        pointerLockControls.getObject().rotation.copy(camera.rotation);
+        // 锁定鼠标
+        pointerLockControls.lock();
+        walkMode = true;
+        controls.enabled = false;  // 禁用 OrbitControls
+        document.getElementById('crosshair').style.display = 'block';
+        document.getElementById('walk-hint').innerHTML =
+            '飞行中: <span class="key">WASD</span> 移动 <span class="key">Space</span> 上升 <span class="key">Shift</span> 下降 <span class="key">V/ESC</span> 退出';
+        document.body.classList.add('walk-active');
+        prevTime = performance.now();
+        // 重置速度，避免从跳跃残留速度
+        moveVelocity.set(0, 0, 0);
+        // ★ 飞行模式：墙体半透明，便于在建筑内部穿墙观察
+        setBuildingOpacity(0.25);
+        addLog('🎮 进入飞行模式（无重力，可悬停，墙体半透明）', 'info');
+    }
+
+    function exitWalkMode() {
+        if (!pointerLockControls) return;
+        if (pointerLockControls.isLocked) pointerLockControls.unlock();
+        walkMode = false;
+        controls.enabled = true;  // 恢复 OrbitControls
+        // 把飞行结束时的位置同步回 OrbitControls 的相机
+        camera.position.copy(pointerLockControls.getObject().position);
+        controls.target.copy(camera.position).add(
+            new THREE.Vector3(0, 0, -10).applyQuaternion(camera.quaternion)
+        );
+        controls.update();
+        document.getElementById('crosshair').style.display = 'none';
+        document.getElementById('walk-hint').innerHTML =
+            '按 <span class="key">V</span> 进入飞行模式';
+        document.body.classList.remove('walk-active');
+        // ★ 退出飞行模式：恢复墙体不透明
+        setBuildingOpacity(1.0);
+        addLog('🎮 退出飞行模式', 'info');
+    }
+
+    // ★ 调整 glTF 建筑模型所有 mesh 的透明度（飞行模式穿墙观察用）
+    function setBuildingOpacity(opacity) {
+        if (!buildingGroup) return;
+        buildingGroup.traverse(obj => {
+            if (obj.isMesh && obj.material) {
+                const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+                for (const m of mats) {
+                    if (opacity < 1.0) {
+                        // 记录原始值，退出时恢复
+                        if (m.userData._origTransparent === undefined) {
+                            m.userData._origTransparent = m.transparent;
+                            m.userData._origOpacity = m.opacity;
+                        }
+                        m.transparent = true;
+                        m.opacity = opacity;
+                    } else {
+                        if (m.userData._origTransparent !== undefined) {
+                            m.transparent = m.userData._origTransparent;
+                            m.opacity = m.userData._origOpacity;
+                        } else {
+                            m.transparent = false;
+                            m.opacity = 1.0;
+                        }
+                    }
+                    m.needsUpdate = true;
+                }
+            }
+        });
+    }
+
+    // ================================================================
+    // ★ 监控第一人称视角：随机锁定一名逃生人员, 小窗实时渲染其逃生视野
+    // ================================================================
+    const fpvLook = new THREE.Vector3(0, 0, -1);
+    const fpvDesired = new THREE.Vector3();
+    const fpvLookAt = new THREE.Vector3();
+    let fpvLastMove = 0;   // 上次位移量(米), 用于摆动频率
+    let fpvBobPhase = 0;
+
+    function initFpvRenderer() {
+        const c = document.getElementById('fpv-canvas');
+        fpvRenderer = new THREE.WebGLRenderer({ canvas: c, antialias: false });
+        fpvRenderer.setPixelRatio(1);
+        fpvRenderer.setSize(c.width, c.height, false);
+        fpvCamera = new THREE.PerspectiveCamera(70, c.width / c.height, 0.1, 500);
+    }
+
+    function pickRandomPerson(persons) {
+        if (!persons || persons.length === 0) return null;
+        const p = persons[Math.floor(Math.random() * persons.length)];
+        return { gx: p[0], gy: p[1], gz: p[2] };
+    }
+
+    function setFpvStatus(t) {
+        const el = document.getElementById('fpv-osd-status');
+        if (el) el.textContent = t;
+    }
+
+    // 锁定/换目标时初始化朝向: 优先看向最近的出口(体现"逃生"方向), 否则随机
+    function fpvResetDir() {
+        const wx = fpvTarget.gx * dx + dx / 2, wz = fpvTarget.gy * dx + dx / 2;
+        fpvLastX = wx; fpvLastZ = wz;
+        let best = null, bd = 1e9;
+        const exits = (currentData && currentData.exits) || [];
+        for (const e of exits) {
+            const ex = e.x * dx + dx / 2, ez = e.y * dx + dx / 2;
+            const dd = (ex - wx) * (ex - wx) + (ez - wz) * (ez - wz);
+            if (dd < bd) { bd = dd; best = { ex, ez }; }
+        }
+        if (best && bd > 1e-6) {
+            fpvLook.set(best.ex - wx, 0, best.ez - wz).normalize();
+        } else {
+            const a = Math.random() * Math.PI * 2;
+            fpvLook.set(Math.sin(a), 0, Math.cos(a));
+        }
+    }
+
+    // 每帧状态数据到达后: 随机锁定 / 跟随最近人员 / 跟丢则换人
+    function fpvOnData(d) {
+        if (!fpvMode) return;
+        const persons = d.persons || [];
+        if (persons.length === 0) {
+            setFpvStatus(fpvTarget ? '目标已脱离(逃出/遇难)' : '无可见人员');
+            return;
+        }
+        if (!fpvTarget) {
+            fpvTarget = pickRandomPerson(persons);
+            fpvCamId = 1 + Math.floor(Math.random() * 8);
+            fpvResetDir();
+            setFpvStatus('已锁定 随机人员');
+            return;
+        }
+        let best = null, bd = 1e9;
+        for (const p of persons) {
+            const dd = (p[0] - fpvTarget.gx) * (p[0] - fpvTarget.gx)
+                      + (p[1] - fpvTarget.gy) * (p[1] - fpvTarget.gy)
+                      + (p[2] - fpvTarget.gz) * (p[2] - fpvTarget.gz);
+            if (dd < bd) { bd = dd; best = p; }
+        }
+        if (bd > 9) {
+            // 原目标跟丢(逃出/死亡) → 随机换一名人员继续跟踪
+            fpvTarget = pickRandomPerson(persons);
+            fpvCamId++;
+            fpvResetDir();
+            setFpvStatus('目标切换 → 随机人员');
+        } else {
+            fpvTarget = { gx: best[0], gy: best[1], gz: best[2] };
+        }
+    }
+
+    // 每帧更新第一人称相机并渲染小窗(共用同一 scene, 烟雾uniform按FPV相机重算)
+    function renderFpvFrame(dt, ptime, targetBg) {
+        if (!fpvRenderer || !fpvCamera || !fpvTarget) return;
+        const wx = fpvTarget.gx * dx + dx / 2;
+        const wz = fpvTarget.gy * dx + dx / 2;
+        const wy = fpvTarget.gz * dz + dz / 2 + 1.5;   // 眼高约1.5m
+        const dxw = wx - fpvLastX, dzw = wz - fpvLastZ;
+        const moved = Math.hypot(dxw, dzw);
+        if (moved > 1e-4) {
+            fpvDesired.set(dxw, 0, dzw).normalize();
+            fpvLook.lerp(fpvDesired, 0.3).normalize();
+            fpvBobPhase += dt * (6 + moved * 40);
+            fpvLastMove = moved;
+        }
+        fpvLastX = wx; fpvLastZ = wz;
+        // 行走摆动(监控手持感)
+        const bobAmp = moved > 1e-4 ? 0.045 : 0.008;
+        fpvCamera.position.set(wx, wy + Math.sin(fpvBobPhase) * bobAmp, wz);
+        fpvLookAt.copy(fpvCamera.position).add(fpvLook);
+        fpvCamera.lookAt(fpvLookAt);
+        if (volumeSmoke) volumeSmoke.updateFrame(fpvCamera, ptime);  // 烟雾视差按FPV眼睛计算
+        fpvRenderer.setClearColor(targetBg, 1);
+        fpvRenderer.render(scene, fpvCamera);
+        if (volumeSmoke) volumeSmoke.updateFrame(camera, ptime);      // 还原主相机
+        // OSD 信息
+        const elT = document.getElementById('fpv-osd-time');
+        if (elT && currentData) elT.textContent = 'T+' + (currentData.currentTime || 0).toFixed(1) + 's';
+        const elC = document.getElementById('fpv-osd-cam');
+        if (elC) elC.textContent = 'CAM-' + String(1 + (fpvCamId % 99)).padStart(2, '0');
+        const elG = document.getElementById('fpv-osd-target');
+        if (elG) elG.textContent = 'TRACK(' + fpvTarget.gx + ',' + fpvTarget.gy + ')';
+    }
+
+    function toggleFpvMode() {
+        fpvMode = !fpvMode;
+        const btn = document.getElementById('fpvBtn');
+        const hud = document.getElementById('fpv-hud');
+        if (fpvMode) {
+            if (!fpvRenderer) initFpvRenderer();
+            hud.style.display = 'block';
+            btn.classList.add('active');
+            btn.textContent = '📹 监控中';
+            fpvTarget = pickRandomPerson(currentData && currentData.persons);
+            if (fpvTarget) {
+                fpvCamId = 1 + Math.floor(Math.random() * 8);
+                fpvResetDir();
+                setFpvStatus('已锁定 随机人员');
+            } else {
+                setFpvStatus('等待人员数据');
+            }
+            addLog('📹 监控视角开启：随机锁定一名逃生人员，第一人称跟踪其逃生视野', 'info');
+        } else {
+            hud.style.display = 'none';
+            btn.classList.remove('active');
+            btn.textContent = '📹 监控视角';
+            fpvTarget = null;
+            addLog('📹 监控视角关闭', 'info');
+        }
+    }
+
+    // ================================================================
+    // ★ 小地图：2D 俯视图绘制（增强版：信息维度+视觉+交互+楼层检测）
+    // ================================================================
+
+    // ★ 楼层范围：detectedFloors 存「用于平面图绘制的 displayZ」（行走层切片），
+    //   floorRanges[i] 存对应层的 slabZ/displayZ/bottom/top（人/火/出口归属用范围而非单点）
+    let floorRanges = [];   // [{slabZ, displayZ, bottom, top}]
+    let __lastDetectStep = -1;  // 上次执行 detectFloors 时的 step，用于按步重检
+
+    function rangeOfDisplayZ(z) {
+        for (const r of floorRanges) if (r.displayZ === z) return r;
+        return null;
+    }
+    function fallbackRangeForZ(z, depth) {
+        // 未检测到楼层时：把整栋按 3m 估一层构造一个假范围让内容能显示
+        const step = Math.max(1, Math.round(3.0 / voxelSize));
+        const idx = Math.max(0, Math.min(Math.floor(z / step), Math.ceil(depth / step) - 1));
+        return { slabZ: -1, displayZ: z, bottom: idx * step, top: Math.min(depth, (idx + 1) * step) };
+    }
+
+    // 楼层检测：每层范围 [slabZ, nextSlabZ) 覆盖整层（含楼板），人员/火/烟在该 z 范围内即可显示
+    function detectFloors() {
+        if (!currentData) return;
+        const st = currentData.stride || 1;
+        const depth = currentData.depth || 1;
+        const gw = (currentData.obstacle && currentData.obstacle[0]) ? currentData.obstacle[0].length : Math.ceil((currentData.width || 1) / st);
+        const gh = (currentData.obstacle && currentData.obstacle[0] && currentData.obstacle[0][0]) ? currentData.obstacle[0][0].length : Math.ceil((currentData.height || 1) / st);
+        const slabs = [];
+        floorRanges = [];
+        detectedFloors = [];
+
+        // 1) 收集楼板 slabZ
+        if (currentData.floorSlabs && currentData.floorSlabs.length > 0) {
+            for (const z of currentData.floorSlabs) slabs.push(Number(z) | 0);
+        } else {
+            for (let z = 0; z < depth; z++) {
+                let wallCount = 0;
+                if (currentData.obstacle && currentData.obstacle[z]) {
+                    for (let x = 0; x < gw; x++)
+                        for (let y = 0; y < gh; y++)
+                            if (currentData.obstacle[z][x]?.[y] === 1) wallCount++;
+                }
+                if (wallCount > gw * gh * 0.4) slabs.push(z);
+            }
+        }
+        slabs.sort((a, b) => a - b);
+
+        // 1.5) 兜底：floorSlabs 为空时按层高（默认 3m）等分
+        if (slabs.length === 0) {
+            const layerHeight = Math.max(1, Math.round(3.0 / voxelSize));
+            const n = Math.max(1, Math.ceil(depth / layerHeight));
+            for (let i = 0; i < n; i++) slabs.push(i * layerHeight);
+        }
+
+        // 2) 每层范围 [slabZ, nextSlabZ)，整层覆盖；displayZ 从 slabZ+1 开始找（跳过楼板层本身，
+        //   楼板 obstacle 覆盖率过高不适合画墙体轮廓）
+        for (let i = 0; i < slabs.length; i++) {
+            const slabZ = slabs[i];
+            const nextSlab = (i + 1 < slabs.length) ? slabs[i + 1] : depth;
+            const bottom = slabZ;
+            const top = Math.max(bottom + 1, Math.min(depth, nextSlab));
+            if (bottom >= depth) break;
+            const floorThickness = top - bottom;
+            // 楼层只有 1 格厚的退化情况：直接用 bottom 作为 displayZ
+            if (floorThickness <= 1) {
+                floorRanges.push({ slabZ, displayZ: bottom, bottom, top });
+                detectedFloors.push(bottom);
+                continue;
+            }
+            // displayZ：从 slabZ+1 到 top-1 之间找第一个有 obstacle 或 inside 的 z
+            let displayZ = Math.min(depth - 1, bottom + 1);
+            let found = false;
+            for (let z = bottom + 1; z < top; z++) {
+                let has = false;
+                if (currentData.obstacle && currentData.obstacle[z]) {
+                    scan: for (let x = 0; x < gw; x++) for (let y = 0; y < gh; y++) {
+                        if (currentData.obstacle[z][x]?.[y] === 1) { has = true; break scan; }
+                    }
+                }
+                if (!has && currentData.inside && currentData.inside[z]) {
+                    scan2: for (let x = 0; x < gw; x++) for (let y = 0; y < gh; y++) {
+                        if (currentData.inside[z][x]?.[y] === 1) { has = true; break scan2; }
+                    }
+                }
+                if (has) { displayZ = z; found = true; break; }
+            }
+            if (!found) displayZ = Math.min(depth - 1, bottom + Math.max(1, Math.floor((top - bottom) / 2)));
+            floorRanges.push({ slabZ, displayZ, bottom, top });
+            detectedFloors.push(displayZ);
+        }
+
+        // 3) 兜底：仍然没检测到楼层，整栋虚拟一层
+        if (detectedFloors.length === 0) {
+            const r = { slabZ: -1, displayZ: Math.max(0, Math.floor(depth / 2)), bottom: 0, top: depth };
+            floorRanges.push(r); detectedFloors.push(r.displayZ);
+        }
+
+        // 4) 初始或修正 currentFloorZ —— 优先选「有人员/火源的楼层」，让用户立刻看到内容
+        const prevFloor = currentFloorZ;
+        const preferredFloor = pickDefaultFloor();
+        if (prevFloor < 0) {
+            currentFloorZ = preferredFloor;
+        } else if (detectedFloors.indexOf(prevFloor) < 0) {
+            // 之前的 currentFloorZ 不在新楼层列表里，吸附到最近楼层
+            let best = detectedFloors[0], bd = Math.abs(prevFloor - best);
+            for (const fz of detectedFloors) { const d = Math.abs(prevFloor - fz); if (d < bd) { bd = d; best = fz; } }
+            currentFloorZ = best;
+        }
+        updateFloorLabel();
+        buildThumbStrip();
+    }
+
+    // ★ 选默认显示楼层：优先「同时有人员和火源的楼层」，否则「有人员的楼层」，
+    //   否则「有火源的楼层」，否则「有 obstacle 的中间层」，否则最底层。
+    //   这样保证平面图一打开就能看到人/火，不会出现空白楼层。
+    function pickDefaultFloor() {
+        if (!currentData || floorRanges.length === 0) return detectedFloors[0] || 0;
+        const persons = currentData.persons || [];
+        const fireSources = currentData.fireSources || [];
+        const inRange = (z, r) => z >= r.bottom && z < r.top;
+        let bestWithBoth = -1, bestWithPerson = -1, bestWithFire = -1;
+        for (const r of floorRanges) {
+            const hasPerson = persons.some(p => inRange(p[2], r));
+            const hasFire = fireSources.some(f => inRange(f.z, r));
+            if (hasPerson && hasFire) { bestWithBoth = r.displayZ; break; }
+            if (hasPerson && bestWithPerson < 0) bestWithPerson = r.displayZ;
+            if (hasFire && bestWithFire < 0) bestWithFire = r.displayZ;
+        }
+        if (bestWithBoth >= 0) return bestWithBoth;
+        if (bestWithPerson >= 0) return bestWithPerson;
+        if (bestWithFire >= 0) return bestWithFire;
+        return detectedFloors[0];
+    }
+
+    // 体素坐标 → 小地图屏幕坐标（含缩放/平移）
+    function voxelToScreen(vx, vy, cellW, cellH) {
+        return {
+            x: (vx * cellW + cellW / 2) * minimapView.scale + minimapView.offsetX,
+            y: (vy * cellH + cellH / 2) * minimapView.scale + minimapView.offsetY
+        };
+    }
+    // 屏幕坐标 → 体素坐标
+    function screenToVoxel(sx, sy, cellW, cellH) {
+        const vx = Math.floor((sx - minimapView.offsetX) / (cellW * minimapView.scale));
+        const vy = Math.floor((sy - minimapView.offsetY) / (cellH * minimapView.scale));
+        return { x: vx, y: vy };
+    }
+
+    // 放大弹窗的屏幕坐标 → 体素坐标转换（使用 zoomView 独立坐标系）
+    function zoomScreenToVoxel(sx, sy) {
+        const w = currentData?.width || 1, h = currentData?.height || 1;
+        const cell = Math.min(zoomCanvas.width / w, zoomCanvas.height / h);
+        const vx = Math.floor((sx - zoomView.offsetX) / (cell * zoomView.scale));
+        const vy = Math.floor((sy - zoomView.offsetY) / (cell * zoomView.scale));
+        return { x: vx, y: vy };
+    }
+
+    // 绘制单层（供主图与缩略图复用）
+    // ctx/canvas: 目标；zSlice: 楼层显示切片；
+    // opts: {walls, smoke, fire, exits, sources, persons, dim, range?}
+    //   opts.range = {bottom, top}：该层在 z 方向的范围（人员/出口/火源按范围归属，不写则退化为 abs(z-zSlice)<=1）
+    function drawFloorLayer(ctx, canvas, zSlice, opts) {
+        if (!currentData) return;
+        const W = canvas.width, H = canvas.height;
+        const st = currentData.stride || 1;
+        const fullW = currentData.width || 1, fullH = currentData.height || 1;
+        // 网格数组按 stride 降采样: 循环用数组维度, 绘制位置 ×stride
+        const w = (currentData.obstacle && currentData.obstacle[0]) ? currentData.obstacle[0].length : Math.ceil(fullW / st);
+        const h = (currentData.obstacle && currentData.obstacle[0] && currentData.obstacle[0][0]) ? currentData.obstacle[0][0].length : Math.ceil(fullH / st);
+        // ★ 正方形 cell：保持建筑真实比例，避免被 canvas 比例拉伸变形（按全分辨率计算）
+        const cell = Math.min(W / fullW, H / fullH);
+        const cellW = cell, cellH = cell;
+        const dim = opts.dim || 1.0;  // 暗化系数（叠加模式用）
+        const range = opts.range || null;
+        const tint = opts.tint || null;  // 楼层叠加的染色（HSL 字符串）
+
+        function zInThisFloor(z) {
+            if (range) return z >= range.bottom && z < range.top;
+            return Math.abs(z - zSlice) <= 1;
+        }
+
+        // 墙体（带浅色描边）——始终只用 displayZ 单层绘制（楼板 slabZ 本身 obstacle 覆盖率过高，
+        //   OR 聚合会把整层变成实心黑块）。range 仅用于动态对象归属，不用于墙体聚合。
+        if (opts.walls && currentData.obstacle && currentData.obstacle[zSlice]) {
+            for (let x = 0; x < w; x++) {
+                for (let y = 0; y < h; y++) {
+                    if (currentData.obstacle[zSlice][x]?.[y] === 1) {
+                        ctx.fillStyle = tint ? tint : `rgba(58,58,74,${dim})`;
+                        ctx.fillRect(x * cellW * st, y * cellH * st, cellW * st + 0.5, cellH * st + 0.5);
+                    }
+                }
+            }
+            // 浅色描边（仅边缘墙体）
+            if (cellW > 3) {
+                ctx.strokeStyle = tint ? tint : `rgba(120,130,160,${0.5 * dim})`;
+                ctx.lineWidth = 0.5;
+                const wallAt = (x, y) => {
+                    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+                    return currentData.obstacle?.[zSlice]?.[x]?.[y] === 1;
+                };
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        if (wallAt(x, y)) {
+                            if (!wallAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW * st, y * cellH * st); ctx.lineTo((x + 1) * cellW * st, y * cellH * st); ctx.stroke(); }
+                            if (!wallAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW * st, (y + 1) * cellH * st); ctx.lineTo((x + 1) * cellW * st, (y + 1) * cellH * st); ctx.stroke(); }
+                            if (!wallAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW * st, y * cellH * st); ctx.lineTo(x * cellW * st, (y + 1) * cellH * st); ctx.stroke(); }
+                            if (!wallAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW * st, y * cellH * st); ctx.lineTo((x + 1) * cellW * st, (y + 1) * cellH * st); ctx.stroke(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 烟雾（范围聚合：取 max，使整层的烟都可见）
+        if (opts.smoke && currentData.smoke) {
+            if (range) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        let sMax = 0;
+                        for (let z = range.bottom; z < range.top; z++) {
+                            const s = currentData.smoke[z]?.[x]?.[y] || 0;
+                            if (s > sMax) sMax = s;
+                        }
+                        if (sMax > 0.1) {
+                            const alpha = Math.min(sMax * 0.85, 0.7) * dim;
+                            ctx.fillStyle = `rgba(110,135,165,${alpha})`;
+                            ctx.fillRect(x * cellW * st, y * cellH * st, cellW * st + 0.5, cellH * st + 0.5);
+                        }
+                    }
+                }
+            } else if (currentData.smoke[zSlice]) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        const s = currentData.smoke[zSlice][x]?.[y] || 0;
+                        if (s > 0.1) {
+                            const alpha = Math.min(s * 0.85, 0.7) * dim;
+                            ctx.fillStyle = `rgba(110,135,165,${alpha})`;
+                            ctx.fillRect(x * cellW * st, y * cellH * st, cellW * st + 0.5, cellH * st + 0.5);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 高温区（范围聚合：取 max 温度）
+        if (opts.fire && currentData.fire) {
+            if (range) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        let tMax = T_AMB;
+                        for (let z = range.bottom; z < range.top; z++) {
+                            const t = currentData.fire[z]?.[x]?.[y] || T_AMB;
+                            if (t > tMax) tMax = t;
+                        }
+                        if (tMax > T_AMB + 1.0) {
+                            const intensity = Math.min((tMax - T_AMB) / (1173 - T_AMB), 1.0);
+                            const r = 255, g = Math.floor(60 + 195 * (1 - intensity));
+                            ctx.fillStyle = `rgba(${r},${g},0,${0.85 * dim})`;
+                            ctx.fillRect(x * cellW * st, y * cellH * st, cellW * st + 0.5, cellH * st + 0.5);
+                        }
+                    }
+                }
+            } else if (currentData.fire[zSlice]) {
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        const t = currentData.fire[zSlice][x]?.[y] || T_AMB;
+                        if (t > T_AMB + 1.0) {
+                            const intensity = Math.min((t - T_AMB) / (1173 - T_AMB), 1.0);
+                            const r = 255, g = Math.floor(60 + 195 * (1 - intensity));
+                            ctx.fillStyle = `rgba(${r},${g},0,${0.85 * dim})`;
+                            ctx.fillRect(x * cellW * st, y * cellH * st, cellW * st + 0.5, cellH * st + 0.5);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 出口（绿色标记，★ 图标）——按该层范围归属
+        if (opts.exits && currentData.exits) {
+            for (const e of currentData.exits) {
+                if (zInThisFloor(e.z)) {
+                    const px = e.x * cellW + cellW / 2;
+                    const py = e.y * cellH + cellH / 2;
+                    const r = Math.max(3, cellW * 0.45);
+                    ctx.fillStyle = `rgba(76,175,80,${dim})`;
+                    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+                    if (cellW > 6) {
+                        ctx.fillStyle = '#fff';
+                        ctx.font = `bold ${Math.max(7, cellW*0.5)}px sans-serif`;
+                        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                        ctx.fillText('E', px, py);
+                    }
+                }
+            }
+        }
+
+        // 火源点（红色火焰图标）
+        if (opts.sources && currentData.fireSources) {
+            for (const f of currentData.fireSources) {
+                if (zInThisFloor(f.z)) {
+                    const px = f.x * cellW + cellW / 2;
+                    const py = f.y * cellH + cellH / 2;
+                    const r = Math.max(3, cellW * 0.5);
+                    ctx.fillStyle = `rgba(255,87,34,${dim})`;
+                    ctx.beginPath();
+                    ctx.moveTo(px, py - r);
+                    ctx.quadraticCurveTo(px + r, py - r/2, px + r/3, py + r/2);
+                    ctx.quadraticCurveTo(px, py + r, px - r/3, py + r/2);
+                    ctx.quadraticCurveTo(px - r, py - r/2, px, py - r);
+                    ctx.fill();
+                    ctx.strokeStyle = '#ff0'; ctx.lineWidth = 0.8; ctx.stroke();
+                }
+            }
+        }
+
+        // 人员（按范围归属）
+        if (opts.persons && currentData.persons) {
+            ctx.fillStyle = `rgba(255,255,255,${dim})`;
+            for (const p of currentData.persons) {
+                if (zInThisFloor(p[2])) {
+                    const px = p[0] * cellW + cellW / 2;
+                    const py = p[1] * cellH + cellH / 2;
+                    ctx.beginPath();
+                    ctx.arc(px, py, Math.max(2, cellW * 0.3), 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+    }
+
+    function drawMinimap() {
+        if (!minimapCtx || !currentData) return;
+        const ctx = minimapCtx;
+        const W = minimapCanvas.width, H = minimapCanvas.height;
+        const w = currentData.width || 1, h = currentData.height || 1;
+        const depth = currentData.depth || 1;
+        // ★ 正方形 cell（与 drawFloorLayer 一致），保持建筑真实比例
+        const cell = Math.min(W / w, H / h);
+        const cellW = cell, cellH = cell;
+
+        // 楼层检测（数据更新后重新检测，保证人员/火出现后能选到正确的默认楼层；
+        //   detectFloors 内部会保留用户已选的 currentFloorZ，只在无效时重选）
+        if (detectedFloors.length === 0 || __lastDetectStep !== currentData.step) {
+            __lastDetectStep = currentData.step;
+            detectFloors();
+        }
+
+        // 背景
+        ctx.fillStyle = '#05060a';
+        ctx.fillRect(0, 0, W, H);
+
+        const zSlice = (currentFloorZ >= 0 && currentFloorZ < depth) ? currentFloorZ : Math.floor(depth / 2);
+        const curRange = rangeOfDisplayZ(zSlice) || fallbackRangeForZ(zSlice, depth);
+
+        ctx.save();
+        ctx.translate(minimapView.offsetX, minimapView.offsetY);
+        ctx.scale(minimapView.scale, minimapView.scale);
+
+        // 叠加模式：显示楼层偏移差异（每层错位绘制，形成堆叠效果）
+        if (minimapOptions.overlay && detectedFloors.length > 1) {
+            const floorCount = detectedFloors.length;
+            const offsetStep = Math.max(3, Math.min(cellW, cellH) * 0.5); // 每层偏移距离（小地图）
+            for (let fi = 0; fi < floorCount; fi++) {
+                const fz = detectedFloors[fi];
+                if (fz === zSlice) continue;
+                const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, depth);
+                // 按楼层序号递增偏移，形成阶梯状堆叠
+                ctx.save();
+                const offsetX = fi * offsetStep;
+                const offsetY = fi * offsetStep * 0.5;
+                ctx.translate(offsetX, offsetY);
+                // 按楼层序号区分颜色（冷色调渐变）
+                const hue = 200 + fi * 25;
+                const lightness = 35 + fi * 8;
+                ctx.globalAlpha = 0.75;
+                drawFloorLayer(ctx, minimapCanvas, fz, {
+                    walls: true, smoke: false, fire: false, exits: false,
+                    sources: false, persons: false, dim: 0.9, range: r,
+                    tint: `hsl(${hue}, 70%, ${lightness}%)`
+                });
+                ctx.restore();
+            }
+            // 叠加层完成后，恢复透明度
+            ctx.globalAlpha = 1.0;
+        }
+
+        // 当前楼层（完整图层 + 该层 z 范围，使人员/火/出口/烟全部显示）
+        drawFloorLayer(ctx, minimapCanvas, zSlice, {
+            walls: true, smoke: true, fire: true, exits: true,
+            sources: true, persons: true, dim: 1.0, range: curRange
+        });
+
+        // 网格线
+        if (minimapOptions.grid && cellW * minimapView.scale > 4) {
+            ctx.strokeStyle = 'rgba(80,100,140,0.15)';
+            ctx.lineWidth = 0.5 / minimapView.scale;
+            const step = Math.max(1, Math.round(8 / (cellW * minimapView.scale))) ; // 自适应步长
+            for (let x = 0; x <= w; x += step) {
+                ctx.beginPath(); ctx.moveTo(x * cellW, 0); ctx.lineTo(x * cellW, h * cellH); ctx.stroke();
+            }
+            for (let y = 0; y <= h; y += step) {
+                ctx.beginPath(); ctx.moveTo(0, y * cellH); ctx.lineTo(w * cellW, y * cellH); ctx.stroke();
+            }
+        }
+
+        // 建筑外轮廓高亮（在该层范围内聚合 inside，跳过 slabZ 本身避免楼板干扰）
+        if (currentData.inside) {
+            const insideAt = (x, y) => {
+                if (x < 0 || y < 0 || x >= w || y >= h) return false;
+                const b = curRange.bottom, t = curRange.top;
+                for (let z = b + 1; z < t; z++) if (currentData.inside?.[z]?.[x]?.[y] === 1) return true;
+                return currentData.inside?.[zSlice]?.[x]?.[y] === 1;
+            };
+            ctx.strokeStyle = 'rgba(100,150,255,0.5)';
+            ctx.lineWidth = 1.5 / minimapView.scale;
+            for (let x = 0; x < w; x++) {
+                for (let y = 0; y < h; y++) {
+                    if (insideAt(x, y)) {
+                        if (!insideAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, y * cellH); ctx.stroke(); }
+                        if (!insideAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, (y + 1) * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                        if (!insideAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo(x * cellW, (y + 1) * cellH); ctx.stroke(); }
+                        if (!insideAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                    }
+                }
+            }
+        }
+
+        ctx.restore();
+
+        // 相机位置/朝向（屏幕空间，不受缩放影响）
+        drawCameraMarker(ctx, cellW, cellH, w, h, W, H);
+
+        // ★ 建筑四角坐标参考标记（与 3D 对照，验证一一对应）
+        if (currentData) {
+            const markers = [
+                { x: 0,         y: 0,         label: 'O(0,0)', color: '#ff0' }, // 体素原点（北/西）
+                { x: w - 1,     y: 0,         label: `(${w-1},0)`, color: '#0ff' },
+                { x: 0,         y: h - 1,     label: `(0,${h-1})`, color: '#f0f' },
+                { x: w - 1,     y: h - 1,     label: `(${w-1},${h-1})`, color: '#0f0' }
+            ];
+            ctx.save();
+            for (const m of markers) {
+                const px = (m.x * cell + cell / 2) * minimapView.scale + minimapView.offsetX;
+                const py = (m.y * cell + cell / 2) * minimapView.scale + minimapView.offsetY;
+                ctx.fillStyle = m.color;
+                ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+                ctx.lineWidth = 2;
+                ctx.font = 'bold 10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+                const tx = m.x > w / 2 ? px - 4 : px + 4;
+                const ty = m.y > h / 2 ? py - 4 : py + 14;
+                ctx.strokeText(m.label, tx, ty);
+                ctx.fillText(m.label, tx, ty);
+            }
+            ctx.restore();
+        }
+
+        // 悬停高亮
+        if (minimapHover) {
+            const sx = minimapHover.x * cellW * minimapView.scale + minimapView.offsetX;
+            const sy = minimapHover.y * cellH * minimapView.scale + minimapView.offsetY;
+            ctx.strokeStyle = '#ffeb3b';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(sx, sy, cellW * minimapView.scale, cellH * minimapView.scale);
+        }
+
+        // 指北针 N
+        if (minimapOptions.scale) {
+            ctx.save();
+            ctx.translate(W - 28, 22);
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#4488ff'; ctx.lineWidth = 1; ctx.stroke();
+            // N 箭头朝上
+            ctx.fillStyle = '#ff4444';
+            ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(-5, 4); ctx.lineTo(0, 0); ctx.lineTo(5, 4); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = '#bcd';
+            ctx.beginPath(); ctx.moveTo(0, 12); ctx.lineTo(-5, -4); ctx.lineTo(0, 0); ctx.lineTo(5, -4); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('N', 0, -18);
+            ctx.restore();
+        }
+
+        // 比例尺
+        if (minimapOptions.scale) {
+            const pxPerMeter = (cellW * minimapView.scale) / voxelSize;  // 每米对应像素
+            const targetMeters = 10;  // 10m 比例尺
+            let barLen = pxPerMeter * targetMeters;
+            let label = targetMeters + 'm';
+            // 若太长，缩为 5m
+            if (barLen > W * 0.4) { barLen = pxPerMeter * 5; label = '5m'; }
+            if (barLen > W * 0.4) { barLen = pxPerMeter * 2; label = '2m'; }
+            if (barLen < 20) { barLen = pxPerMeter * 20; label = '20m'; }
+            const bx = 12, by = H - 18;
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(bx - 4, by - 8, barLen + 30, 18);
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + barLen, by); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(bx, by - 3); ctx.lineTo(bx, by + 3); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(bx + barLen, by - 3); ctx.lineTo(bx + barLen, by + 3); ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+            ctx.fillText(label, bx + barLen + 4, by + 3);
+        }
+
+        // 边框
+        ctx.strokeStyle = '#4488ff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(0, 0, W, H);
+    }
+
+    // 绘制相机位置/朝向标记（必须与 drawMinimap 同用正方形 cell，保证坐标对齐）
+    function drawCameraMarker(ctx, cellW, cellH, gridW, gridH, canvasW, canvasH) {
+        let camX, camY, yaw;
+        // ★ 正方形 cell：与 drawMinimap 保持一致
+        const cell = Math.min(canvasW / gridW, canvasH / gridH);
+        if (walkMode && pointerLockControls) {
+            const camPos = pointerLockControls.getObject().position;
+            // Three.js (x, y垂直, z水平) = 体素 (x, z垂直, y水平) * voxelSize
+            camX = (camPos.x / dx) * cell;  // 体素 x → 平面图 x
+            camY = (camPos.z / dx) * cell;  // 体素 y (水平) → Three.z → 平面图 y (canvas 向下)
+            yaw = camera.rotation.y;
+        } else {
+            camX = (camera.position.x / dx) * cell;
+            camY = (camera.position.z / dx) * cell;
+            yaw = camera.rotation.y;
+        }
+        const sx = camX * minimapView.scale + minimapView.offsetX;
+        const sy = camY * minimapView.scale + minimapView.offsetY;
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(-yaw);
+        // 视锥扇形（30° 半角）
+        ctx.fillStyle = 'rgba(255,255,0,0.15)';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 30, -Math.PI/6, Math.PI/6);
+        ctx.closePath();
+        ctx.fill();
+        // 三角箭头
+        ctx.fillStyle = walkMode ? '#ffff00' : '#4488ff';
+        ctx.beginPath();
+        ctx.moveTo(9, 0); ctx.lineTo(-5, -5); ctx.lineTo(-5, 5); ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+    }
+
+    // ★ 侧边楼层缩略条
+    function buildThumbStrip() {
+        const strip = document.getElementById('floor-thumb-strip');
+        if (!strip || !currentData) return;
+        strip.innerHTML = '';
+        thumbCanvases = [];
+        if (detectedFloors.length <= 1) { strip.style.display = 'none'; return; }
+        strip.style.display = 'flex';
+        // 从底层到顶层显示（column-reverse 让底层在下方）
+        for (let i = 0; i < detectedFloors.length; i++) {
+            const fz = detectedFloors[i];
+            const wrap = document.createElement('div');
+            const lbl = document.createElement('div');
+            lbl.className = 'thumb-label'; lbl.textContent = 'F' + (i + 1);
+            const cvs = document.createElement('canvas');
+            cvs.width = 60; cvs.height = 60;
+            cvs.title = `楼层 F${i+1} (z=${fz})`;
+            cvs.dataset.floorIdx = i;
+            cvs.addEventListener('click', () => {
+                currentFloorZ = detectedFloors[i];
+                updateFloorLabel();
+                addLog(`🗺️ 跳转楼层 F${i + 1} (z=${currentFloorZ})`, 'info');
+            });
+            wrap.appendChild(lbl); wrap.appendChild(cvs);
+            strip.appendChild(wrap);
+            thumbCanvases.push({ canvas: cvs, floorZ: fz, idx: i });
+        }
+    }
+
+    function drawThumbStrip() {
+        if (!thumbCanvases.length) return;
+        const depth = (currentData && currentData.depth) || 1;
+        for (const t of thumbCanvases) {
+            const ctx = t.canvas.getContext('2d');
+            ctx.fillStyle = '#000'; ctx.fillRect(0, 0, t.canvas.width, t.canvas.height);
+            const isCurrent = detectedFloors.indexOf(currentFloorZ) === t.idx;
+            const r = rangeOfDisplayZ(t.floorZ) || fallbackRangeForZ(t.floorZ, depth);
+            drawFloorLayer(ctx, t.canvas, t.floorZ, {
+                walls: true, smoke: false, fire: false, exits: true,
+                sources: true, persons: false, dim: isCurrent ? 1.0 : 0.5, range: r
+            });
+            t.canvas.className = isCurrent ? 'active' : '';
+        }
+    }
+
+    // 点击小地图定位主视图相机
+    function focusMainView(vx, vy) {
+        if (!camera || !controls) return;
+        // 体素 → Three.js 世界坐标（建筑已平移到原点，体素(x,y) → Three.js(x, *, z) 直接乘 voxelSize）
+        const targetX = vx * dx;
+        const targetZ = vy * dx;
+        const targetY = currentFloorZ * dx + 2;  // 当前楼层上方 2m
+        if (walkMode && pointerLockControls) {
+            pointerLockControls.getObject().position.set(targetX, targetY, targetZ);
+            addLog(`🎯 飞行至 (${targetX.toFixed(1)}, ${targetY.toFixed(1)}, ${targetZ.toFixed(1)})`, 'info');
+        } else {
+            // 观察模式：OrbitControls 聚焦
+            controls.target.set(targetX, currentFloorZ * dx, targetZ);
+            camera.position.set(targetX + 15, currentFloorZ * dx + 15, targetZ + 15);
+            controls.update();
+            addLog(`🎯 主视图聚焦到体素 (${vx}, ${vy}, z=${currentFloorZ})`, 'info');
+        }
+    }
+
+    // ★ 更新楼层标签显示（F1/F2/...，从底层往上数）
+    function updateFloorLabel() {
+        const label = document.getElementById('floor-label');
+        if (!label) return;
+        if (detectedFloors.length === 0) { label.textContent = 'F1'; return; }
+        let idx = detectedFloors.indexOf(currentFloorZ);
+        if (idx < 0) idx = 0;
+        label.textContent = 'F' + (idx + 1);
+    }
+
+    // ★ 楼层切换按钮事件
+    document.getElementById('floor-up').addEventListener('click', () => {
+        if (detectedFloors.length === 0) return;
+        let idx = detectedFloors.indexOf(currentFloorZ);
+        if (idx < 0) idx = 0;
+        if (idx < detectedFloors.length - 1) {
+            currentFloorZ = detectedFloors[idx + 1];
+            updateFloorLabel();
+            addLog(`🗺️ 切换到楼层 F${idx + 2} (z=${currentFloorZ})`, 'info');
+            // 同步放大弹窗
+            if (window.__syncZoomFloor) window.__syncZoomFloor(currentFloorZ);
+        }
+    });
+    document.getElementById('floor-down').addEventListener('click', () => {
+        if (detectedFloors.length === 0) return;
+        let idx = detectedFloors.indexOf(currentFloorZ);
+        if (idx < 0) idx = 0;
+        if (idx > 0) {
+            currentFloorZ = detectedFloors[idx - 1];
+            updateFloorLabel();
+            addLog(`🗺️ 切换到楼层 F${idx} (z=${currentFloorZ})`, 'info');
+            // 同步放大弹窗
+            if (window.__syncZoomFloor) window.__syncZoomFloor(currentFloorZ);
+        }
+    });
+
+    // ★ 工具栏按钮事件
+    document.getElementById('btn-legend').addEventListener('click', (e) => {
+        const legend = document.getElementById('minimap-legend');
+        const show = legend.style.display === 'none' || !legend.style.display;
+        legend.style.display = show ? 'block' : 'none';
+        e.target.classList.toggle('active', show);
+    });
+    document.getElementById('btn-grid').addEventListener('click', (e) => {
+        minimapOptions.grid = !minimapOptions.grid;
+        e.target.classList.toggle('active', minimapOptions.grid);
+    });
+    document.getElementById('btn-overlay').addEventListener('click', (e) => {
+        minimapOptions.overlay = !minimapOptions.overlay;
+        e.target.classList.toggle('active', minimapOptions.overlay);
+    });
+    document.getElementById('btn-scale').addEventListener('click', (e) => {
+        minimapOptions.scale = !minimapOptions.scale;
+        e.target.classList.toggle('active', minimapOptions.scale);
+    });
+    document.getElementById('btn-focus').addEventListener('click', (e) => {
+        minimapOptions.focus = !minimapOptions.focus;
+        e.target.classList.toggle('active', minimapOptions.focus);
+        addLog(minimapOptions.focus ? '🎯 点击地图定位已开启' : '点击定位已关闭', 'info');
+    });
+    document.getElementById('btn-fit').addEventListener('click', () => {
+        resizePlanViewCanvas(false);
+        fitMinimapToContent();
+        addLog('🗺️ 平面图已自动适配视图', 'info');
+    });
+
+    // ★ 全屏放大弹窗逻辑
+    (function setupZoomModal() {
+        const modal = document.getElementById('zoom-modal');
+        const zoomCanvas = document.getElementById('zoom-canvas');
+        const zoomCtx = zoomCanvas ? zoomCanvas.getContext('2d') : null;
+        const zoomTitle = document.getElementById('zoom-modal-title');
+        const zoomFloorLabel = document.getElementById('zoom-floor-label');
+        const zoomTooltip = document.getElementById('zoom-tooltip');
+
+        // 缩放视图状态（独立于小地图）
+        let zoomView = { scale: 1, offsetX: 0, offsetY: 0 };
+        let zoomHover = null;
+        let zoomFloorZ = -1;
+        let zoomPanning = false, zoomLastX = 0, zoomLastY = 0;
+        let zoomMouseDownX = 0, zoomMouseDownY = 0, zoomDragged = false;
+
+        function openZoomModal() {
+            if (!currentData) { addLog('暂无数据，无法放大', 'error'); return; }
+            modal.style.display = 'flex';
+            // 同步楼层：吸附到最近的已检测楼层
+            if (detectedFloors.length > 0) {
+                let best = detectedFloors[0], bd = Math.abs(currentFloorZ - best);
+                for (const fz of detectedFloors) {
+                    const d = Math.abs(currentFloorZ - fz);
+                    if (d < bd) { bd = d; best = fz; }
+                }
+                zoomFloorZ = best;
+            } else {
+                zoomFloorZ = currentFloorZ;
+            }
+            updateZoomFloorLabel();
+            // 适配 canvas 尺寸：使用 setTimeout 确保弹窗布局完成
+            setTimeout(() => {
+                const body = modal.querySelector('.zoom-modal-body');
+                const bodyW = Math.max(300, body.clientWidth - 48);
+                const bodyH = Math.max(200, body.clientHeight - 48);
+                const w = currentData.width || 1, h = currentData.height || 1;
+                const cell = Math.max(2, Math.min(bodyW / w, bodyH / h));
+                zoomCanvas.width = Math.max(300, Math.floor(w * cell));
+                zoomCanvas.height = Math.max(200, Math.floor(h * cell));
+                zoomCanvas.style.width = '';
+                zoomCanvas.style.height = '';
+                zoomView.scale = 1.0;
+                zoomView.offsetX = 0;
+                zoomView.offsetY = 0;
+                drawZoomMap();
+            }, 100);
+        }
+
+        function closeZoomModal() {
+            modal.style.display = 'none';
+            // 释放焦点
+            document.activeElement?.blur();
+        }
+
+        function updateZoomFloorLabel() {
+            let idx = detectedFloors.indexOf(zoomFloorZ);
+            if (idx < 0 && detectedFloors.length > 0) {
+                // 吸附到最近楼层
+                let bestIdx = 0, bd = Math.abs(zoomFloorZ - detectedFloors[0]);
+                for (let i = 1; i < detectedFloors.length; i++) {
+                    const d = Math.abs(zoomFloorZ - detectedFloors[i]);
+                    if (d < bd) { bd = d; bestIdx = i; }
+                }
+                zoomFloorZ = detectedFloors[bestIdx];
+                idx = bestIdx;
+            }
+            const displayNum = (idx >= 0) ? (idx + 1) : (zoomFloorZ + 1);
+            zoomFloorLabel.textContent = 'F' + displayNum;
+        }
+
+        function fitZoomToContent() {
+            if (!zoomCtx || !currentData) return;
+            const W = zoomCanvas.width, H = zoomCanvas.height;
+            const w = currentData.width || 1, h = currentData.height || 1;
+            // cell 与 drawZoomMap 一致：建筑恰好填满画布
+            const cell = Math.min(W / w, H / h);
+            const buildingW = w * cell;
+            const buildingH = h * cell;
+            // 初始 scale = 1.0，建筑完整显示，不做额外放大
+            zoomView.scale = 1.0;
+            // 居中放置（cell 已适配画布，偏移只需居中）
+            zoomView.offsetX = (W - buildingW) / 2;
+            zoomView.offsetY = (H - buildingH) / 2;
+        }
+
+        function drawZoomMap() {
+            if (!zoomCtx || !currentData) return;
+            const ctx = zoomCtx;
+            const W = zoomCanvas.width, H = zoomCanvas.height;
+            const w = currentData.width || 1, h = currentData.height || 1;
+            const depth = currentData.depth || 1;
+            const cell = Math.min(W / w, H / h);
+            const cellW = cell, cellH = cell;
+
+            ctx.fillStyle = '#05060a';
+            ctx.fillRect(0, 0, W, H);
+
+            const zSlice = (zoomFloorZ >= 0 && zoomFloorZ < depth) ? zoomFloorZ : Math.floor(depth / 2);
+            const curRange = rangeOfDisplayZ(zSlice) || fallbackRangeForZ(zSlice, depth);
+
+            ctx.save();
+            ctx.translate(zoomView.offsetX, zoomView.offsetY);
+            ctx.scale(zoomView.scale, zoomView.scale);
+
+            // 叠加模式：显示楼层偏移差异（每层错位绘制，形成堆叠效果）
+            if (minimapOptions.overlay && detectedFloors.length > 1) {
+                const floorCount = detectedFloors.length;
+                const offsetStep = Math.max(4, Math.min(cellW, cellH) * 0.8); // 每层偏移距离（放大弹窗）
+                for (let fi = 0; fi < floorCount; fi++) {
+                    const fz = detectedFloors[fi];
+                    if (fz === zSlice) continue;
+                    const r = rangeOfDisplayZ(fz) || fallbackRangeForZ(fz, depth);
+                    ctx.save();
+                    const offsetX = fi * offsetStep;
+                    const offsetY = fi * offsetStep * 0.5;
+                    ctx.translate(offsetX, offsetY);
+                    const hue = 200 + fi * 25;
+                    const lightness = 35 + fi * 8;
+                    ctx.globalAlpha = 0.75;
+                    drawFloorLayer(ctx, zoomCanvas, fz, {
+                        walls: true, smoke: false, fire: false, exits: false,
+                        sources: false, persons: false, dim: 0.9, range: r,
+                        tint: `hsl(${hue}, 70%, ${lightness}%)`
+                    });
+                    ctx.restore();
+                }
+                ctx.globalAlpha = 1.0;
+            }
+
+            drawFloorLayer(ctx, zoomCanvas, zSlice, {
+                walls: true, smoke: true, fire: true, exits: true,
+                sources: true, persons: true, dim: 1.0, range: curRange
+            });
+
+            // 网格线
+            if (minimapOptions.grid && cellW * zoomView.scale > 4) {
+                ctx.strokeStyle = 'rgba(80,100,140,0.15)';
+                ctx.lineWidth = 0.5 / zoomView.scale;
+                const step = Math.max(1, Math.round(8 / (cellW * zoomView.scale)));
+                for (let x = 0; x <= w; x += step) {
+                    ctx.beginPath(); ctx.moveTo(x * cellW, 0); ctx.lineTo(x * cellW, h * cellH); ctx.stroke();
+                }
+                for (let y = 0; y <= h; y += step) {
+                    ctx.beginPath(); ctx.moveTo(0, y * cellH); ctx.lineTo(w * cellW, y * cellH); ctx.stroke();
+                }
+            }
+
+            // 建筑外轮廓
+            if (currentData.inside) {
+                const insideAt = (x, y) => {
+                    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+                    const b = curRange.bottom, t = curRange.top;
+                    for (let z = b + 1; z < t; z++) if (currentData.inside?.[z]?.[x]?.[y] === 1) return true;
+                    return currentData.inside?.[zSlice]?.[x]?.[y] === 1;
+                };
+                ctx.strokeStyle = 'rgba(100,150,255,0.5)';
+                ctx.lineWidth = 1.5 / zoomView.scale;
+                for (let x = 0; x < w; x++) {
+                    for (let y = 0; y < h; y++) {
+                        if (insideAt(x, y)) {
+                            if (!insideAt(x, y - 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, y * cellH); ctx.stroke(); }
+                            if (!insideAt(x, y + 1)) { ctx.beginPath(); ctx.moveTo(x * cellW, (y + 1) * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                            if (!insideAt(x - 1, y)) { ctx.beginPath(); ctx.moveTo(x * cellW, y * cellH); ctx.lineTo(x * cellW, (y + 1) * cellH); ctx.stroke(); }
+                            if (!insideAt(x + 1, y)) { ctx.beginPath(); ctx.moveTo((x + 1) * cellW, y * cellH); ctx.lineTo((x + 1) * cellW, (y + 1) * cellH); ctx.stroke(); }
+                        }
+                    }
+                }
+            }
+
+            ctx.restore();
+
+            // 相机标记
+            drawCameraMarker(ctx, cellW, cellH, w, h, W, H);
+
+            // 四角标记
+            if (currentData) {
+                const markers = [
+                    { x: 0, y: 0, label: 'O(0,0)', color: '#ff0' },
+                    { x: w - 1, y: 0, label: `(${w-1},0)`, color: '#0ff' },
+                    { x: 0, y: h - 1, label: `(0,${h-1})`, color: '#f0f' },
+                    { x: w - 1, y: h - 1, label: `(${w-1},${h-1})`, color: '#0f0' }
+                ];
+                ctx.save();
+                for (const m of markers) {
+                    const px = (m.x * cell + cell / 2) * zoomView.scale + zoomView.offsetX;
+                    const py = (m.y * cell + cell / 2) * zoomView.scale + zoomView.offsetY;
+                    ctx.fillStyle = m.color;
+                    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+                    ctx.lineWidth = 2;
+                    ctx.font = 'bold 13px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    const tx = m.x > w / 2 ? px - 8 : px + 8;
+                    const ty = m.y > h / 2 ? py - 4 : py + 16;
+                    ctx.strokeText(m.label, tx, ty);
+                    ctx.fillText(m.label, tx, ty);
+                }
+                ctx.restore();
+            }
+
+            // 悬停高亮
+            if (zoomHover) {
+                const sx = zoomHover.x * cellW * zoomView.scale + zoomView.offsetX;
+                const sy = zoomHover.y * cellH * zoomView.scale + zoomView.offsetY;
+                ctx.strokeStyle = '#ffeb3b';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(sx, sy, cellW * zoomView.scale, cellH * zoomView.scale);
+            }
+
+            // 指北针
+            if (minimapOptions.scale) {
+                ctx.save();
+                ctx.translate(W - 40, 32);
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#4488ff'; ctx.lineWidth = 1.5; ctx.stroke();
+                ctx.fillStyle = '#ff4444';
+                ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(-7, 6); ctx.lineTo(0, 0); ctx.lineTo(7, 6); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = '#bcd';
+                ctx.beginPath(); ctx.moveTo(0, 16); ctx.lineTo(-7, -6); ctx.lineTo(0, 0); ctx.lineTo(7, -6); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText('N', 0, -24);
+                ctx.restore();
+            }
+
+            // 比例尺
+            if (minimapOptions.scale) {
+                const pxPerMeter = (cellW * zoomView.scale) / voxelSize;
+                const targetMeters = 10;
+                let barLen = pxPerMeter * targetMeters;
+                let label = targetMeters + 'm';
+                if (barLen > W * 0.4) { barLen = pxPerMeter * 5; label = '5m'; }
+                if (barLen > W * 0.4) { barLen = pxPerMeter * 2; label = '2m'; }
+                if (barLen < 30) { barLen = pxPerMeter * 20; label = '20m'; }
+                const bx = 20, by = H - 24;
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(bx - 6, by - 10, barLen + 40, 22);
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + barLen, by); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(bx, by - 4); ctx.lineTo(bx, by + 4); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(bx + barLen, by - 4); ctx.lineTo(bx + barLen, by + 4); ctx.stroke();
+                ctx.fillStyle = '#fff';
+                ctx.font = '13px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+                ctx.fillText(label, bx + barLen + 6, by + 4);
+            }
+
+            // 边框
+            ctx.strokeStyle = '#4488ff';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(0, 0, W, H);
+        }
+
+        // ====== 事件绑定 ======
+
+        document.getElementById('btn-zoom').addEventListener('click', openZoomModal);
+        document.getElementById('zoom-close').addEventListener('click', closeZoomModal);
+
+        // 楼层切换
+        document.getElementById('zoom-floor-up').addEventListener('click', () => {
+            if (detectedFloors.length === 0) return;
+            let idx = detectedFloors.indexOf(zoomFloorZ);
+            if (idx < 0) {
+                // 吸附到最近楼层
+                let bestIdx = 0, bd = Math.abs(zoomFloorZ - detectedFloors[0]);
+                for (let i = 1; i < detectedFloors.length; i++) {
+                    const d = Math.abs(zoomFloorZ - detectedFloors[i]);
+                    if (d < bd) { bd = d; bestIdx = i; }
+                }
+                idx = bestIdx;
+            }
+            zoomFloorZ = detectedFloors[(idx + 1) % detectedFloors.length];
+            updateZoomFloorLabel();
+            drawZoomMap();
+        });
+        document.getElementById('zoom-floor-down').addEventListener('click', () => {
+            if (detectedFloors.length === 0) return;
+            let idx = detectedFloors.indexOf(zoomFloorZ);
+            if (idx < 0) {
+                let bestIdx = 0, bd = Math.abs(zoomFloorZ - detectedFloors[0]);
+                for (let i = 1; i < detectedFloors.length; i++) {
+                    const d = Math.abs(zoomFloorZ - detectedFloors[i]);
+                    if (d < bd) { bd = d; bestIdx = i; }
+                }
+                idx = bestIdx;
+            }
+            zoomFloorZ = detectedFloors[(idx - 1 + detectedFloors.length) % detectedFloors.length];
+            updateZoomFloorLabel();
+            drawZoomMap();
+        });
+
+        document.getElementById('zoom-fit').addEventListener('click', () => {
+            fitZoomToContent();
+            drawZoomMap();
+        });
+
+        // ESC 关闭
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && modal.style.display !== 'none') {
+                closeZoomModal();
+            }
+        });
+
+        // 滚轮缩放
+        zoomCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = zoomCanvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (zoomCanvas.width / rect.width);
+            const my = (e.clientY - rect.top) * (zoomCanvas.height / rect.height);
+            const oldScale = zoomView.scale;
+            const factor = e.deltaY < 0 ? 1.15 : 0.87;
+            let ns = oldScale * factor;
+            ns = Math.max(0.3, Math.min(5.0, ns));
+            zoomView.offsetX = mx - (mx - zoomView.offsetX) * (ns / oldScale);
+            zoomView.offsetY = my - (my - zoomView.offsetY) * (ns / oldScale);
+            zoomView.scale = ns;
+            drawZoomMap();
+        }, { passive: false });
+
+        // 左键拖动平移（支持拖动阈值判定）
+        zoomCanvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0 || e.button === 2) {
+                e.preventDefault();
+                zoomPanning = true;
+                zoomDragged = false;
+                zoomMouseDownX = e.clientX;
+                zoomMouseDownY = e.clientY;
+                zoomLastX = e.clientX;
+                zoomLastY = e.clientY;
+                zoomCanvas.classList.add('dragging');
+            }
+        });
+        document.addEventListener('mouseup', () => {
+            if (zoomPanning) {
+                zoomPanning = false;
+                zoomCanvas.classList.remove('dragging');
+            }
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (zoomPanning) {
+                // 计算从按下点移动的距离
+                const totalDx = e.clientX - zoomMouseDownX;
+                const totalDy = e.clientY - zoomMouseDownY;
+                if (!zoomDragged && Math.sqrt(totalDx * totalDx + totalDy * totalDy) > 5) {
+                    zoomDragged = true;
+                }
+                // 平移视图
+                const rect = zoomCanvas.getBoundingClientRect();
+                const dx_ = (e.clientX - zoomLastX) * (zoomCanvas.width / rect.width);
+                const dy_ = (e.clientY - zoomLastY) * (zoomCanvas.height / rect.height);
+                zoomView.offsetX += dx_;
+                zoomView.offsetY += dy_;
+                zoomLastX = e.clientX;
+                zoomLastY = e.clientY;
+                drawZoomMap();
+            }
+        });
+        zoomCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // 双击定位 3D 视图（左键双击）
+        zoomCanvas.addEventListener('dblclick', (e) => {
+            if (!currentData) return;
+            if (zoomDragged) return;  // 如果之前是拖动则不触发
+            const rect = zoomCanvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (zoomCanvas.width / rect.width);
+            const my = (e.clientY - rect.top) * (zoomCanvas.height / rect.height);
+            const w = currentData.width, h = currentData.height;
+            const v = zoomScreenToVoxel(mx, my);
+            if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
+                // 同步选中楼层
+                currentFloorZ = zoomFloorZ;
+                const mainFloorIdx = detectedFloors.indexOf(zoomFloorZ);
+                document.getElementById('floor-label').textContent = 'F' + (mainFloorIdx >= 0 ? mainFloorIdx + 1 : zoomFloorZ + 1);
+                focusMainView(v.x, v.y);
+            }
+        });
+
+        // 悬停 tooltip
+        zoomCanvas.addEventListener('mousemove', (e) => {
+            if (!currentData) return;
+            const rect = zoomCanvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (zoomCanvas.width / rect.width);
+            const my = (e.clientY - rect.top) * (zoomCanvas.height / rect.height);
+            const w = currentData.width, h = currentData.height;
+            const v = zoomScreenToVoxel(mx, my);
+            if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
+                const obs = currentData.obstacle?.[zoomFloorZ]?.[v.x]?.[v.y];
+                const temp = currentData.fire?.[zoomFloorZ]?.[v.x]?.[v.y] || T_AMB;
+                const smoke = currentData.smoke?.[zoomFloorZ]?.[v.x]?.[v.y] || 0;
+                const inside = currentData.inside?.[zoomFloorZ]?.[v.x]?.[v.y];
+                let type = '空地';
+                if (obs === 1) type = '墙体';
+                else if (inside === 1) type = '室内';
+                zoomHover = { x: v.x, y: v.y, z: zoomFloorZ, type };
+                zoomTooltip.style.display = 'block';
+                zoomTooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+                zoomTooltip.style.top = (e.clientY - rect.top + 14) + 'px';
+                zoomTooltip.innerHTML = `(${v.x},${v.y}) F${(detectedFloors.indexOf(zoomFloorZ) >= 0 ? detectedFloors.indexOf(zoomFloorZ) + 1 : zoomFloorZ + 1)} · ${type}<br>温度: ${temp.toFixed(0)}°C · 烟雾: ${smoke.toFixed(1)}`;
+            } else {
+                zoomHover = null;
+                zoomTooltip.style.display = 'none';
+            }
+            drawZoomMap();
+        });
+        zoomCanvas.addEventListener('mouseleave', () => {
+            zoomHover = null;
+            zoomTooltip.style.display = 'none';
+            drawZoomMap();
+        });
+
+        // 暴露给外部：数据更新时重绘 + 楼层同步
+        window.__drawZoomMap = drawZoomMap;
+        window.__isZoomOpen = () => modal.style.display !== 'none';
+        window.__syncZoomFloor = (z) => {
+            zoomFloorZ = z;
+            updateZoomFloorLabel();
+            if (modal.style.display !== 'none') drawZoomMap();
+        };
+    })();
+
+    // ★ 小地图交互：滚轮缩放 / 右键平移 / 点击定位 / 悬停 tooltip
+    (function setupMinimapInteraction() {
+        const cvs = () => document.getElementById('minimap');
+        let panning = false, lastX = 0, lastY = 0;
+
+        cvs().addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = cvs().getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (cvs().width / rect.width);
+            const my = (e.clientY - rect.top) * (cvs().height / rect.height);
+            const oldScale = minimapView.scale;
+            const factor = e.deltaY < 0 ? 1.15 : 0.87;
+            let ns = oldScale * factor;
+            ns = Math.max(0.5, Math.min(8, ns));
+            // 以鼠标为中心缩放
+            minimapView.offsetX = mx - (mx - minimapView.offsetX) * (ns / oldScale);
+            minimapView.offsetY = my - (my - minimapView.offsetY) * (ns / oldScale);
+            minimapView.scale = ns;
+        }, { passive: false });
+
+        cvs().addEventListener('mousedown', (e) => {
+            if (e.button === 2) {  // 右键平移
+                e.preventDefault();
+                panning = true; lastX = e.clientX; lastY = e.clientY;
+                cvs().classList.add('dragging');
+            }
+        });
+        document.addEventListener('mouseup', () => {
+            if (panning) { panning = false; cvs().classList.remove('dragging'); }
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (panning) {
+                const rect = cvs().getBoundingClientRect();
+                const dx_ = (e.clientX - lastX) * (cvs().width / rect.width);
+                const dy_ = (e.clientY - lastY) * (cvs().height / rect.height);
+                minimapView.offsetX += dx_;
+                minimapView.offsetY += dy_;
+                lastX = e.clientX; lastY = e.clientY;
+            }
+        });
+        cvs().addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // 左键点击 → 定位主视图
+        cvs().addEventListener('click', (e) => {
+            if (!minimapOptions.focus || !currentData) return;
+            const rect = cvs().getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (cvs().width / rect.width);
+            const my = (e.clientY - rect.top) * (cvs().height / rect.height);
+            const w = currentData.width, h = currentData.height;
+            const cellW = Math.min(cvs().width / w, cvs().height / h);
+            const cellH = cellW;
+            const v = screenToVoxel(mx, my, cellW, cellH);
+            if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
+                focusMainView(v.x, v.y);
+            }
+        });
+
+        // 悬停 tooltip
+        cvs().addEventListener('mousemove', (e) => {
+            if (!currentData) return;
+            const rect = cvs().getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (cvs().width / rect.width);
+            const my = (e.clientY - rect.top) * (cvs().height / rect.height);
+            const w = currentData.width, h = currentData.height;
+            const cellW = Math.min(cvs().width / w, cvs().height / h);
+            const cellH = cellW;
+            const v = screenToVoxel(mx, my, cellW, cellH);
+            const tooltip = document.getElementById('minimap-tooltip');
+            if (v.x >= 0 && v.x < w && v.y >= 0 && v.y < h) {
+                const zSlice = currentFloorZ;
+                const obs = currentData.obstacle?.[zSlice]?.[v.x]?.[v.y];
+                const temp = currentData.fire?.[zSlice]?.[v.x]?.[v.y] || T_AMB;
+                const smoke = currentData.smoke?.[zSlice]?.[v.x]?.[v.y] || 0;
+                const inside = currentData.inside?.[zSlice]?.[v.x]?.[v.y];
+                let type = '空地';
+                if (obs === 1) type = '墙体';
+                else if (inside === 1) type = '室内';
+                minimapHover = { x: v.x, y: v.y, z: zSlice, type };
+                tooltip.style.display = 'block';
+                tooltip.style.left = (e.clientX - rect.left + 12) + 'px';
+                tooltip.style.top = (e.clientY - rect.top + 12) + 'px';
+                tooltip.innerHTML = `体素(${v.x},${v.y},z${zSlice})<br>${type}<br>温度:${temp.toFixed(0)}K 烟雾:${smoke.toFixed(2)}`;
+            } else {
+                minimapHover = null;
+                tooltip.style.display = 'none';
+            }
+        });
+        cvs().addEventListener('mouseleave', () => {
+            minimapHover = null;
+            document.getElementById('minimap-tooltip').style.display = 'none';
+        });
+    })();
+
+    function resizeCanvas() {
+        let c = document.querySelector('.canvas-container');
+        let maxW = c.clientWidth - 20;
+        let maxH = c.clientHeight - 20;
+        let ratio = 1000 / 700;
+        let w = Math.min(maxW, maxH * ratio);
+        let h = w / ratio;
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        if (renderer) {
+            renderer.setSize(w, h);
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+        }
+    }
+    window.addEventListener('resize', resizeCanvas);
+    // ★ 平面图容器尺寸变化时自动重算物理像素 + 保持比例（带防抖）
+    let __planResizeTimer = null;
+    window.addEventListener('resize', () => {
+        if (__planResizeTimer) clearTimeout(__planResizeTimer);
+        __planResizeTimer = setTimeout(() => resizePlanViewCanvas(true), 120);
+    });
+
+    // ================================================================
+    // ★ 飞行模式：键盘事件监听
+    // ================================================================
+    document.addEventListener('keydown', (e) => {
+        // 避免在输入框/选择框中触发
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+        const key = e.key.toLowerCase();
+        if (key === 'v') {
+            e.preventDefault();
+            if (!walkMode) enterWalkMode();
+            else exitWalkMode();
+            return;
+        }
+        if (key === 'c') {
+            e.preventDefault();
+            clipMode = !clipMode;
+            if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+            if (buildingGroup) buildingGroup.visible = !clipMode;  // 剖面模式下隐藏glTF建筑外壳
+            lastWallGridKey = null;  // 重置墙体缓存, 强制重建
+            addLog(clipMode ? '🔪 剖面模式：前墙已隐藏，可观察内部烟雾' : '🏠 剖面模式关闭', 'info');
+            return;
+        }
+        if (!walkMode) return;
+        switch (key) {
+            case 'w': moveKeys.w = true; break;
+            case 'a': moveKeys.a = true; break;
+            case 's': moveKeys.s = true; break;
+            case 'd': moveKeys.d = true; break;
+            case ' ': moveKeys.space = true; e.preventDefault(); break;  // 上升
+            case 'shift': moveKeys.shift = true; break;                   // 下降
+        }
+    });
+    document.addEventListener('keyup', (e) => {
+        const key = e.key.toLowerCase();
+        switch (key) {
+            case 'w': moveKeys.w = false; break;
+            case 'a': moveKeys.a = false; break;
+            case 's': moveKeys.s = false; break;
+            case 'd': moveKeys.d = false; break;
+            case ' ': moveKeys.space = false; break;
+            case 'shift': moveKeys.shift = false; break;
+        }
+    });
+    // ESC 默认会触发 pointerLockControls 的 unlock 事件，已在 unlock 监听器中处理退出
+
+    // ================================================================
+    // 6. 核心渲染函数 (墙体被 glTF 替代，仅保留火、烟等特效)
+    // ★ 每次重建但添加 dispose, 避免内存泄漏; 确保渲染正确
+    // ================================================================
+    let lastWallGridKey = null;
+
+    function update3DWorld(data) {
+        if (!data) return;
+        const depth = data.depth || 8;
+        const st = data.stride || 1;
+        const w = (data.obstacle && data.obstacle[0]) ? data.obstacle[0].length : Math.ceil(data.width / st);
+        const h = (data.obstacle && data.obstacle[0] && data.obstacle[0][0]) ? data.obstacle[0][0].length : Math.ceil(data.height / st);
+
+        // 重建人员 group (先清理旧的)
+        if (personGroup) {
+            scene.remove(personGroup);
+            personGroup.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+            });
+        }
+        personGroup = new THREE.Group();
+
+        const matrices = [];
+        const colors = [];
+        const dummy = new THREE.Object3D();
+
+        for (let z = 0; z < depth; z++) {
+            const yPos = z * dz + dz / 2;
+            for (let x = 0; x < w; x++) {
+                const xPos = x * dx * st + dx * st / 2;
+                for (let y = 0; y < h; y++) {
+                    const zPos = y * dx * st + dx * st / 2;
+                    const obs = data.obstacle[z]?.[x]?.[y];
+                    const temp = data.fire[z]?.[x]?.[y] || T_AMB;
+                    const smoke = data.smoke[z]?.[x]?.[y] || 0;
+
+                    let color = null;
+                    let draw = false;
+
+                    if (obs !== undefined && obs === 1) {
+                        if (buildingGroup) continue;
+                        if (clipMode && y === 0) continue;
+                        color = new THREE.Color(0.55, 0.55, 0.60);
+                        draw = true;
+                    }
+                    else if (temp > T_AMB + 1.0) {
+                        draw = false;
+                    }
+                    else if (smoke > 0.1) {
+                        draw = false;
+                    }
+
+                    if (draw && color) {
+                        dummy.position.set(xPos, yPos, zPos);
+                        dummy.updateMatrix();
+                        matrices.push(dummy.matrix.clone());
+                        colors.push(color);
+                    }
+                }
+            }
+        }
+
+        // 生成墙体实例
+        if (matrices.length > 0) {
+            if (!voxelMesh || matrices.length !== voxelMesh.count) {
+                if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); }
+                const geometry = new THREE.BoxGeometry(dx * 0.9, dz * 0.9, dx * 0.9);
+                const wallOpacity = buildingGroup ? 0.8 : 0.22;
+                const material = new THREE.MeshLambertMaterial({
+                    vertexColors: true, transparent: true, opacity: wallOpacity, depthWrite: false
+                });
+                voxelMesh = new THREE.InstancedMesh(geometry, material, matrices.length);
+                scene.add(voxelMesh);
+            }
+            for (let i = 0; i < matrices.length; i++) {
+                voxelMesh.setMatrixAt(i, matrices[i]);
+                voxelMesh.setColorAt(i, colors[i]);
+            }
+            voxelMesh.instanceMatrix.needsUpdate = true;
+            voxelMesh.instanceColor.needsUpdate = true;
+        } else if (voxelMesh) {
+            scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null;
+        }
+
+        // 人员生成（★ 被监控视角锁定的人员红色高亮，其余白色）
+        if (data.persons && data.persons.length > 0) {
+            const sphereGeo = new THREE.SphereGeometry(dx * 0.35, 8, 8);
+            const sphereMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const fpvMat = new THREE.MeshLambertMaterial({ color: 0xff2b2b, emissive: 0x991111 });
+            for (let p of data.persons) {
+                const isFpv = fpvMode && fpvTarget &&
+                    p[0] === fpvTarget.gx && p[1] === fpvTarget.gy && p[2] === fpvTarget.gz;
+                const sphere = new THREE.Mesh(sphereGeo, isFpv ? fpvMat : sphereMat);
+                if (isFpv) sphere.scale.setScalar(1.5);
+                sphere.position.set(p[0] * dx + dx/2, p[2] * dz + dz/2, p[1] * dx + dx/2);
+                personGroup.add(sphere);
+            }
+            scene.add(personGroup);
+        }
+    }
+
+    // ================================================================
+    // 7. 绑定 UI 控制按钮
+    // ================================================================
+    document.getElementById('startBtn').onclick = () => sendCommand('start');
+    document.getElementById('pauseBtn').onclick = () => sendCommand('pause');
+    document.getElementById('resumeBtn').onclick = () => sendCommand('resume');
+    document.getElementById('stepBtn').onclick = () => sendCommand('step');
+    document.getElementById('resetBtn').onclick = () => {
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+        if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; loadBuildingModel(); }
+        lastWallGridKey = null;  // 重置墙体缓存
+        sendCommand('reset');
+    };
+
+    document.getElementById('togglePersonsBtn').onclick = function() {
+        sendCommand('togglePersons');
+        this.textContent = this.textContent.includes('隐藏') ? '👤 显示人员' : '👤 隐藏人员';
+    };
+
+    document.getElementById('fpvBtn').onclick = toggleFpvMode;
+
+    // ★ 地图切换下拉菜单
+    document.getElementById('modelSelect').addEventListener('change', function() {
+        const mode = this.value;
+        const simCanvas = document.getElementById('simCanvas');
+        if (mode === 'simple') {
+            sendCommand('map_simple');
+            document.getElementById('currentModel').textContent = '简单矩形房间';
+            addLog('🏠 切换到简单矩形房间 (20x14x8)', 'info');
+            renderer.setClearColor(0xffffff, 1);
+            scene.background = new THREE.Color(0xffffff);
+            // ★ 白底用普通混合, 火焰颜色饱和清晰
+            if (fireParticles) { fireParticles.material.blending = THREE.NormalBlending; fireParticles.material.needsUpdate = true; }
+        } else {
+            sendCommand('map_building');
+            document.getElementById('currentModel').textContent = 'BIM大楼模型';
+            addLog('🏢 切换到BIM大楼模型', 'info');
+            loadBuildingModel();
+            renderer.setClearColor(0x111122, 1);
+            scene.background = new THREE.Color(0x111122);
+            // ★ 深色背景用发光叠加混合, 火焰呈现自发光真实感
+            if (fireParticles) { fireParticles.material.blending = THREE.AdditiveBlending; fireParticles.material.needsUpdate = true; }
+        }
+        // 清除旧的3D建筑模型，等待新数据重建
+        if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
+        if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.geometry.dispose(); voxelMesh.material.dispose(); voxelMesh = null; }
+        lastWallGridKey = null;  // 重置墙体缓存, 强制重建
+        cameraFramed = false;    // 重置相机框住状态, 确保新地图重新定位相机
+    });
+
+    // ★ 无火模式：只观察人员行为，不点火
+    let noFireActive = false;
+    document.getElementById('noFireBtn').onclick = function() {
+        noFireActive = !noFireActive;
+        if (noFireActive) {
+            sendCommand('noFire');
+            this.classList.add('active');
+            this.textContent = '🚭 无火模式(开)';
+            addLog('🚭 无火模式已开启（仅观察人员行为）', 'info');
+        } else {
+            // 退出无火模式：恢复正常火灾模拟
+            sendCommand('start');
+            this.classList.remove('active');
+            this.textContent = '🚭 无火模式';
+            addLog('🔥 恢复火灾模拟模式', 'info');
+        }
+    };
+
+    document.querySelectorAll('.speed-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            let speed = parseInt(this.dataset.speed);
+            sendCommand('speed_' + speed);
+            addLog(`速度切换至 ${speed} 倍`, 'info');
+        });
+    });
+
+    // ================================================================
+    // 8. 模态框兼容 (地图编辑器保持原样)
+    // ================================================================
+    const modal = document.getElementById('mapModal');
+    const modalClose = document.querySelector('.close');
+
+    document.getElementById('mapBtn').onclick = () => {
+        modal.style.display = 'block';
+        controls.enabled = false;
+        loadMapList();
+        initEditor();
+    };
+    modalClose.onclick = () => {
+        modal.style.display = 'none';
+        controls.enabled = true;
+    };
+    window.onclick = e => {
+        if (e.target === modal) {
+            modal.style.display = 'none';
+            controls.enabled = true;
+        }
+    };
+
+    let editorCanvas = document.getElementById('editorCanvas');
+    let editorCtx = editorCanvas.getContext('2d');
+    let editorWidth = 120, editorHeight = 80;
+    let editorObstacles = null;
+    let currentDrawType = 0;
+    let boundaryPoints = [];
+    let isDrawingBoundary = false;
+    let isDrawingFire = false;
+    let fireSources = [];
+
+    function initEditor() {
+        editorCanvas.width = 600; editorCanvas.height = 400;
+        fetch('/state').then(r => r.json()).then(d => {
+            // 为了兼容编辑器，取 Z=0 的 obstacle 作为编辑对象
+            editorObstacles = d.obstacle[0] || d.obstacle;
+            fireSources = d.fireSources || [];
+            drawEditor();
+        }).catch(e => addLog("初始化编辑器失败: " + e, 'error'));
+    }
+
+    function drawEditor() {
+        if (!editorObstacles) return;
+        let cellW = editorCanvas.width / editorWidth;
+        let cellH = editorCanvas.height / editorHeight;
+        editorCtx.clearRect(0, 0, editorCanvas.width, editorCanvas.height);
+
+        for (let i = 0; i < editorWidth; i++) {
+            for (let j = 0; j < editorHeight; j++) {
+                let val = editorObstacles[i][j];
+                if (val === 1) editorCtx.fillStyle = '#4a4a5a';
+                else if (val === 2) editorCtx.fillStyle = '#ff8c00';
+                else if (val === 3) editorCtx.fillStyle = '#2196f3';
+                else if (val === 4) editorCtx.fillStyle = '#4caf50';
+                else if (val === 5) editorCtx.fillStyle = '#ff1744';
+                else editorCtx.fillStyle = '#111';
+                editorCtx.fillRect(i * cellW, j * cellH, cellW, cellH);
+                editorCtx.strokeStyle = '#333';
+                editorCtx.strokeRect(i * cellW, j * cellH, cellW, cellH);
+            }
+        }
+        for (let f of fireSources) {
+            let x = f.x * cellW + cellW / 2, y = f.y * cellH + cellH / 2;
+            editorCtx.fillStyle = '#ff1744';
+            editorCtx.beginPath(); editorCtx.arc(x, y, Math.min(cellW, cellH) / 2.5, 0, 2 * Math.PI); editorCtx.fill();
+            editorCtx.strokeStyle = '#fff'; editorCtx.lineWidth = 1; editorCtx.stroke();
+        }
+    }
+
+    function loadMapList() {
+        fetch('/listMaps').then(r => r.json()).then(data => {
+            let ul = document.getElementById('mapList'); ul.innerHTML = '';
+            if (!data.maps || data.maps.length === 0) {
+                ul.innerHTML = '<li style="justify-content:center;">暂无地图文件</li>';
+                return;
+            }
+            data.maps.forEach(map => {
+                let li = document.createElement('li');
+                let span = document.createElement('span');
+                span.textContent = map;
+                span.onclick = () => {
+                    if (confirm(`加载地图 ${map} 会重置当前模拟，确定吗？`)) {
+                        fetch(`/loadMap?name=${encodeURIComponent(map)}`, { method: 'POST' }).then(() => {
+                            addLog(`已加载地图: ${map}`, 'info');
+                            modal.style.display = 'none'; controls.enabled = true;
+                            fetchState();
+                        }).catch(e => addLog(`加载失败: ${e}`, 'error'));
+                    }
+                };
+                li.appendChild(span); ul.appendChild(li);
+            });
+        }).catch(e => addLog('获取地图列表失败: ' + e, 'error'));
+    }
+
+    document.getElementById('drawEmptyBtn').onclick = () => { currentDrawType = 0; };
+    document.getElementById('drawWallBtn').onclick = () => { currentDrawType = 1; };
+    document.getElementById('drawCombustBtn').onclick = () => { currentDrawType = 2; };
+    document.getElementById('drawDoorBtn').onclick = () => { currentDrawType = 3; };
+    document.getElementById('drawExitBtn').onclick = () => { currentDrawType = 4; };
+    document.getElementById('clearMapBtn').onclick = () => {
+        if (confirm('清除所有障碍物？')) {
+            for (let i = 0; i < editorWidth; i++) for (let j = 0; j < editorHeight; j++) editorObstacles[i][j] = 0;
+            drawEditor();
+        }
+    };
+    document.getElementById('saveNewMapBtn').onclick = () => {
+        let name = document.getElementById('newMapName').value.trim() || 'custom.map';
+        if (!name.endsWith('.map')) name += '.map';
+        fetch('/saveMap', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `name=${encodeURIComponent(name)}` })
+            .then(() => { addLog(`地图已保存: ${name}`, 'info'); loadMapList(); })
+            .catch(e => addLog(`保存失败: ${e}`, 'error'));
+    };
+
+    function handleEditorClick(e, isRight) {
+        let rect = editorCanvas.getBoundingClientRect();
+        let scaleX = editorCanvas.width / rect.width, scaleY = editorCanvas.height / rect.height;
+        let mouseX = (e.clientX - rect.left) * scaleX, mouseY = (e.clientY - rect.top) * scaleY;
+        let cellW = editorCanvas.width / editorWidth, cellH = editorCanvas.height / editorHeight;
+        let gridX = Math.floor(mouseX / cellW), gridY = Math.floor(mouseY / cellH);
+        if (gridX < 0 || gridX >= editorWidth || gridY < 0 || gridY >= editorHeight) return;
+
+        if (isDrawingFire) {
+            let idx = fireSources.findIndex(f => f.x === gridX && f.y === gridY);
+            if (idx >= 0) fireSources.splice(idx, 1);
+            else fireSources.push({ x: gridX, y: gridY });
+            drawEditor();
+            syncFireSources();
+            return;
+        }
+        if (isRight) editorObstacles[gridX][gridY] = 0;
+        else editorObstacles[gridX][gridY] = currentDrawType;
+        drawEditor();
+    }
+    function syncFireSources() {
+        if (fireSources.length === 0) return;
+        let coords = fireSources.map(f => [f.x, f.y]);
+        fetch('/setFireSources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources: coords }) })
+            .then(() => addLog('火源已更新', 'info')).catch(err => addLog('更新火源失败: ' + err, 'error'));
+    }
+
+    editorCanvas.addEventListener('click', function(e) { handleEditorClick(e, false); });
+    editorCanvas.addEventListener('contextmenu', function(e) { e.preventDefault(); handleEditorClick(e, true); return false; });
+    document.getElementById('refreshMapsBtn').onclick = loadMapList;
+    document.getElementById('drawBoundaryBtn').onclick = function() {
+        isDrawingBoundary = !isDrawingBoundary;
+        boundaryPoints = [];
+        addLog(isDrawingBoundary ? '进入边界绘制模式：点击画点，双击闭合' : '退出边界绘制模式', 'info');
+        this.textContent = isDrawingBoundary ? '🟨 取消边界' : '🟨 边界';
+        drawEditor();
+    };
+    document.getElementById('drawFireBtn').onclick = function() {
+        isDrawingFire = !isDrawingFire;
+        addLog(isDrawingFire ? '进入火源绘制模式' : '退出火源绘制模式', 'info');
+        this.textContent = isDrawingFire ? '🔥 取消火源' : '🔥 火源';
+        drawEditor();
+    };
+    editorCanvas.addEventListener('dblclick', function(e) {
+        if (!isDrawingBoundary || boundaryPoints.length < 3) return;
+        fetch('/setBoundary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points: boundaryPoints }) })
+            .then(() => { addLog('边界已设置', 'info'); isDrawingBoundary = false; document.getElementById('drawBoundaryBtn').textContent = '🟨 边界'; initEditor(); modal.style.display = 'none'; controls.enabled = true; fetchState(); })
+            .catch(err => addLog('设置边界失败: ' + err, 'error'));
+    });
+
+    document.getElementById('generateMapBtn').onclick = function() {
+        const file = document.getElementById('imageInput').files[0];
+        if (!file) { addLog('请先选择一张图片', 'error'); return; }
+        const reader = new FileReader();
+        reader.onload = function(ev) {
+            const base64 = ev.target.result.split(',')[1];
+            const threshold = parseInt(document.getElementById('thresholdSlider').value);
+            fetch('/uploadMapImage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageData: base64, threshold: threshold }) })
+                .then(response => {
+                    if (response.ok) { addLog('地图已从图片生成并应用', 'info'); modal.style.display = 'none'; controls.enabled = true; fetchState(); initEditor(); }
+                    else { addLog('生成地图失败: ' + response.status, 'error'); }
+                }).catch(err => addLog('请求失败: ' + err, 'error'));
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // ================================================================
+    // 9. 启动运行！
+    // ================================================================
+    setTimeout(resizeCanvas, 100);
+    init3D();
+
+    // ★ 用递归 setTimeout 替代 setInterval, 避免请求堆积导致页面卡死
+    //   上一个请求完成后才发起下一个, 间隔1s
+    function pollState() {
+        fetchState();
+        setTimeout(pollState, 1000);
+    }
+    pollState();
+
+    // ★ 体积烟雾: 独立低频轮询 /smokeVolume (服务器按时间缓存, 开销小)
+    //   根据网格体素数自适应 stride: 小房间(≤2万体素)用1全分辨率, 大楼用2/4
+    function pickSmokeStride() {
+        if (!currentData) return 2;
+        const cells = (currentData.width || 0) * (currentData.height || 0) * (currentData.depth || 0);
+        if (cells <= 20000) return 1;
+        if (cells <= 100000) return 2;
+        return 4;
+    }
+    async function fetchSmokeVolume() {
+        try {
+            const stride = pickSmokeStride();
+            const resp = await fetch('/smokeVolume?stride=' + stride);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (volumeSmoke) volumeSmoke.update(data, dx, dz);
+        } catch (e) { /* 静默失败 */ }
+    }
+    // ★ 递归 setTimeout, 上一个请求完成后再等500ms发起下一个
+    function pollSmokeVolume() {
+        fetchSmokeVolume().finally(() => {
+            setTimeout(pollSmokeVolume, 500);
+        });
+    }
+    pollSmokeVolume();
+
+    // ★ 默认加载简单矩形房间(用户核心需求: 观察烟和火焰模型)
+    if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
+    if (voxelMesh) { scene.remove(voxelMesh); voxelMesh = null; }
+    lastWallGridKey = null;
+    cameraFramed = false;
+    lastGridKey = null;
+    // 同步UI: 下拉框选中简单房间, 标签更新
+    const ms = document.getElementById('modelSelect');
+    if (ms) ms.value = 'simple';
+    const cm = document.getElementById('currentModel');
+    if (cm) cm.textContent = '简单矩形房间';
+    fetch('/command', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=map_simple' });
+
+    // ★ 强制设置相机位置: 延迟2秒确保数据加载完成, 简单房间(15x10x5m)全貌可见
+    setTimeout(() => {
+        if (camera && controls) {
+            controls.target.set(7.5, 2.5, 5);
+            camera.position.set(20, 16, 20);
+            controls.update();
+            cameraFramed = true;  // 禁止后续自动调整覆盖
+        }
+    }, 2000);
+
+    addLog('3D BIM 模型渲染版加载完成，按住左键可旋转视角', 'info');
+</script>
+</body>
+</html>

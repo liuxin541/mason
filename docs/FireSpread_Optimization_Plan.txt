@@ -1,0 +1,661 @@
+================================================================================
+              FireSpread.java 火灾与烟气算法优化方案
+================================================================================
+
+对标参考: FDS (Fire Dynamics Simulator) - NIST 开发的火灾场模拟软件,当前行业标准。
+          官网: https://pages.nist.gov/fds/downloads.html
+核心原则: 不改变算法架构,只做数值、物理、性能层面的优化与参数调优。
+
+--------------------------------------------------------------------------------
+一、现状分析
+--------------------------------------------------------------------------------
+
+1.1 现有算法架构
+    当前 FireSpread.java 的 step() 方法每步执行以下流程:
+
+    FireSpread.step() 执行流程:
+    ------------------------------------------------------------
+      (1) 初始化 nextT / nextC (填充边界+墙体)
+                          |
+                          v
+      (2) 火灾源注入 (t平方增长 -> 稳态,高斯分布设温度)
+                          |
+                          v
+      (3) 可燃物燃烧释热 (T>T_IGN 时 burnRate 燃烧,加热+产烟)
+                          |
+                          v
+      (4) 热辐射 (点源+1/r平方+Bresenham LOS, 只对火源)
+                          |
+                          v
+      (5) 对流换热 (火源周围 1m 半径内线性换热)
+                          |
+                          v
+      (6) 热传导 (FTCS 7点拉普拉斯, 3x3x3 模板)
+                          |
+                          v
+      (7) 烟气扩散 (与(6)同结构, 固定扩散系数)
+                          |
+                          v
+      (8) 烟气平流 (浮力+温度梯度,迎风格式, 仅烟气)
+                          |
+                          v
+      (9) 冷却+衰减 (牛顿冷却, 烟气指数衰减)
+                          |
+                          v
+      (10) 排烟口处理 (EXIT 周围 5x5 衰减)
+                          |
+                          v
+      swapBuffers
+    ------------------------------------------------------------
+
+
+1.2 已定义但未使用的物理参数
+    +-------------------------+------------------------+------------------------+--------------------------------+
+    | 参数                    | 定义位置               | 物理意义               | 未使用影响                     |
+    +-------------------------+------------------------+------------------------+--------------------------------+
+    | ceilingHeight           | FireEscape.java:66    | 顶棚高度               | 顶棚射流无法模拟               |
+    | ceilingJetRadius        | FireEscape.java:67    | 顶棚射流半径           | 烟气到达顶棚后无法水平铺开     |
+    | ceilingJetStrength      | FireEscape.java:68    | 顶棚射流强度           | --                             |
+    | Cd                      | FireEscape.java:59    | 开口流动系数           | 门洞无双向分层流动             |
+    | fuelRadiationRadius     | FireEscape.java:65    | 可燃物辐射半径         | 可燃物无自身辐射               |
+    | smokeAbsorptionCoeff    | FireEscape.java:78    | 烟气吸收系数           | 高温烟层不吸收/再辐射          |
+    +-------------------------+------------------------+------------------------+--------------------------------+
+
+
+1.3 对标 FDS 的效果差距
+    +-----------------+--------------------------------+--------------------------------+-----------+
+    | 特征            | FDS 效果                       | 当前实现                       | 差距      |
+    +-----------------+--------------------------------+--------------------------------+-----------+
+    | 顶棚射流        | 烟到顶棚后水平铺开圆盘         | 烟到达顶棚后"卡住"或溢出网格   | [严重]    |
+    | 羽流卷吸        | 火源上方烟柱越往上越粗         | 烟柱细窄,几乎看不到            | [严重]    |
+    | 温度对流        | 火焰向上窜动                   | 火焰只是平铺扩散               | [严重]    |
+    | 开口流动        | 门顶出烟、门下进气双向分层     | 门洞无特殊流动                 | [中等]    |
+    | 烟气分层        | 清晰的上热下冷两层结构         | 扩散后两层模糊                 | [中等]    |
+    | 高温烟辐射      | 热烟层向下辐射加热下层         | 无                             | [中等]    |
+    | 烟气上升速度    | 1~3 m/s (真实羽流)             | 0.3 m/s (过慢)                 | [轻微]    |
+    +-----------------+--------------------------------+--------------------------------+-----------+
+
+--------------------------------------------------------------------------------
+二、优化方案详细说明
+--------------------------------------------------------------------------------
+
+================
+2.1 P0 级 — 影响最严重
+================
+
+【优化项 1】修复烟气漂移方向 + 水平漂移
+----------------------------------------
+问题:
+    烟气平流计算中,垂直速度 vz 正确方向是向上为负(即烟往上走),
+    但当前代码逻辑存在方向混乱。同时,水平漂移只有 z 方向的浮力,
+    缺乏足够的 x/y 方向扩散,导致烟柱不扩散。
+
+当前代码 (FireSpread.java:347):
+    double vz = fire.smokeDriftCoeff * excessT / T_AMB;
+    if (vz > fire.smokeDriftMaxSpeed) vz = fire.smokeDriftMaxSpeed;
+    if (vz > 1e-6) {
+        double advZ = -vz * (C_afterDiff[x][y][z] - C_afterDiff[x][y][z-1]) / dz;
+        C_afterAdvection[x][y][z] += advZ * dt;
+    }
+
+问题分析:
+    - vz 为正(温度越高越大),但 -vz 前面的负号和 C[z] - C[z-1] 的差分
+      在 z 递增方向上,当烟在 z 高处浓度更大时 C[z]-C[z-1]>0,
+      -vz*正/负 可能导致方向混乱
+    - 需要确认 z=0 是地板,z=depth-1 是顶棚,烟应该往 z 增大方向漂移
+
+优化方向:
+    1. 明确 z 方向约定:z=0 地板,z=depth-1 顶棚,烟往 +z 方向漂移
+    2. 修正差分方向为迎风格式:烟浓度高的方向向浓度低的方向输运
+    3. 在水平方向增加基于温度梯度的平流项(当前只有很弱的梯度耦合)
+    4. 增加 z -> 水平的耦合:当烟到达顶棚层时,自动将垂直速度
+       转换为水平径向速度
+
+预期效果: 烟气正确上升,并在顶棚处形成水平扩散
+
+
+【优化项 2】对流换热用 T 而非 nextT
+----------------------------------------
+问题:
+    addRadiation 和对流换热段使用的参考温度是 T[nx][ny][nz](旧值),
+    而非更新后的 nextT[nx][ny][nz],导致数值不稳定。
+
+当前代码 (FireSpread.java:247):
+    double q_conv = h_eff * (T_FLAME - T[nx][ny][nz]) * (dx * dz);
+
+问题分析:
+    - 辐射/换热阶段使用旧温度 T,但传导阶段使用更新后的 nextT,
+      导致不一致
+    - 在同一时间步内,已被加热的格子不能立即参与后续换热,造成温度堆积
+
+优化方向:
+    - 统一使用 nextT 作为换热的参考温度
+    - 或在换热后立即更新 nextT,后续步骤读取 nextT
+
+预期效果: 火焰温度场稳定,不出现数值振荡
+
+
+【优化项 3】增加 x/y 水平漂移分量
+----------------------------------------
+问题:
+    当前水平漂移仅通过温度梯度间接计算,缺乏独立的水平扩散机制,
+    烟气在 z 方向扩散后无法有效在 x/y 方向铺开。
+
+当前代码 (FireSpread.java:354-386):
+    double gradX = (nextT[x+1][y][z] - nextT[x-1][y][z]) / (2 * dx);
+    double vx = fire.smokeDriftCoeff * 0.5 * gradX / gradMagX * (excessT / T_AMB);
+
+问题分析:
+    - 水平速度 vx 仅由温度梯度决定,在羽流中心温度梯度很陡时速度大,
+      边缘梯度小时速度为零
+    - 缺乏纯粹的"浓度梯度驱动的扩散"与"温度梯度驱动的平流"分离处理
+    - 应该有一个独立的水平扩散项,与 z 方向的顶棚射流配合
+
+优化方向:
+    分离水平平流为两部分:
+      1. 浮力驱动(基于温度梯度,保留现有逻辑)
+      2. 顶棚射流驱动(z=depth-1 层的径向扩散,新增)
+    - 当 z >= depth-2 时,额外计算水平径向速度:
+      v_r = ceilingJetStrength * exp(-r平方/ceilingJetRadius平方)
+    - 将 ceilingJetRadius 和 ceilingJetStrength 参数真正投入使用
+
+预期效果: 烟雾在 z 方向正确扩散,在 x/y 方向扩散更精确
+
+
+【优化项 4】Laplacian 动态权重
+----------------------------------------
+问题:
+    当前 7 点拉普拉斯模板的权重是固定的(对角线 0.25,边 0.5,面 1.0),
+    不能反映不同方向的扩散差异。
+
+当前代码 (FireSpread.java:267-270):
+    double wgt = 1.0;
+    if (dx2 != 0 && dy2 != 0 && dz2 != 0) wgt = 0.25;
+    else if (dx2 != 0 && dy2 != 0 || dx2 != 0 && dz2 != 0
+             || dy2 != 0 && dz2 != 0) wgt = 0.5;
+
+问题分析:
+    - 固定权重假设 x/y/z 方向扩散均匀,但实际上 dx=0.5, dz=0.25
+      (z 方向分辨率更细),应该加权修正
+    - 当 obstacle[nx] 是墙体时,邻居温度用 T_AMB 替代,
+      但权重应该降低(因为空气热阻大)
+
+优化方向:
+    - 引入各向异性因子: wgt_x = wgt * (dx/dz) 或根据实际网格比调整
+    - 墙体邻居时用更低的权重(如 0.1),反映热阻
+    - 边界处用特殊权重(避免边界效应)
+
+预期效果: 边界/墙壁处扩散更精确,扩散各方向均匀
+
+
+【优化项 5】Stefan-Boltzmann 辐射
+----------------------------------------
+问题:
+    当前辐射只对火源做,且使用简化的 1/r平方 衰减,
+    没有考虑烟气的吸收和再辐射。
+
+当前代码 (FireSpread.java:68-93):
+    double emissivePower = EMISSIVITY * SIGMA_SB * (T4_src - T4_amb);
+    double q_rad = scaleFactor * emissivePower / (4.0 * Math.PI * distSq);
+
+问题分析:
+    - 只有火源周围被辐射,高温烟气本身不辐射
+    - 烟气吸收系数 smokeAbsorptionCoeff=0.5 已定义但未使用
+    - 远距离辐射衰减过快(点源 1/r平方),
+      实际火灾中烟气会增强长距离辐射
+
+优化方向:
+    1. 对温度 > 500K 的每个格子也做一次简化的辐射
+       (用 smokeAbsorptionCoeff 修正)
+    2. 在冷却项里加上 斯特藩-玻尔兹曼冷却项:
+       eps*sigma*(T四次方-T_amb四次方)*dt/(rho*cp*dx)
+    3. 对远距离辐射做指数衰减替代 1/r平方:
+       q_rad 正比于 exp(-kappa*r)/r平方
+
+预期效果: 远距离辐射准确,辐射物理正确
+
+
+================
+2.2 P1 级 — 效果明显
+================
+
+【优化项 6】临时数组复用,减少每帧 GC 分配
+----------------------------------------
+问题:
+    C_afterDiff 和 C_afterAdvection 已做缓存(通过 cachedW/H/D 检查),
+    但还有其他地方每帧都在分配数组。
+
+当前代码 (FireSpread.java:147-153):
+    if (cachedW != w || cachedH != h || cachedD != d) {
+        C_afterDiff_buf = new double[w][h][d];
+        C_afterAdvection_buf = new double[w][h][d];
+        cachedW = w; cachedH = h; cachedD = d;
+    }
+
+问题分析:
+    - C_afterDiff 和 C_afterAdvection 已缓存 [OK]
+    - 但 nextT 和 nextC 是 MASON Grid 内部的数组,
+      swapBuffers 交换引用时不分配 [OK]
+    - addRadiation 内的局部变量不是问题
+    - 但 hasLineOfSight 的调用频率高,
+      每次创建 int 变量(不是数组,影响小)
+
+优化方向:
+    1. 预分配一个 int[] 数组用于 addRadiation 的邻居遍历
+       (避免循环内局部变量重复)
+    2. 对 smokeDriftMaxSpeed 等标量参数提取为 final 局部变量,
+       减少重复字段访问
+    3. 考虑 System.arraycopy 替代三重 for 循环的赋值
+
+预期效果: 每帧 GC 分配减少,性能提升 5-10%
+
+
+【优化项 7】Math.pow -> 乘法/小计算优化
+----------------------------------------
+问题:
+    代码中存在 Math.exp、Math.sqrt 等调用,这些计算开销较大。
+
+当前代码:
+    // FireSpread.java:65
+    double T4_src = T_src * T_src * T_src * T_src;
+
+    // FireSpread.java:187
+    double factor = Math.exp(-dist * dist / (srcRadius * srcRadius * 0.5));
+
+    // FireSpread.java:89
+    double distSq = dx2*dx2 * dx*dx + dy2*dy2 * dx*dx + dz2*dz2 * dz*dz;
+    double dist = Math.sqrt(distSq);
+
+问题分析:
+    - T四次方 用四次乘法已经是对的 [OK]
+    - Math.exp 无法简单替换,但可以考虑查表近似
+    - Math.sqrt 在辐射和对流中各调用一次,可合并
+    - 乘法替代 Math.pow: x*x 替代 Math.pow(x,2)
+
+优化方向:
+    1. 对 exp(-dist平方/sigma平方) 预计算一个 2D 查找表(LUT),半径<=12 格
+    2. distSq <= radius平方 比较时直接用 distSq,开方仅在需要精确距离时做
+    3. 把 dx*dx, dz*dz 等常量提前到循环外计算
+
+预期效果: 微小性能提升
+
+
+【优化项 8】CFL 时间步限制
+----------------------------------------
+问题:
+    当前 dt 已加 CFL 限制,但扩散稳定条件 Fo < 0.5 没有校验。
+
+当前代码 (FireSpread.java:128):
+    final double dt = Math.min(fire.deltaT,
+        0.5 * Math.min(dx, dz) / fire.smokeDriftMaxSpeed);
+
+问题分析:
+    - CFL 条件(对流): dt < dx / max_velocity
+      -> 当前 0.5 * min(dx,dz)/maxSpeed [OK]
+    - 扩散稳定条件: dt < dx平方 / (2 * alpha) 对 x 方向,
+      dt < dz平方 / (2 * alpha) 对 z 方向
+    - 当 conductionBoost=50, alpha_air=2e-5, dx=0.5 时:
+      Fo = 50*2e-5*0.5/0.25 = 0.02,稳定 [OK]
+    - 但如果用户把 conductionBoost 调到 500: Fo = 0.2,仍稳定;
+      调到 1000: Fo = 0.4,临界;调到 2000: Fo = 0.8,【发散!】
+
+优化方向:
+    double alpha_eff = fire.alpha_air * fire.conductionBoost;
+    double dt_diff_x = 0.4 * dx * dx / alpha_eff;   // x 方向扩散稳定
+    double dt_diff_z = 0.4 * dz * dz / alpha_eff;   // z 方向扩散稳定
+    double dt_cfl = 0.5 * Math.min(dx, dz) / fire.smokeDriftMaxSpeed;
+    double dt = Math.min(fire.deltaT,
+                Math.min(Math.min(dt_cfl, dt_diff_x), dt_diff_z));
+
+    // 如果 dt < fire.deltaT,内部分子步循环
+    int subSteps = (int) Math.ceil(fire.deltaT / dt);
+    double subDt = fire.deltaT / subSteps;
+    // 用 subDt 执行每个子步
+
+预期效果: 数值稳定性保证,防止发散
+
+
+【优化项 9】魔法数字常量化
+----------------------------------------
+问题:
+    代码中散布大量硬编码数字,影响可维护性。
+
+当前代码中的魔法数字:
+    +--------------------+-------------------+----------------------------+
+    | 位置               | 值                | 含义                       |
+    +--------------------+-------------------+----------------------------+
+    | FireSpread.java:47 | err = dx - dy     | Bresenham 初始化           |
+    | FireSpread.java:70 | Q_rad * 1000.0    | kW 转 W                    |
+    | FireSpread.java:89 | 0.1               | 最小距离阈值               |
+    | FireSpread.java:128| 0.5               | CFL 安全系数               |
+    | FireSpread.java:186| 0.5               | 高斯分布系数               |
+    | FireSpread.java:202| 1.5, 0.5, 0.1     | 温度因子上下限             |
+    | FireSpread.java:247| T_FLAME - T[nx]   | 对流温差                   |
+    | FireSpread.java:286| NaN -> T_AMB      | 异常值保护                 |
+    | FireSpread.java:326| D_smoke*.../dx*dx | 烟扩散公式                 |
+    | FireSpread.java:348| 0.3               | 烟漂移上限                 |
+    | FireSpread.java:392| 0                 | 烟浓度下限                 |
+    | FireSpread.java:409| 0.001             | 烟衰减率                   |
+    | FireSpread.java:423| 2                 | EXIT 影响半径              |
+    +--------------------+-------------------+----------------------------+
+
+优化方向:
+    // 在 FireSpread 顶部定义
+    private static final double MIN_DIST = 0.1;
+    private static final double CFL_SAFETY = 0.5;
+    private static final double GAUSSIAN_SIGMA_FACTOR = 0.5;
+    private static final double TEMP_FACTOR_MIN = 0.1;
+    private static final double TEMP_FACTOR_MAX = 1.5;
+    private static final double SMOKE_FLOOR = 0.0;
+    private static final double SMOKE_CEIL = 1.0;
+    private static final int EXIT_RADIUS = 2;
+    private static final double RADIAL_DECAY = 0.0;
+    private static final double KILOWATT_TO_WATT = 1000.0;
+
+预期效果: 代码可读性提升,可维护性提升
+
+
+================
+2.3 P2 级 — 物理与视觉优化
+================
+
+【优化项 10】顶棚射流(Ceiling Jet)
+----------------------------------------
+物理背景:
+    火灾中,烟气羽流到达顶棚后不再上升,而是沿顶棚水平扩散,
+    形成典型的"顶棚射流"。这是 FDS 火灾仿真中最标志性的视觉特征。
+
+FDS 公式 (Alpert 1972):
+    Q_cj = 67.8 * Q^(2/3) * (z - z_0)        // 顶棚射流单位宽度流量
+    T_cj = T_amb + (T_flame - T_amb) * exp(-r/b) * f(z)   // 径向温度衰减
+
+优化方向: 在 step() 末尾、swapBuffers 之前,新增顶棚射流处理:
+
+    // 仅在 z = depth-1 (顶棚层) 执行
+    int ceilingZ = d - 1;
+    double r_max = fire.ceilingJetRadius / dx;
+    double strength = fire.ceilingJetStrength;
+
+    for (int x = 0; x < w; x++) {
+        for (int y = 0; y < h; y++) {
+            if (obstacle[x][y][0] == TYPE_WALL
+                || inside[x][y][ceilingZ] == 0) continue;
+
+            // 顶棚射流:将垂直动量转为水平径向扩散
+            for (int dx2 = -r_max; dx2 <= r_max; dx2++) {
+                for (int dy2 = -r_max; dy2 <= r_max; dy2++) {
+                    int nx = x + dx2, ny = y + dy2;
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    if (inside[nx][ny][ceilingZ] == 0) continue;
+
+                    double r = Math.sqrt(dx2*dx2 + dy2*dy2);
+                    if (r > r_max) continue;
+
+                    double decay = Math.exp(-r * r / (r_max * r_max * 0.5));
+                    double source = strength * decay * (nextC[x][y][ceilingZ]);
+                    nextC[nx][ny][ceilingZ] += source * dt;
+                    nextC[x][y][ceilingZ] -= source * dt;
+                }
+            }
+        }
+    }
+
+预期效果: 烟气在顶棚处形成水平圆盘扩散,视觉效果显著提升
+
+
+【优化项 11】羽流卷吸(Plume Entrainment)
+----------------------------------------
+物理背景:
+    火源上方的热羽流会从侧方吸入冷空气,使羽流越往上越粗、越冷、烟越多。
+
+FDS 公式 (Zukoski 1981):
+    m_ent = 0.071 * Q^(1/3) * z^(5/3)        // 卷吸质量流率
+    dT(z) = (T_flame - T_amb) * z^(-2/3)     // 羽流温度衰减
+
+优化方向: 在火源注入段后添加卷吸处理:
+
+    // 对每个火源,在其正上方柱内施加卷吸
+    for (int idx = 0; idx < nSources; idx++) {
+        int[] fp = fireSources.get(idx);
+        int cx = fp[0], cy = fp[1], cz = fp[2];
+        double Q_src = Q_total / nSources;
+
+        for (int z = cz + 1; z < Math.min(cz + 8, d); z++) {
+            if (inside[cx][cy][z] == 0) break;
+
+            double heightAbove = (z - cz) * dz;
+            double entrainmentFactor = 0.071 * Math.pow(Q_src, 1.0/3.0)
+                                     * Math.pow(heightAbove, 5.0/3.0) * dt;
+            entrainmentFactor = Math.min(entrainmentFactor, 0.3);
+
+            // 将周围格子的热/烟"搬"到羽流中心
+            for (int dx2 = -1; dx2 <= 1; dx2++) {
+                for (int dy2 = -1; dy2 <= 1; dy2++) {
+                    int nx = cx + dx2, ny = cy + dy2;
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    if (inside[nx][ny][z] == 0) continue;
+
+                    nextT[cx][cy][z] += entrainmentFactor * nextT[nx][ny][z];
+                    nextT[nx][ny][z] -= entrainmentFactor * nextT[nx][ny][z];
+                    nextC[cx][cy][z] += entrainmentFactor * nextC[nx][ny][z];
+                    nextC[nx][ny][z] -= entrainmentFactor * nextC[nx][ny][z];
+                }
+            }
+        }
+    }
+
+预期效果: 烟柱变粗变高,接近真实火灾羽流
+
+
+【优化项 12】开口流动(Doorway Flow)
+----------------------------------------
+物理背景:
+    门、窗、楼梯口会出现"顶部出烟、底部进气"的双向分层流动。
+
+FDS 公式:
+    delta_p = rho * g * (T_out - T_in) * h / (2 * T_amb)   // 压差
+    Q_door = Cd * A * sqrt(2*delta_p/rho)                   // 流量
+    z_neutral = h/2 * T_in / sqrt(T_in*T_out)               // 中性面高度
+
+优化方向: 对 TYPE_DOOR 格子计算开口流动:
+
+    for (int x = 0; x < w; x++) {
+        for (int y = 0; y < h; y++) {
+            if (obstacle[x][y][0] != TYPE_DOOR) continue;
+
+            // 计算门两侧温度
+            double T_in = T_AMB, T_out = T_AMB;
+            for (int z = 0; z < d; z++) {
+                T_in = Math.max(T_in, nextT[x][y][z]);
+            }
+            // 简化:用门外参考温度 T_amb
+            double h_door = (double)d * dz;
+            double deltaP = fire.rhoAir * fire.g
+                          * (T_in - T_AMB) * h_door / (2.0 * T_AMB);
+            double Q_door = fire.Cd * (dx * dz)
+                          * Math.sqrt(Math.max(0, 2.0 * deltaP / fire.rhoAir));
+            double z_neutral = h_door / 2.0 * T_AMB
+                             / Math.sqrt(T_in * T_AMB);
+
+            // 上半部分出烟,下半部分进气
+            for (int z = 0; z < d; z++) {
+                double z_height = z * dz;
+                if (z_height > z_neutral) {
+                    // 上部:烟向外流出
+                    double outflow = Q_door * (1.0 - z_height / h_door) * dt;
+                    nextC[x][y][z] -= outflow * nextC[x][y][z];
+                    if (nextC[x][y][z] < 0) nextC[x][y][z] = 0;
+                    nextT[x][y][z] -= outflow * (nextT[x][y][z] - T_AMB);
+                    if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
+                } else {
+                    // 下部:空气流入
+                    double inflow = Q_door * (1.0 - z_height / h_door) * dt;
+                    nextT[x][y][z] += inflow * (T_AMB - nextT[x][y][z]);
+                    if (nextT[x][y][z] > T_IN) nextT[x][y][z] = T_IN;
+                }
+            }
+        }
+    }
+
+预期效果: 门洞处双向分层流动,烟从顶部涌出
+
+
+【优化项 13】烟气分层抑制(Stratification)
+----------------------------------------
+物理背景:
+    室内火灾会形成清晰的上热下冷两层结构,中间有稳定的分层界面。
+
+FDS 原理:
+    Richardson 数 Ri > 0 时(上层更热),湍流被抑制,扩散减弱。
+
+优化方向: 在烟气扩散循环中加入分层修正:
+
+    // 计算 Richardson 数
+    double dT_dz = (nextT[x][y][Math.min(z+1,d-1)]
+                  - nextT[x][y][Math.max(z-1,0)]) / (2.0 * dz);
+    double Ri = (fire.g / T_AMB) * dT_dz
+              / (Math.abs(vx*vx + vy*vy + vz*vz) + 1e-6);
+    double stratFactor = 1.0 / (1.0 + 10.0 * Math.max(0, Ri));
+
+    // 应用到扩散系数
+    double D_eff = fire.baseSmokeSpread * stratFactor;
+    double diff = D_eff * (laplacianC / totalW - nextC[x][y][z]) * dt / (dx * dx);
+
+预期效果: 形成清晰的上热下冷分层结构,视觉效果提升
+
+
+【优化项 14】高温烟气辐射
+----------------------------------------
+物理背景:
+    高温烟层本身是辐射热源,向下辐射加热下层物体。
+
+优化方向: 在冷却阶段增加辐射项:
+
+    // 对高温格子,添加斯特藩-玻尔兹曼辐射冷却
+    double T4 = nextT[x][y][z] * nextT[x][y][z]
+              * nextT[x][y][z] * nextT[x][y][z];
+    double T4_amb = T_AMB * T_AMB * T_AMB * T_AMB;
+    double radCooling = fire.smokeAbsorptionCoeff * 5.67e-8
+                      * (T4 - T4_amb)
+                      * dt / (fire.rhoAir * fire.cpAir * dx * dx * dz);
+    nextT[x][y][z] -= radCooling;
+    if (nextT[x][y][z] < T_AMB) nextT[x][y][z] = T_AMB;
+
+预期效果: 高温烟气自身辐射,增强远距离加热效果
+
+--------------------------------------------------------------------------------
+三、参数调优建议
+--------------------------------------------------------------------------------
+
+3.1 直接修改 FireEscape.java 参数
+    +-------------------------+---------------+---------------+----------------------------------------+
+    | 参数                    | 当前值        | 建议值        | 理由                                   |
+    +-------------------------+---------------+---------------+----------------------------------------+
+    | smokeDecayRate          | 0.005         | 0.001         | 烟气不应自消失,靠排烟口排出           |
+    | baseSmokeSpread         | 0.02          | 0.08          | 烟扩散太慢,配合分层抑制               |
+    | smokeDriftMaxSpeed      | 0.3 m/s       | 1.2           | 真实羽流速度 1-3 m/s                   |
+    | smokeDriftCoeff         | 0.08          | 0.25          | 加强浮力对流                           |
+    | exhaustRate             | 0.15          | 0.3           | 配合 EXIT 范围加大                     |
+    | radiationFraction       | 0.38          | 0.3           | FDS 默认 0.3                           |
+    | coolingRate             | 0.02          | 0.01          | 减慢无火源时的冷却                     |
+    | h_conv                  | 15.0          | 25.0          | 增强火源对流换热                       |
+    | burnRatePerArea         | 0.010         | 0.02          | 加快可燃物燃烧                         |
+    | maxSourceRadius         | 3             | 5             | 大空间火灾火焰半径更大                 |
+    | radiationRadius         | 6.0 m         | 8.0           | 辐射半径加大                           |
+    +-------------------------+---------------+---------------+----------------------------------------+
+
+
+3.2 启用已定义的参数
+    +-------------------------+------------------------------------------+
+    | 参数                    | 操作                                     |
+    +-------------------------+------------------------------------------+
+    | ceilingHeight           | 在顶棚射流模块中使用                     |
+    | ceilingJetRadius        | 顶棚射流影响半径                         |
+    | ceilingJetStrength      | 顶棚射流强度                             |
+    | Cd                      | 开口流动计算使用                         |
+    | fuelRadiationRadius     | 可燃物辐射范围                           |
+    | smokeAbsorptionCoeff    | 烟气辐射吸收系数                         |
+    +-------------------------+------------------------------------------+
+
+--------------------------------------------------------------------------------
+四、实施路线图
+--------------------------------------------------------------------------------
+
+第一阶段:快速见效(参数调优)
+    [ ] 修改 FireEscape.java 中的 11 个参数
+    [ ] 重启服务器验证效果
+    [ ] 预计时间: 30 分钟
+
+第二阶段:核心视觉优化
+    [ ] 优化项 1: 修复烟气漂移方向
+    [ ] 优化项 2: 对流换热用 nextT
+    [ ] 优化项 10: 添加顶棚射流
+    [ ] 优化项 11: 添加羽流卷吸
+    [ ] 预计时间: 2 小时
+
+第三阶段:物理精度优化
+    [ ] 优化项 3: 增加 x/y 水平漂移
+    [ ] 优化项 4: Laplacian 动态权重
+    [ ] 优化项 12: 添加开口流动
+    [ ] 优化项 13: 添加烟气分层
+    [ ] 预计时间: 3 小时
+
+第四阶段:数值与性能
+    [ ] 优化项 5: Stefan-Boltzmann 辐射
+    [ ] 优化项 8: CFL 时间步限制
+    [ ] 优化项 9: 魔法数字常量化
+    [ ] 优化项 6: 临时数组复用
+    [ ] 优化项 7: Math.pow/exp 优化
+    [ ] 优化项 14: 高温烟气辐射
+    [ ] 预计时间: 3 小时
+
+--------------------------------------------------------------------------------
+五、代码修改要点
+--------------------------------------------------------------------------------
+
+5.1 文件清单
+    +-------------------+----------------------------------------------+
+    | 文件              | 修改内容                                     |
+    +-------------------+----------------------------------------------+
+    | FireSpread.java   | 核心算法优化(优化项 1-9, 10-14)             |
+    | FireEscape.java   | 参数调优(11 个参数值)                       |
+    +-------------------+----------------------------------------------+
+
+
+5.2 注意事项
+    1. 不改变算法架构:
+       所有优化在现有 step() 流程内添加,不改变 (1)~(10) 的执行顺序
+
+    2. 参数全部提取:
+       新增的可调参数全部在 FireEscape.java 中定义,便于后续调参
+
+    3. 异常保护:
+       所有新增计算都加 NaN/Infinite 检查,防止数值发散
+
+    4. 性能优先:
+       缓存数组、避免重复计算、减少分支
+
+--------------------------------------------------------------------------------
+六、参考资料
+--------------------------------------------------------------------------------
+
+1. FDS Source Code - NIST 开源火灾场模拟软件
+   https://github.com/firemodels/fds
+
+2. FDS User Guide - 官方用户手册
+   https://pages.nist.gov/fds/downloads.html
+
+3. Zukoski, E.E. (1981). Fire behavior in buildings, NBS Special Publication 680
+
+4. Alpert, R.L. (1972). Ceiling jet-induced wall heat flux in compartment fires,
+   NBS-TN-724
+
+5. McCaffrey, B.J. (1979). Purely Buoyant Diffusion Flames:
+   Some Preliminary Results, NBSIR 79-1910
+
+6. Quintiere, J.G. (2017). Fundamentals of Fire Behavior,
+   2nd ed., Delft University Press
+
+================================================================================
+                              文档结束
+================================================================================
